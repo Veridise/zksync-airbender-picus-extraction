@@ -62,13 +62,13 @@ pub fn set_field_modulus(p: u64) -> Result<(), u64> {
 
 /// Get PCL field modulus
 pub fn current_modulus() -> Option<u64> {
-    FIELD_MODULUS.get().map(|a| **a)
+    Some(Felt::CHARACTERISTICS)
 }
 
 /// Given an integer reduce it into the field
 pub fn reduce_mod(c: i64) -> u64 {
     if let Some(p) = current_modulus() {
-        (c % (p as i64)) as u64
+        (c.rem_euclid(p as i64)) as u64
     } else {
         c as u64
     }
@@ -151,7 +151,7 @@ impl Add<Felt> for PicusAtom {
 
     fn add(self, rhs: Felt) -> Self::Output {
         match self {
-            PicusAtom::Const(c) => PicusExpr::Const(c + (rhs.0 as u64)),
+            PicusAtom::Const(c) => PicusExpr::Const((c + (rhs.0 as u64)).rem_euclid(Felt::CHARACTERISTICS)),
             PicusAtom::Var(v) => PicusExpr::Var(v) + PicusExpr::Const(rhs.as_u64()),
         }
     }
