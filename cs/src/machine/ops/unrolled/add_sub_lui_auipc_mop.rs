@@ -463,7 +463,28 @@ pub fn add_sub_lui_auipc_mop_circuit_with_preprocessed_bytecode<F: PrimeField, C
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::utils::serialize_to_file;
+    use crate::{cs::cs_reference::BasicAssembly, utils::serialize_to_file};
+
+    #[test]
+    fn compile_circuit_output() {
+        use ::field::Mersenne31Field;
+
+        let mut cs = BasicAssembly::<Mersenne31Field>::new();
+        add_sub_lui_auipc_mop_table_addition_fn(&mut cs);
+        add_sub_lui_auipc_mop_circuit_with_preprocessed_bytecode(&mut cs);
+        let (circuit_output, _) = cs.finalize();
+        for constraint in &circuit_output.constraints {
+            println!("CONSTRAINT: {:?}", constraint.0);
+            for term in &constraint.0.terms {
+                println!("TERM: {term}");
+            }
+        }
+        println!("CIRCUIT LOOKUPS: {:?}", circuit_output.lookups);
+        println!(
+            "CIRCUIT INVARIANTS: {:?}",
+            circuit_output.range_check_expressions
+        );
+    }
 
     #[test]
     fn compile_add_sub_lui_auipc_mop_circuit() {
