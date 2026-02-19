@@ -491,6 +491,7 @@ pub(crate) fn set_rd_with_mask_as_shuffle_ram<F: PrimeField, C: Circuit<F>>(
     let read_value =
         Register::new_unchecked_from_placeholder(cs, Placeholder::WriteRdReadSetWitness);
     let masked_write_value = write_value.mask(cs, reg_is_x0.toggle());
+    println!("MASKED WRITE VALUE: {masked_write_value:?}");
     let query = form_mem_op_for_register_only(
         local_timestamp_in_cycle,
         reg_encoding,

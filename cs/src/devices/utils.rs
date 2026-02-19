@@ -22,7 +22,7 @@ pub(crate) fn enforce_add_sub_relation<F: PrimeField, CS: Circuit<F>>(
 
     for (((a, b), c), flag) in a_s.iter().zip(b_s.iter()).zip(c_s.iter()).zip(flags.iter()) {
         let Boolean::Is(flag) = *flag else { todo!() };
-
+        println!("FLAG: {flag:?}");
         let a_low = a.0[0];
         let a_high = a.0[1];
         let b_low = b.0[0];
@@ -32,8 +32,8 @@ pub(crate) fn enforce_add_sub_relation<F: PrimeField, CS: Circuit<F>>(
 
         constraint_low = constraint_low + (Term::from(flag) * Term::from(a_low));
         constraint_low = constraint_low + (Term::from(flag) * Term::from(b_low));
-        constraint_low = constraint_low - (Term::from(flag) * Term::from(c_low));
 
+        constraint_low = constraint_low - (Term::from(flag) * Term::from(c_low));
         constraint_high = constraint_high + (Term::from(flag) * Term::from(a_high));
         constraint_high = constraint_high + (Term::from(flag) * Term::from(b_high));
         constraint_high = constraint_high - (Term::from(flag) * Term::from(c_high));
