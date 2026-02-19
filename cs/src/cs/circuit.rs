@@ -140,6 +140,7 @@ pub enum LookupQueryTableType {
     Constant(TableType),
 }
 
+#[derive(Clone, Copy, Debug)]
 pub struct LinkedVariablesPair {
     pub initial_var: Variable,
     pub final_var: Variable,
@@ -277,6 +278,7 @@ pub struct RegisterAndIndirectAccesses {
     pub indirect_accesses: Vec<IndirectAccessType>,
 }
 
+#[derive(Debug, Clone)]
 pub struct CircuitOutput<F: PrimeField> {
     pub state_input: Vec<Variable>,
     pub state_output: Vec<Variable>,
