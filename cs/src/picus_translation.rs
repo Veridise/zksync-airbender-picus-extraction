@@ -84,7 +84,28 @@ pub fn circuit_output_to_picus_program<F: PrimeField>(
         .map(|(constraint, _prevent_optimization)| constraint_to_picus_constraint(constraint))
         .collect();
     module.constraints.extend_from_slice(&parsed_constraints);
-    // TODO: map lookups, range checks, and other invariants into Picus constraints.
+    
+    for range_check_query in &circuit_output.range_check_expressions {
+        let lookup_val = match &range_check_query.input {
+            crate::definitions::LookupInput::Variable(variable) => variable_to_picus_expr(*variable),
+            crate::definitions::LookupInput::Expression {
+                linear_terms,
+                constant_coeff,
+            } => linear_terms.iter().fold(
+                PicusExpr::Const(constant_coeff.as_u64_reduced()),
+                |acc, (coeff, variable)| {
+                    acc + (PicusExpr::Const(coeff.as_u64_reduced()) * variable_to_picus_expr(*variable))
+                },
+            ),
+        };
+        let bound = 1u64
+            .checked_shl(range_check_query.width as u32)
+            .expect("range check width must be less than 64");
+        module.constraints.push(PicusConstraint::Lt(
+            Box::new(lookup_val),
+            Box::new(PicusExpr::Const(bound)),
+        ));
+    }
 
     let mut modules = BTreeMap::new();
     modules.insert(module_name, module);
