@@ -10,3 +10,5 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+llzk = { git = "https://github.com/project-llzk/llzk-rs", package = "llzk" }
+anyhow = "1"
