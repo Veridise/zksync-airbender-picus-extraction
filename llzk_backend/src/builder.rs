@@ -8,7 +8,8 @@
 use std::ops::Deref;
 
 use anyhow::{anyhow, Result};
-use llzk::prelude::*;
+use llzk::{dialect::{constrain, felt}, prelude::*};
+use prover::cs::definitions::REGISTER_SIZE;
 
 /// Generic builder with convenience factory methods.
 pub struct Builder<'ctx> {
@@ -26,9 +27,41 @@ impl<'ctx> Builder<'ctx> {
         self.context
     }
 
+    /// Returns the unknown location.
+    pub fn unknown_location(&self) -> Location<'ctx> {
+        Location::unknown(self.context)
+    }
+
     /// Creates a `!felt.type`.
     pub fn felt_type(&self) -> Type<'ctx> {
         FeltType::new(self.context).into()
+    }
+
+    /// Write LLZK IR to the given file.
+    pub fn write(&self, filepath: &str) -> Result<()> {
+        todo!()
+    }
+
+    /// Get the index type
+    #[inline]
+    pub fn index_type(&self) -> Type<'ctx> {
+        Type::index(&self.context)
+    }
+
+    /// Get a constant index-type integer attribute
+    #[inline]
+    pub fn index_attr(&self, integer: i64) -> Attribute<'ctx> {
+        IntegerAttribute::new(self.index_type(), integer).into()
+    }
+
+    /// Create a constant felt attribute.
+    pub fn felt_attr(&self, value: u64) -> FeltConstAttribute<'ctx> {
+        FeltConstAttribute::new(self.context, value)
+    }
+
+    /// Get a register type, which is a two-element felt array.
+    pub fn register_type(&self) -> Type<'ctx> {
+        ArrayType::new(self.felt_type(), &[self.index_attr(i64::try_from(REGISTER_SIZE).expect("REGISTER_SIZE is unexpectedly large"))]).into()
     }
 }
 
@@ -50,7 +83,7 @@ pub struct OpsBuilder<'ctx, 'sco> {
 
 impl<'ctx, 'sco> OpsBuilder<'ctx, 'sco> {
     /// Creates a new builder.
-    pub(crate) fn new(scope: FuncDefOpRef<'ctx, 'sco>) -> Self {
+    pub fn new(scope: FuncDefOpRef<'ctx, 'sco>) -> Self {
         let context = unsafe { scope.context().to_ref() };
         Self {
             scope,
@@ -210,6 +243,32 @@ impl<'ctx, 'sco> OpsBuilder<'ctx, 'sco> {
             None => blk.append_operation(operation),
         })
     }
+
+    /// Append a boolean constraint for the given value.
+    pub fn append_boolean_constraint(
+        &self,
+        val: Value<'ctx, 'sco>
+    ) -> Result<()> {
+        assert_eq!(val.r#type(), self.builder.felt_type());
+        let unk = self.builder.unknown_location();
+        let zero = self.append_op_with_result(felt::constant(unk, self.builder.felt_attr(0))?)?;
+        let one = self.append_op_with_result(felt::constant(unk, self.builder.felt_attr(1))?)?;
+        let minus_one = self.append_op_with_result(felt::sub(unk, val, one)?)?;
+        let product = self.append_op_with_result(felt::mul(unk, val, minus_one)?)?;
+        self.append_op_with_no_results(constrain::eq(unk, product, zero))?;
+        Ok(())
+    }
+
+    /// Append operations required to get the specific arg value (and reads from)
+    /// the array if the argument is an array
+    /// TODO: might be better to do the read separately
+    pub fn append_arg_access(
+        &self,
+        arg_no: usize,
+        index: Option<i64>
+    ) -> Result<Value<'ctx, 'sco>> {
+        todo!();
+    }
 }
 
 impl<'ctx> Deref for OpsBuilder<'ctx, '_> {
@@ -238,7 +297,7 @@ pub struct StructBuilder<'ctx, 'str> {
     /// Inputs of the struct (excluding self in @constrain).
     inputs: Vec<Type<'ctx>>,
     /// List of members. Contains the name, type and wether is marked public or not.
-    members: Vec<(&'str str, Type<'ctx>, bool)>,
+    members: Vec<(String, Type<'ctx>, bool)>,
 }
 
 impl<'ctx, 'str> StructBuilder<'ctx, 'str> {
@@ -268,7 +327,7 @@ impl<'ctx, 'str> StructBuilder<'ctx, 'str> {
     /// Adds a member to the struct.
     pub fn with_member(
         &mut self,
-        name: &'str str,
+        name: String,
         r#type: Type<'ctx>,
         is_public: bool,
     ) -> &mut Self {
