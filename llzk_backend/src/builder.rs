@@ -5,10 +5,10 @@
 //! - An operations builder meant for creating ops inside a function.
 //! - A struct builder.
 
-use std::ops::Deref;
+use std::{cell::RefCell, collections::{BTreeMap, HashMap}, iter::Map, ops::Deref};
 
 use anyhow::{anyhow, Result};
-use llzk::{dialect::{constrain, felt}, prelude::*};
+use llzk::{builder::OpBuilder, dialect::{bool, constrain, felt}, prelude::{dialect::{array, r#struct}, melior_dialects::arith, *}, utils::IsA};
 use prover::cs::definitions::REGISTER_SIZE;
 
 /// Generic builder with convenience factory methods.
@@ -37,21 +37,21 @@ impl<'ctx> Builder<'ctx> {
         FeltType::new(self.context).into()
     }
 
-    /// Write LLZK IR to the given file.
-    pub fn write(&self, filepath: &str) -> Result<()> {
-        todo!()
-    }
-
     /// Get the index type
     #[inline]
     pub fn index_type(&self) -> Type<'ctx> {
-        Type::index(&self.context)
+        Type::index(self.context)
+    }
+
+    /// Get an integer type
+    pub fn int_type(&self, bits: u32) -> Type<'ctx> {
+        IntegerType::new(self.context, bits).into()
     }
 
     /// Get a constant index-type integer attribute
     #[inline]
     pub fn index_attr(&self, integer: i64) -> Attribute<'ctx> {
-        IntegerAttribute::new(self.index_type(), integer).into()
+        self.int_attr(self.index_type(), integer)
     }
 
     /// Create a constant felt attribute.
@@ -59,7 +59,14 @@ impl<'ctx> Builder<'ctx> {
         FeltConstAttribute::new(self.context, value)
     }
 
+    /// Create a constant int attribute of the given int type.
+    #[inline]
+    pub fn int_attr(&self, r#type: Type<'ctx>, integer: i64) -> Attribute<'ctx> {
+        IntegerAttribute::new(r#type, integer).into()
+    }
+
     /// Get a register type, which is a two-element felt array.
+    /// TODO: This is probably too representation dependent, move elsewhere.
     pub fn register_type(&self) -> Type<'ctx> {
         ArrayType::new(self.felt_type(), &[self.index_attr(i64::try_from(REGISTER_SIZE).expect("REGISTER_SIZE is unexpectedly large"))]).into()
     }
@@ -75,19 +82,38 @@ enum InsertionPoint {
     At(usize),
 }
 
+/// Key type for caching const op values
+#[derive(Debug, Eq, PartialEq)]
+pub struct ConstOpKey<'ctx>(Type<'ctx>, u64);
+
+impl<'ctx> Ord for ConstOpKey<'ctx> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.1.cmp(&other.1).then_with(|| self.0.to_string().cmp(&other.0.to_string()))
+    }
+}
+
+impl<'ctx> PartialOrd for ConstOpKey<'ctx> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 /// Operations builder that handles insertion of operations in the target function.
 pub struct OpsBuilder<'ctx, 'sco> {
     builder: Builder<'ctx>,
     scope: FuncDefOpRef<'ctx, 'sco>,
+    /// Cache of constant op values of specified type at the beginning of the
+    /// function scope. Using a BTreeMap since [Type] is not hashable.
+    const_vals: RefCell<BTreeMap<ConstOpKey<'ctx>, Value<'ctx, 'sco>>>,
 }
 
 impl<'ctx, 'sco> OpsBuilder<'ctx, 'sco> {
     /// Creates a new builder.
-    pub fn new(scope: FuncDefOpRef<'ctx, 'sco>) -> Self {
-        let context = unsafe { scope.context().to_ref() };
+    pub fn new(context: &'ctx Context, scope: FuncDefOpRef<'ctx, 'sco>) -> Self {
         Self {
             scope,
             builder: Builder::new(context),
+            const_vals: BTreeMap::new().into()
         }
     }
 
@@ -249,25 +275,95 @@ impl<'ctx, 'sco> OpsBuilder<'ctx, 'sco> {
         &self,
         val: Value<'ctx, 'sco>
     ) -> Result<()> {
-        assert_eq!(val.r#type(), self.builder.felt_type());
-        let unk = self.builder.unknown_location();
-        let zero = self.append_op_with_result(felt::constant(unk, self.builder.felt_attr(0))?)?;
-        let one = self.append_op_with_result(felt::constant(unk, self.builder.felt_attr(1))?)?;
+        assert_eq!(val.r#type(), self.felt_type());
+        let unk = self.unknown_location();
+        let zero = self.get_constant_from_start(self.felt_type(), 0)?;
+        let one = self.get_constant_from_start(self.felt_type(), 1)?;
         let minus_one = self.append_op_with_result(felt::sub(unk, val, one)?)?;
         let product = self.append_op_with_result(felt::mul(unk, val, minus_one)?)?;
-        self.append_op_with_no_results(constrain::eq(unk, product, zero))?;
-        Ok(())
+        self.append_op_with_no_results(constrain::eq(unk, product, zero))
     }
 
-    /// Append operations required to get the specific arg value (and reads from)
-    /// the array if the argument is an array
-    /// TODO: might be better to do the read separately
-    pub fn append_arg_access(
+    /// Append a range constraint for the given value.
+    /// Enforces that `val` must be within `width`.
+    pub fn append_range_constraint(
+        &self,
+        val: Value<'ctx, 'sco>,
+        width: usize
+    ) -> Result<()> {
+        assert_eq!(val.r#type(), self.felt_type());
+        let unk = self.unknown_location();
+        let bound = self.get_constant_from_start(self.felt_type(), 1 << width)?;
+        let bound_check = self.append_op_with_result(bool::lt(unk, val, bound)?)?;
+        let truth = self.get_constant_from_start(self.int_type(1), 1)?;
+        self.append_op_with_no_results(constrain::eq(unk, bound_check, truth))
+    }
+
+    /// Get the value from the contained function scope.
+    pub fn get_arg_value(
         &self,
         arg_no: usize,
-        index: Option<i64>
     ) -> Result<Value<'ctx, 'sco>> {
-        todo!();
+        Ok(self.scope.argument(arg_no)?.into())
+    }
+
+    /// Append a struct member read operation in the current function scope.
+    pub fn append_member_read(
+        &self,
+        location: Location<'ctx>,
+        component: Value<'ctx, 'sco>,
+        result_type: Type<'ctx>,
+        member_name: &str,
+    ) -> Result<Value<'ctx, 'sco>> {
+        let op = r#struct::readm(&OpBuilder::new(self.context), location, result_type, component, member_name)?;
+        self.append_op_with_result(op)
+    }
+
+    /// Append an array read operation and return the read value.
+    pub fn append_array_read(
+        &self,
+        location: Location<'ctx>,
+        arr_ref: Value<'ctx, 'sco>,
+        indices: &[Value<'ctx, 'sco>],
+    ) -> Result<Value<'ctx, 'sco>> {
+        let arr_ty = ArrayType::try_from(arr_ref.r#type())?;
+        self.append_op_with_result(array::read(location, arr_ty.element_type(), arr_ref, indices))
+    }
+
+    /// Lookup a previously generated constant in the function scope or
+    /// create one if needed. Then return the SSA value.
+    pub fn get_constant_from_start(
+        &self,
+        r#type: Type<'ctx>,
+        i: u64
+    ) -> Result<Value<'ctx, 'sco>> {
+        let key = ConstOpKey(r#type, i);
+        let mut const_val_cache = self.const_vals.borrow_mut();
+        match const_val_cache.get(&key) {
+            Some(v) => Ok(*v),
+            None => {
+                let const_op = if r#type == self.index_type() || r#type.isa::<IntegerType>() {
+                    arith::constant(self.context, self.int_attr(r#type, i64::try_from(i)?), self.unknown_location())
+                } else if r#type == self.felt_type() {
+                    felt::constant(self.unknown_location(), self.felt_attr(i))?
+                } else {
+                    anyhow::bail!("unsupported type {}", r#type)
+                };
+                let v = self.insert_op_with_result_at_start(const_op)?;
+                anyhow::ensure!(const_val_cache.insert(key, v).is_none(), "replaced existing index const value in function preamble");
+                Ok(v)
+            }
+        }
+    }
+
+    // Perform the index constant insertion without producing a return value.
+    pub fn insert_constant_at_start(
+        &self,
+        r#type: Type<'ctx>,
+        i: u64
+    ) -> Result<()> {
+        let _ = self.get_constant_from_start(r#type, i)?;
+        Ok(())
     }
 }
 
@@ -335,6 +431,7 @@ impl<'ctx, 'str> StructBuilder<'ctx, 'str> {
         self
     }
 
+    /// Create the struct type for this struct builder.
     fn struct_type(&self) -> StructType<'ctx> {
         StructType::from_str(self.context, self.name)
     }
