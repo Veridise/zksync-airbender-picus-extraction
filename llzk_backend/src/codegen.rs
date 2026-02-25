@@ -221,34 +221,33 @@ impl<F: PrimeField> GenerateLlzk for CircuitOutput<F> {
         // Add outputs to struct
         // Maps CircuitOutput variable to (field name, index)
         let mut field_map: HashMap<Variable, (String, Option<u64>)> = HashMap::new();
-        for (output_num, output) in self.get_outputs()?.iter().enumerate() {
+        for output in self.get_outputs()?.iter() {
             // TODO: better naming scheme
             match &output {
                 ExtractedVariable::Register { low, high } => {
-                    let name = format!("out_reg_{output_num}");
+                    let name = format!("out_reg_{}_{}", low.0, high.0);
                     field_map.insert(*low, (name.clone(), Some(0)));
                     field_map.insert(*high, (name.clone(), Some(1)));
                     struct_builder.with_member(name, llzk_builder.register_type(), true);
                 },
                 ExtractedVariable::Scalar(variable) => {
-                    let name = format!("out_var_{output_num}");
+                    let name = format!("out_var_{}", variable.0);
                     field_map.insert(*variable, (name.clone(), None));
                     struct_builder.with_member(name, llzk_builder.felt_type(), true);
                 }
             }
         }
         // Add intermediates to struct
-        for (output_num, output) in self.get_intermediates()?.iter().enumerate() {
-            // TODO: better naming scheme
+        for output in self.get_intermediates()?.iter() {
             match &output {
                 ExtractedVariable::Register { low, high } => {
-                    let name = format!("internal_reg_{output_num}");
+                    let name = format!("internal_reg_{}_{}", low.0, high.0);
                     field_map.insert(*low, (name.clone(), Some(0)));
                     field_map.insert(*high, (name.clone(), Some(1)));
                     struct_builder.with_member(name, llzk_builder.register_type(), false);
                 },
                 ExtractedVariable::Scalar(variable) => {
-                    let name = format!("internal_var_{output_num}");
+                    let name = format!("internal_var_{}", variable.0);
                     field_map.insert(*variable, (name.clone(), None));
                     struct_builder.with_member(name, llzk_builder.felt_type(), false);
                 }
