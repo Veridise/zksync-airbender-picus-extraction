@@ -92,4 +92,5 @@ fn main() -> Result<()> {
             // pm.run(&mut module).expect("failed to convert to PCL");
         }
     }
+    Ok(())
 }

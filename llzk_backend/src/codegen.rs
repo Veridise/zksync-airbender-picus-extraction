@@ -223,7 +223,7 @@ impl<F: PrimeField> GenerateLlzk for CircuitOutput<F> {
         let mut field_map: HashMap<Variable, (String, Option<u64>)> = HashMap::new();
         for (output_num, output) in self.get_outputs()?.iter().enumerate() {
             // TODO: better naming scheme
-            match output {
+            match &output {
                 ExtractedVariable::Register { low, high } => {
                     let name = format!("out_reg_{output_num}");
                     field_map.insert(*low, (name.clone(), Some(0)));
@@ -240,7 +240,7 @@ impl<F: PrimeField> GenerateLlzk for CircuitOutput<F> {
         // Add intermediates to struct
         for (output_num, output) in self.get_intermediates()?.iter().enumerate() {
             // TODO: better naming scheme
-            match output {
+            match &output {
                 ExtractedVariable::Register { low, high } => {
                     let name = format!("internal_reg_{output_num}");
                     field_map.insert(*low, (name.clone(), Some(0)));
@@ -300,7 +300,7 @@ impl<F: PrimeField> GenerateLlzk for CircuitOutput<F> {
             }
         }
 
-        (*struct_op).add_constraints(|builder| -> Result<()> {
+        (*struct_op).add_constraints(|builder: &mut OpsBuilder<'_, '_>| -> Result<()> {
             let get_val = |builder, var| {
                 if let Some(val) = get_input_val(&arg_map, builder, var)? {
                     Ok(val)

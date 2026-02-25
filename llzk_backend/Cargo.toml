@@ -17,3 +17,4 @@ llzk = { git = "https://github.com/project-llzk/llzk-rs", package = "llzk" }
 
 env_logger = "0.11"
 base64 = "0.21.7"
+anyhow = "1.0.102"
