@@ -370,8 +370,7 @@ impl<F: PrimeField> GenerateLlzk for CircuitOutput<F> {
                                     builder.append_op_with_result(mul)?
                                 }
                             } else if coeff_opp == 1 {
-                                let coeff_val = builder.get_constant_from_start(builder.felt_type(), coeff)?;
-                                builder.append_op_with_result(felt::neg(builder.unknown_location(), coeff_val)?)?
+                                builder.append_op_with_result(felt::neg(builder.unknown_location(), monomial)?)?
                             } else {
                                 let coeff_opp_val = builder.get_constant_from_start(builder.felt_type(), coeff_opp)?;
                                 let mul = builder.append_op_with_result(felt::mul(builder.unknown_location(), coeff_opp_val, monomial)?)?;
