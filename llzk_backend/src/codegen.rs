@@ -184,18 +184,6 @@ pub trait GenerateLlzk {
     fn generate_in_module<'ctx>(&self, context: &'ctx Context, module: &Module<'ctx>) -> Result<()>;
 }
 
-// /// A wrapper for the circuit output that allows us to cache extracted information.
-// pub struct CircuitOutputWrapper<F: PrimeField> {
-//     circuit_output: &CircuitOutput<F>
-
-// }
-
-// impl<F: PrimeField> CircuitOutputWrapper {
-//     pub fn new(circuit_output: &CircuitOutput<F>) -> Self {
-
-//     }
-// }
-
 impl<F: PrimeField> GenerateLlzk for CircuitOutput<F> {
     // TODO: break down the monolith
     fn generate_in_module<'ctx>(&self, ctx: &'ctx Context, module: &Module<'ctx>) -> Result<()> {
