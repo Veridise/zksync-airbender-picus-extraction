@@ -9,12 +9,12 @@
 # Update this file:
 #   pre-commit autoupdate
 
-# Excluding submodules, some raw test files, and some build-system related files
-exclude: 'release_helpers|test/driver/config-file/Inputs/.*\.json|.*/?package-lock\.json|test/sarif/.*sarif.*\.json'
+# Only run on the llzk_backend directory for now to avoid upstream conflicts
+files: '^llzk_backend/'
 # Default hooks for fixing files
 repos:
 - repo: https://github.com/pre-commit/pre-commit-hooks
-  rev: v5.0.0
+  rev: v6.0.0
   hooks:
   - id: check-case-conflict
   - id: mixed-line-ending
@@ -23,7 +23,6 @@ repos:
 
 # Run cargo fmt
 -   repo: https://github.com/doublify/pre-commit-rust
-    rev: master
+    rev: v1.0
     hooks:
     -   id: fmt
-        args: ['--package', 'llzk_backend']
