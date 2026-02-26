@@ -48,6 +48,9 @@ impl<'ctx> Builder<'ctx> {
 
     /// Creates a `!felt.type`.
     pub fn felt_type(&self) -> Type<'ctx> {
+        // TODO: eventually we will want to use whatever field the circuit output
+        // is parameterized on, but that will also require possibly injecting a field
+        // spec at the module level for unsupported fields.
         FeltType::with_field(self.context, "mersenne31").into()
     }
 
