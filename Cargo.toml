@@ -13,7 +13,7 @@ members = [
     "transcript",
     "non_determinism_source",
     "risc_v_simulator",
-
+    
     "verifier_common",
     "verifier_generator",
     "witness_eval_generator",
@@ -61,7 +61,7 @@ members = [
     "circuit_defs/unrolled_circuits/shift_binary_csr",
     "circuit_defs/unrolled_circuits/unified_reduced_machine",
 
-    "riscv_transpiler",
+    "riscv_transpiler", "llzk_backend",
 ]
 
 default-members = [
@@ -121,6 +121,7 @@ keywords = ["blockchain", "zksync", "zk", "risc-v"]
 categories = ["cryptography"]
 
 [workspace.dependencies]
+picus = {path = "./picus"}
 field = { path = "./field", default-features = false }
 blake2s_u32 = { path = "./blake2s_u32", default-features = false }
 common_constants = { path = "./common_constants" }

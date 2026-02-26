@@ -13,10 +13,10 @@ pub fn add_sub_lui_auipc_mop_table_driver_fn<F: PrimeField>(table_driver: &mut T
     let _ = table_driver;
 }
 
-fn apply_add_sub_lui_auipc_mop<F: PrimeField, CS: Circuit<F>>(
+pub fn apply_add_sub_lui_auipc_mop<F: PrimeField, CS: Circuit<F>>(
     cs: &mut CS,
     inputs: OpcodeFamilyCircuitState<F>,
-) {
+) -> [Variable; crate::definitions::ADD_SUB_LUI_AUIPC_MOP_FAMILY_NUM_FLAGS] {
     let mut opt_ctx = OptimizationContext::new();
     let decoder = <AddSubLuiAuipcMopDecoder as OpcodeFamilyDecoder>::BitmaskCircuitParser::parse(
         cs,
@@ -82,6 +82,16 @@ fn apply_add_sub_lui_auipc_mop<F: PrimeField, CS: Circuit<F>>(
     let is_addmod = decoder.perform_addmod();
     let is_submod = decoder.perform_submod();
     let is_mulmod = decoder.perform_mulmod();
+    let decoded_mask_bits = [
+        is_add.get_variable().unwrap(),
+        is_addi.get_variable().unwrap(),
+        is_sub.get_variable().unwrap(),
+        is_lui.get_variable().unwrap(),
+        is_auipc.get_variable().unwrap(),
+        is_addmod.get_variable().unwrap(),
+        is_submod.get_variable().unwrap(),
+        is_mulmod.get_variable().unwrap(),
+    ];
 
     if is_add.get_value(cs).unwrap_or(false) {
         println!("ADD");
@@ -107,7 +117,7 @@ fn apply_add_sub_lui_auipc_mop<F: PrimeField, CS: Circuit<F>>(
     if is_mulmod.get_value(cs).unwrap_or(false) {
         println!("MOP_MUL");
     }
-
+    println!("INDEXERS: {indexers:?}");
     // ADD
     let of_var = {
         opt_ctx.restore_indexers(indexers);
@@ -185,13 +195,15 @@ fn apply_add_sub_lui_auipc_mop<F: PrimeField, CS: Circuit<F>>(
     // ADDMOD
     {
         opt_ctx.restore_indexers(indexers);
-        cs.add_constraint(
-            Constraint::from(is_addmod)
+        let cons = Constraint::from(is_addmod)
                 * ((Constraint::from(out_low) + shift * Term::from(out_high))
                     - (Constraint::from(rs1_reg_low)
                         + shift * Term::from(rs1_reg_high)
                         + Term::from(rs2_reg_low)
-                        + shift * Term::from(rs2_reg_high))),
+                        + shift * Term::from(rs2_reg_high)));
+        println!("ADD MOD CONS: {cons:?}");
+        cs.add_constraint(
+            cons
         );
         // of + out - modulus = tmp, and OF must be true
         let relation = AddSubRelation {
@@ -449,21 +461,41 @@ fn apply_add_sub_lui_auipc_mop<F: PrimeField, CS: Circuit<F>>(
         Register(inputs.cycle_start_state.pc.map(|x| Num::Var(x))),
         Register(inputs.cycle_end_state.pc.map(|x| Num::Var(x))),
     );
-
+    
     opt_ctx.enforce_all(cs);
+    decoded_mask_bits
+}
+
+pub fn add_sub_lui_auipc_mop_circuit_with_preprocessed_bytecode_and_decoded_bits<
+    F: PrimeField,
+    CS: Circuit<F>,
+>(
+    cs: &mut CS,
+) -> (OpcodeFamilyCircuitState<F>, [Variable; crate::definitions::ADD_SUB_LUI_AUIPC_MOP_FAMILY_NUM_FLAGS]) {
+    let input: OpcodeFamilyCircuitState<F> = cs.allocate_execution_circuit_state::<true>();
+    (input, apply_add_sub_lui_auipc_mop(cs, input.clone()))
 }
 
 pub fn add_sub_lui_auipc_mop_circuit_with_preprocessed_bytecode<F: PrimeField, CS: Circuit<F>>(
     cs: &mut CS,
 ) {
-    let input = cs.allocate_execution_circuit_state::<true>();
-    apply_add_sub_lui_auipc_mop(cs, input);
+    let _ = add_sub_lui_auipc_mop_circuit_with_preprocessed_bytecode_and_decoded_bits(cs);
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::utils::serialize_to_file;
+    use crate::{cs::cs_reference::BasicAssembly, utils::serialize_to_file};
+
+    #[test]
+    fn compile_circuit_output() {
+        use ::field::Mersenne31Field;
+
+        let mut cs = BasicAssembly::<Mersenne31Field>::new();
+        add_sub_lui_auipc_mop_table_addition_fn(&mut cs);
+        add_sub_lui_auipc_mop_circuit_with_preprocessed_bytecode(&mut cs);
+        let (_, _) = cs.finalize();
+    }
 
     #[test]
     fn compile_add_sub_lui_auipc_mop_circuit() {
