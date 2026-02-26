@@ -4,7 +4,9 @@ use anyhow::anyhow;
 use anyhow::Result;
 use llzk::dialect::{constrain, felt};
 use llzk::prelude::*;
+use prover::cs::constraint::Constraint;
 use prover::cs::constraint::Term;
+use prover::cs::cs::circuit::RangeCheckQuery;
 use prover::cs::definitions::LookupInput;
 use prover::cs::definitions::OpcodeFamilyCircuitState;
 use prover::{
@@ -19,6 +21,29 @@ pub enum SsaAddress<'ctx, 'val> {
     /// Represents a single variable that is neither an input or an output.
     /// It's encoded as a struct member of [`FeltType`].
     Intermediate(Value<'ctx, 'val>),
+}
+
+/// Trait implemented by types that can emit LLZK IR.
+trait EmitLLZK<'ctx: 'sco, 'sco> {
+    type Output;
+
+    fn emit_llzk(
+        &self,
+        builder: &OpsBuilder<'ctx, 'sco>,
+        vars: &StructVars,
+    ) -> Result<Self::Output>;
+}
+
+impl<'ctx: 'sco, 'sco, T: EmitLLZK<'ctx, 'sco, Output = ()>> EmitLLZK<'ctx, 'sco> for Vec<T> {
+    type Output = ();
+
+    fn emit_llzk(
+        &self,
+        builder: &OpsBuilder<'ctx, 'sco>,
+        vars: &StructVars,
+    ) -> Result<Self::Output> {
+        self.iter().try_for_each(|t| t.emit_llzk(builder, vars))
+    }
 }
 
 /// Extension trait for [`StructDefOpLike`] that adds a method for filling the `@constrain` function.
@@ -240,91 +265,116 @@ impl<F: PrimeField> GenerateLlzk for CircuitOutput<F> {
                 builder.append_boolean_constraint(val)?;
             }
             // Add range constraints
-            for r in self.range_check_expressions.iter() {
-                match &r.input {
-                    LookupInput::Variable(variable) => {
-                        let val = vars.get_val(builder, variable)?;
-                        builder.append_range_constraint(val, r.width)?;
-                    }
-                    LookupInput::Expression { .. } => todo!("expression range check"),
-                }
-            }
+            self.range_check_expressions.emit_llzk(builder, &vars)?;
             // Add all other constraints
-            for (constraint, _prevent_optimization) in self.constraints.iter() {
-                let zero = builder.get_constant_from_start(builder.felt_type(), 0)?;
-                let sum = constraint
-                    .terms
-                    .iter()
-                    .map(|term| generate_llzk_for_term(term, builder, &vars))
-                    .try_fold(zero, |sum, term_val| {
-                        builder.append_op_with_result(felt::add(
-                            builder.unknown_location(),
-                            sum,
-                            term_val?,
-                        )?)
-                    })?;
-                builder.append_op_with_no_results(constrain::eq(
-                    builder.unknown_location(),
-                    sum,
-                    zero,
-                ))?;
-            }
-            Ok(())
+            self.constraints.emit_llzk(builder, &vars)
         })
     }
 }
 
-fn generate_llzk_for_term<'ctx, 'sco, F: PrimeField>(
-    term: &Term<F>,
-    builder: &OpsBuilder<'ctx, 'sco>,
-    vars: &StructVars,
-) -> Result<Value<'ctx, 'sco>> {
-    match term {
-        Term::Constant(c) => {
-            let coeff = c.as_u64_reduced();
-            let coeff_opp = F::CHARACTERISTICS - coeff;
-            let coeff_val = builder.get_constant_from_start(builder.felt_type(), coeff)?;
-            Ok(if coeff < coeff_opp {
-                coeff_val
-            } else {
-                builder.append_op_with_result(felt::neg(builder.unknown_location(), coeff_val)?)?
-            })
-        }
-        Term::Expression {
-            coeff,
-            inner,
-            degree,
-        } => {
-            let coeff = coeff.as_u64_reduced();
+impl<'ctx: 'sco, 'sco, F: PrimeField> EmitLLZK<'ctx, 'sco> for RangeCheckQuery<F> {
+    type Output = ();
 
-            let coeff_opp = F::CHARACTERISTICS - coeff;
-            let mut monomial = builder.get_constant_from_start(builder.felt_type(), 1)?;
-            for var in inner.iter().take(*degree) {
-                let var_val = vars.get_val(builder, var)?;
-                let mul = felt::mul(builder.unknown_location(), monomial, var_val)?;
-                monomial = builder.append_op_with_result(mul)?;
+    fn emit_llzk(
+        &self,
+        builder: &OpsBuilder<'ctx, 'sco>,
+        vars: &StructVars,
+    ) -> Result<Self::Output> {
+        match &self.input {
+            LookupInput::Variable(variable) => {
+                let val = vars.get_val(builder, variable)?;
+                builder.append_range_constraint(val, self.width)?;
             }
+            LookupInput::Expression { .. } => todo!("expression range check"),
+        }
+        Ok(())
+    }
+}
 
-            Ok(if coeff < coeff_opp {
-                if coeff == 1 {
-                    monomial
-                } else {
-                    let coeff_val = builder.get_constant_from_start(builder.felt_type(), coeff)?;
-                    let mul = felt::mul(builder.unknown_location(), coeff_val, monomial)?;
-                    builder.append_op_with_result(mul)?
-                }
-            } else if coeff_opp == 1 {
-                builder.append_op_with_result(felt::neg(builder.unknown_location(), monomial)?)?
-            } else {
-                let coeff_opp_val =
-                    builder.get_constant_from_start(builder.felt_type(), coeff_opp)?;
-                let mul = builder.append_op_with_result(felt::mul(
+impl<'ctx: 'sco, 'sco, F: PrimeField> EmitLLZK<'ctx, 'sco> for (Constraint<F>, bool) {
+    type Output = ();
+
+    fn emit_llzk(
+        &self,
+        builder: &OpsBuilder<'ctx, 'sco>,
+        vars: &StructVars,
+    ) -> Result<Self::Output> {
+        let (constraint, _prevent_optimization) = self;
+
+        let zero = builder.get_constant_from_start(builder.felt_type(), 0)?;
+        let sum = constraint
+            .terms
+            .iter()
+            .map(|term| term.emit_llzk(builder, vars))
+            .try_fold(zero, |sum, term_val| {
+                builder.append_op_with_result(felt::add(
                     builder.unknown_location(),
-                    coeff_opp_val,
-                    monomial,
-                )?)?;
-                builder.append_op_with_result(felt::neg(builder.unknown_location(), mul)?)?
-            })
+                    sum,
+                    term_val?,
+                )?)
+            })?;
+        builder.append_op_with_no_results(constrain::eq(builder.unknown_location(), sum, zero))
+    }
+}
+
+impl<'ctx: 'sco, 'sco, F: PrimeField> EmitLLZK<'ctx, 'sco> for Term<F> {
+    type Output = Value<'ctx, 'sco>;
+
+    fn emit_llzk(
+        &self,
+        builder: &OpsBuilder<'ctx, 'sco>,
+        vars: &StructVars,
+    ) -> Result<Self::Output> {
+        match self {
+            Term::Constant(c) => {
+                let coeff = c.as_u64_reduced();
+                let coeff_opp = F::CHARACTERISTICS - coeff;
+                let coeff_val = builder.get_constant_from_start(builder.felt_type(), coeff)?;
+                Ok(if coeff < coeff_opp {
+                    coeff_val
+                } else {
+                    builder
+                        .append_op_with_result(felt::neg(builder.unknown_location(), coeff_val)?)?
+                })
+            }
+            Term::Expression {
+                coeff,
+                inner,
+                degree,
+            } => {
+                let coeff = coeff.as_u64_reduced();
+
+                let coeff_opp = F::CHARACTERISTICS - coeff;
+                let mut monomial = builder.get_constant_from_start(builder.felt_type(), 1)?;
+                for var in inner.iter().take(*degree) {
+                    let var_val = vars.get_val(builder, var)?;
+                    let mul = felt::mul(builder.unknown_location(), monomial, var_val)?;
+                    monomial = builder.append_op_with_result(mul)?;
+                }
+
+                Ok(if coeff < coeff_opp {
+                    if coeff == 1 {
+                        monomial
+                    } else {
+                        let coeff_val =
+                            builder.get_constant_from_start(builder.felt_type(), coeff)?;
+                        let mul = felt::mul(builder.unknown_location(), coeff_val, monomial)?;
+                        builder.append_op_with_result(mul)?
+                    }
+                } else if coeff_opp == 1 {
+                    builder
+                        .append_op_with_result(felt::neg(builder.unknown_location(), monomial)?)?
+                } else {
+                    let coeff_opp_val =
+                        builder.get_constant_from_start(builder.felt_type(), coeff_opp)?;
+                    let mul = builder.append_op_with_result(felt::mul(
+                        builder.unknown_location(),
+                        coeff_opp_val,
+                        monomial,
+                    )?)?;
+                    builder.append_op_with_result(felt::neg(builder.unknown_location(), mul)?)?
+                })
+            }
         }
     }
 }
