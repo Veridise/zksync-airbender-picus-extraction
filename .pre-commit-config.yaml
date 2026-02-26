@@ -9,8 +9,8 @@
 # Update this file:
 #   pre-commit autoupdate
 
-# Only run on the llzk_backend directory for now to avoid upstream conflicts
-files: '^llzk_backend/'
+# Only run on the llzk_backend and picus directories for now to avoid upstream conflicts
+files: '^llzk_backend/|^picus/'
 # Default hooks for fixing files
 repos:
 - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -22,7 +22,7 @@ repos:
   - id: end-of-file-fixer
 
 # Run cargo fmt
--   repo: https://github.com/doublify/pre-commit-rust
-    rev: v1.0
-    hooks:
-    -   id: fmt
+- repo: https://github.com/doublify/pre-commit-rust
+  rev: v1.0
+  hooks:
+  - id: fmt
