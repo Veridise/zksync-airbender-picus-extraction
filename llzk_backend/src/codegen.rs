@@ -41,7 +41,7 @@ pub trait AddConstraints<'ctx: 'op, 'op>: StructDefOpLike<'ctx, 'op> {
     }
 }
 
-impl<'ctx: 'op, 'op> AddConstraints<'ctx, 'op> for StructDefOp<'ctx> {}
+impl<'ctx: 'op, 'op, T: StructDefOpMutLike<'ctx, 'op>> AddConstraints<'ctx, 'op> for T {}
 
 /// This enum holds information about extracted variables
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -199,6 +199,10 @@ pub trait GenerateLlzk {
     ) -> Result<()>;
 }
 
+fn num_vars(vars: impl IntoIterator<Item = ExtractedVariable>) -> usize {
+    vars.into_iter().map(|v| v.num_vars()).sum()
+}
+
 impl<F: PrimeField> GenerateLlzk for CircuitOutput<F> {
     // TODO: break down the monolith
     fn generate_in_module<'ctx>(
@@ -213,29 +217,134 @@ impl<F: PrimeField> GenerateLlzk for CircuitOutput<F> {
         // Sanity check: all variables should be an input, output, or intermediate,
         // with the exception of the 2 variables used to encode the RAM write's
         // prior value (i.e., the read_value of one RAM query).
-        let num_input_vars = self
-            .get_inputs()?
-            .iter()
-            .map(|x| x.num_vars())
-            .sum::<usize>();
-        let num_output_vars = self
-            .get_outputs()?
-            .iter()
-            .map(|x| x.num_vars())
-            .sum::<usize>();
-        let num_intermediate_vars = self
-            .get_intermediates()?
-            .iter()
-            .map(|x| x.num_vars())
-            .sum::<usize>();
+        let num_input_vars = num_vars(self.get_inputs()?);
+        let num_output_vars = num_vars(self.get_outputs()?);
+        let num_intermediate_vars = num_vars(self.get_intermediates()?);
         let extracted = num_input_vars + num_output_vars + num_intermediate_vars;
         let expected = self.num_of_variables - 2;
         assert_eq!(extracted, expected);
 
+        let vars = StructVars::new(self, &mut struct_builder, &llzk_builder)?;
+        let struct_op = struct_builder.build_in_module(&module)?;
+
+        struct_op.add_constraints(|builder: &mut OpsBuilder<'_, '_>| -> Result<()> {
+            // Add some constants to reuse at the beginning here.
+            builder.insert_constant_at_start(builder.index_type(), 1)?;
+            builder.insert_constant_at_start(builder.index_type(), 0)?;
+            builder.insert_constant_at_start(builder.felt_type(), 1)?;
+            builder.insert_constant_at_start(builder.felt_type(), 0)?;
+            // Add boolean constraints
+            for bool_var in self.boolean_vars.iter() {
+                let val = vars.get_val(builder, bool_var)?;
+                let _ = builder.felt_type();
+                builder.append_boolean_constraint(val)?;
+            }
+            // Add range constraints
+            for r in self.range_check_expressions.iter() {
+                match &r.input {
+                    LookupInput::Variable(variable) => {
+                        let val = vars.get_val(builder, variable)?;
+                        builder.append_range_constraint(val, r.width)?;
+                    }
+                    LookupInput::Expression { .. } => todo!("expression range check"),
+                }
+            }
+            // Add all other constraints
+            for (constraint, _prevent_optimization) in self.constraints.iter() {
+                let zero = builder.get_constant_from_start(builder.felt_type(), 0)?;
+                let sum = constraint
+                    .terms
+                    .iter()
+                    .map(|term| generate_llzk_for_term(term, builder, &vars))
+                    .try_fold(zero, |sum, term_val| {
+                        builder.append_op_with_result(felt::add(
+                            builder.unknown_location(),
+                            sum,
+                            term_val?,
+                        )?)
+                    })?;
+                builder.append_op_with_no_results(constrain::eq(
+                    builder.unknown_location(),
+                    sum,
+                    zero,
+                ))?;
+            }
+            Ok(())
+        })
+    }
+}
+
+fn generate_llzk_for_term<'ctx, 'sco, F: PrimeField>(
+    term: &Term<F>,
+    builder: &OpsBuilder<'ctx, 'sco>,
+    vars: &StructVars,
+) -> Result<Value<'ctx, 'sco>> {
+    match term {
+        Term::Constant(c) => {
+            let coeff = c.as_u64_reduced();
+            let coeff_opp = F::CHARACTERISTICS - coeff;
+            let coeff_val = builder.get_constant_from_start(builder.felt_type(), coeff)?;
+            Ok(if coeff < coeff_opp {
+                coeff_val
+            } else {
+                builder.append_op_with_result(felt::neg(builder.unknown_location(), coeff_val)?)?
+            })
+        }
+        Term::Expression {
+            coeff,
+            inner,
+            degree,
+        } => {
+            let coeff = coeff.as_u64_reduced();
+
+            let coeff_opp = F::CHARACTERISTICS - coeff;
+            let mut monomial = builder.get_constant_from_start(builder.felt_type(), 1)?;
+            for var in inner.iter().take(*degree) {
+                let var_val = vars.get_val(builder, var)?;
+                let mul = felt::mul(builder.unknown_location(), monomial, var_val)?;
+                monomial = builder.append_op_with_result(mul)?;
+            }
+
+            Ok(if coeff < coeff_opp {
+                if coeff == 1 {
+                    monomial
+                } else {
+                    let coeff_val = builder.get_constant_from_start(builder.felt_type(), coeff)?;
+                    let mul = felt::mul(builder.unknown_location(), coeff_val, monomial)?;
+                    builder.append_op_with_result(mul)?
+                }
+            } else if coeff_opp == 1 {
+                builder.append_op_with_result(felt::neg(builder.unknown_location(), monomial)?)?
+            } else {
+                let coeff_opp_val =
+                    builder.get_constant_from_start(builder.felt_type(), coeff_opp)?;
+                let mul = builder.append_op_with_result(felt::mul(
+                    builder.unknown_location(),
+                    coeff_opp_val,
+                    monomial,
+                )?)?;
+                builder.append_op_with_result(felt::neg(builder.unknown_location(), mul)?)?
+            })
+        }
+    }
+}
+
+/// Holds the information about the variables and their representation in the LLZK struct.
+struct StructVars {
+    field_map: HashMap<Variable, (String, Option<u64>)>,
+    arg_map: HashMap<Variable, (usize, Option<u64>)>,
+}
+
+impl StructVars {
+    fn new<'ctx, F: PrimeField>(
+        co: &CircuitOutput<F>,
+        struct_builder: &mut StructBuilder<'ctx, '_>,
+        llzk_builder: &Builder<'ctx>,
+    ) -> Result<Self> {
         // Add inputs to struct
         // maps Variable to (input argument, optional index if array)
         let mut arg_map: HashMap<Variable, (usize, Option<u64>)> = HashMap::new();
-        for (input_num, input) in self.get_inputs()?.iter().enumerate() {
+        for (input_num, input) in co.get_inputs()?.iter().enumerate() {
             let arg_no = input_num + 1; // because of the self arg
             match input {
                 ExtractedVariable::Register { low, high } => {
@@ -252,7 +361,7 @@ impl<F: PrimeField> GenerateLlzk for CircuitOutput<F> {
         // Add outputs to struct
         // Maps CircuitOutput variable to (field name, index)
         let mut field_map: HashMap<Variable, (String, Option<u64>)> = HashMap::new();
-        for output in self.get_outputs()?.iter() {
+        for output in co.get_outputs()?.iter() {
             // TODO: better naming scheme
             match &output {
                 ExtractedVariable::Register { low, high } => {
@@ -269,7 +378,7 @@ impl<F: PrimeField> GenerateLlzk for CircuitOutput<F> {
             }
         }
         // Add intermediates to struct
-        for output in self.get_intermediates()?.iter() {
+        for output in co.get_intermediates()?.iter() {
             match &output {
                 ExtractedVariable::Register { low, high } => {
                     let name = format!("internal_reg_{}_{}", low.0, high.0);
@@ -285,191 +394,88 @@ impl<F: PrimeField> GenerateLlzk for CircuitOutput<F> {
             }
         }
 
-        let struct_op = struct_builder.build_in_module(&module)?;
+        Ok(Self { field_map, arg_map })
+    }
 
-        fn get_input_val<'ctx, 'sco>(
-            arg_map: &HashMap<Variable, (usize, Option<u64>)>,
-            builder: &OpsBuilder<'ctx, 'sco>,
-            var: &Variable,
-        ) -> Result<Option<Value<'ctx, 'sco>>> {
-            match arg_map.get(var) {
-                None => Ok(None),
-                Some((arg_no, index)) => {
-                    let arg_val = builder.get_arg_value(*arg_no)?;
-                    let val = match index {
-                        None => arg_val,
-                        Some(index) => {
-                            let indices = &[
-                                builder.get_constant_from_start(builder.index_type(), *index)?
-                            ];
-                            builder.append_array_read(
-                                builder.unknown_location(),
-                                arg_val,
-                                indices,
-                            )?
-                        }
-                    };
-                    Ok(Some(val))
-                }
+    fn get_val<'ctx, 'sco>(
+        &self,
+        builder: &OpsBuilder<'ctx, 'sco>,
+        var: &Variable,
+    ) -> Result<Value<'ctx, 'sco>> {
+        if let Some(val) = self.get_input_val(builder, var)? {
+            Ok(val)
+        } else if let Some(val) = self.get_member_val(builder, var)? {
+            Ok(val)
+        } else {
+            Err(anyhow!(
+                "Could not find {var:?} in args or member definitions"
+            ))
+        }
+    }
+
+    fn get_input_val<'ctx, 'sco>(
+        &self,
+        builder: &OpsBuilder<'ctx, 'sco>,
+        var: &Variable,
+    ) -> Result<Option<Value<'ctx, 'sco>>> {
+        match self.arg_map.get(var) {
+            None => Ok(None),
+            Some((arg_no, index)) => {
+                let arg_val = builder.get_arg_value(*arg_no)?;
+                let val = match index {
+                    None => arg_val,
+                    Some(index) => {
+                        let indices =
+                            &[builder.get_constant_from_start(builder.index_type(), *index)?];
+                        builder.append_array_read(builder.unknown_location(), arg_val, indices)?
+                    }
+                };
+                Ok(Some(val))
             }
         }
-        fn get_member_val<'ctx, 'sco>(
-            field_map: &HashMap<Variable, (String, Option<u64>)>,
-            builder: &OpsBuilder<'ctx, 'sco>,
-            var: &Variable,
-        ) -> Result<Option<Value<'ctx, 'sco>>> {
-            match field_map.get(var) {
-                None => Ok(None),
-                Some((member_name, index)) => {
-                    let self_val = builder.get_arg_value(0)?;
-                    let location = builder.unknown_location();
-                    match index {
-                        None => {
-                            // TODO: specify field?
-                            let member_ty = builder.felt_type();
-                            let member_val = builder.append_member_read(
-                                location,
-                                self_val,
-                                member_ty,
-                                &member_name,
-                            )?;
-                            Ok(Some(member_val))
-                        }
-                        Some(index) => {
-                            let member_ty = builder.register_type();
-                            let member_val = builder.append_member_read(
-                                location,
-                                self_val,
-                                member_ty,
-                                &member_name,
-                            )?;
-                            let indices = &[
-                                builder.get_constant_from_start(builder.index_type(), *index)?
-                            ];
-                            let read_val = builder.append_array_read(
-                                builder.unknown_location(),
-                                member_val,
-                                indices,
-                            )?;
-                            Ok(Some(read_val))
-                        }
+    }
+
+    fn get_member_val<'ctx, 'sco>(
+        &self,
+        builder: &OpsBuilder<'ctx, 'sco>,
+        var: &Variable,
+    ) -> Result<Option<Value<'ctx, 'sco>>> {
+        match self.field_map.get(var) {
+            None => Ok(None),
+            Some((member_name, index)) => {
+                let self_val = builder.get_arg_value(0)?;
+                let location = builder.unknown_location();
+                match index {
+                    None => {
+                        // TODO: specify field?
+                        let member_ty = builder.felt_type();
+                        let member_val = builder.append_member_read(
+                            location,
+                            self_val,
+                            member_ty,
+                            &member_name,
+                        )?;
+                        Ok(Some(member_val))
+                    }
+                    Some(index) => {
+                        let member_ty = builder.register_type();
+                        let member_val = builder.append_member_read(
+                            location,
+                            self_val,
+                            member_ty,
+                            &member_name,
+                        )?;
+                        let indices =
+                            &[builder.get_constant_from_start(builder.index_type(), *index)?];
+                        let read_val = builder.append_array_read(
+                            builder.unknown_location(),
+                            member_val,
+                            indices,
+                        )?;
+                        Ok(Some(read_val))
                     }
                 }
             }
         }
-
-        (*struct_op).add_constraints(|builder: &mut OpsBuilder<'_, '_>| -> Result<()> {
-            let get_val = |builder, var| {
-                if let Some(val) = get_input_val(&arg_map, builder, var)? {
-                    Ok(val)
-                } else if let Some(val) = get_member_val(&field_map, builder, var)? {
-                    Ok(val)
-                } else {
-                    Err(anyhow!(
-                        "Could not find {var:?} in args or member definitions"
-                    ))
-                }
-            };
-            // Add some constants to reuse at the beginning here.
-            builder.insert_constant_at_start(builder.index_type(), 1)?;
-            builder.insert_constant_at_start(builder.index_type(), 0)?;
-            builder.insert_constant_at_start(builder.felt_type(), 1)?;
-            builder.insert_constant_at_start(builder.felt_type(), 0)?;
-            // Add boolean constraints
-            for bool_var in self.boolean_vars.iter() {
-                let val = get_val(builder, bool_var)?;
-                let _ = builder.felt_type();
-                builder.append_boolean_constraint(val)?;
-            }
-            // Add range constraints
-            for r in self.range_check_expressions.iter() {
-                match &r.input {
-                    LookupInput::Variable(variable) => {
-                        let val = get_val(builder, variable)?;
-                        builder.append_range_constraint(val, r.width)?;
-                    }
-                    LookupInput::Expression { .. } => todo!("expression range check"),
-                }
-            }
-            // Add all other constraints
-            for (constraint, _prevent_optimization) in self.constraints.iter() {
-                let mut sum = builder.get_constant_from_start(builder.felt_type(), 0)?;
-                for term in constraint.terms.iter() {
-                    let term_val = match term {
-                        Term::Constant(c) => {
-                            let coeff = c.as_u64_reduced();
-                            let coeff_opp = F::CHARACTERISTICS - coeff;
-                            let coeff_val =
-                                builder.get_constant_from_start(builder.felt_type(), coeff)?;
-                            if coeff < coeff_opp {
-                                coeff_val
-                            } else {
-                                builder.append_op_with_result(felt::neg(
-                                    builder.unknown_location(),
-                                    coeff_val,
-                                )?)?
-                            }
-                        }
-                        Term::Expression {
-                            coeff,
-                            inner,
-                            degree,
-                        } => {
-                            let coeff = coeff.as_u64_reduced();
-
-                            let coeff_opp = F::CHARACTERISTICS - coeff;
-                            let mut monomial =
-                                builder.get_constant_from_start(builder.felt_type(), 1)?;
-                            for var in inner.iter().take(*degree) {
-                                let var_val = get_val(builder, var)?;
-                                let mul = felt::mul(builder.unknown_location(), monomial, var_val)?;
-                                monomial = builder.append_op_with_result(mul)?;
-                            }
-
-                            if coeff < coeff_opp {
-                                if coeff == 1 {
-                                    monomial
-                                } else {
-                                    let coeff_val = builder
-                                        .get_constant_from_start(builder.felt_type(), coeff)?;
-                                    let mul =
-                                        felt::mul(builder.unknown_location(), coeff_val, monomial)?;
-                                    builder.append_op_with_result(mul)?
-                                }
-                            } else if coeff_opp == 1 {
-                                builder.append_op_with_result(felt::neg(
-                                    builder.unknown_location(),
-                                    monomial,
-                                )?)?
-                            } else {
-                                let coeff_opp_val = builder
-                                    .get_constant_from_start(builder.felt_type(), coeff_opp)?;
-                                let mul = builder.append_op_with_result(felt::mul(
-                                    builder.unknown_location(),
-                                    coeff_opp_val,
-                                    monomial,
-                                )?)?;
-                                builder.append_op_with_result(felt::neg(
-                                    builder.unknown_location(),
-                                    mul,
-                                )?)?
-                            }
-                        }
-                    };
-                    sum = builder.append_op_with_result(felt::add(
-                        builder.unknown_location(),
-                        sum,
-                        term_val,
-                    )?)?;
-                }
-                let zero = builder.get_constant_from_start(builder.felt_type(), 0)?;
-                builder.append_op_with_no_results(constrain::eq(
-                    builder.unknown_location(),
-                    sum,
-                    zero,
-                ))?;
-            }
-            Ok(())
-        })
     }
 }
