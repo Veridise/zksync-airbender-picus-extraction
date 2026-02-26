@@ -45,7 +45,8 @@ impl<'ctx: 'sco, 'sco, T: EmitLLZK<'ctx, 'sco, Output = ()>> EmitLLZK<'ctx, 'sco
     }
 }
 
-/// Extension trait for [`StructDefOpLike`] that adds a method for filling the `@constrain` function.
+/// Extension trait for [`StructDefOpLike`] that adds a method for filling the `@constrain`
+/// function.
 pub trait AddConstraints<'ctx: 'op, 'op>: StructDefOpLike<'ctx, 'op> {
     /// Invokes the callback scoped in `@constrain`.
     ///
