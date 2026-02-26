@@ -21,8 +21,10 @@ repos:
   - id: trailing-whitespace
   - id: end-of-file-fixer
 
-# Run cargo fmt
+# Run cargo fmt on just the llzk_backend and picus packages
 - repo: https://github.com/doublify/pre-commit-rust
   rev: v1.0
   hooks:
   - id: fmt
+    args: [ "--package", "llzk_backend", "picus" ]
+    pass_filenames: false

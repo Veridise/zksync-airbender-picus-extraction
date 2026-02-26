@@ -1,7 +1,8 @@
 # These format settings only apply when calling format from within this module.
 # If called from the top level, the top-level settings will apply.
+edition = "2024"
+style_edition = "2021" # 2024 is unstable
 fn_params_layout = "Tall"
-use_small_heuristics = "Max"
 max_width = 100
 wrap_comments = true
 normalize_comments = true
