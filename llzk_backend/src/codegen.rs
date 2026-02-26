@@ -2,15 +2,17 @@ use std::collections::HashMap;
 
 use anyhow::anyhow;
 use anyhow::Result;
-use llzk::dialect::{felt, constrain};
+use llzk::dialect::{constrain, felt};
 use llzk::prelude::*;
 use prover::cs::constraint::Term;
 use prover::cs::definitions::LookupInput;
 use prover::cs::definitions::OpcodeFamilyCircuitState;
-use prover::{cs::{cs::circuit::CircuitOutput, definitions::Variable}, field::{PrimeField}};
+use prover::{
+    cs::{cs::circuit::CircuitOutput, definitions::Variable},
+    field::PrimeField,
+};
 
 use crate::builder::*;
-
 
 /// This enum holds the possible representations for SSA values
 pub enum SsaAddress<'ctx, 'val> {
@@ -45,15 +47,18 @@ impl<'ctx: 'op, 'op> AddConstraints<'ctx, 'op> for StructDefOp<'ctx> {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ExtractedVariable {
     /// A register value represented by a low and high limb.
-    Register {low: Variable, high: Variable},
+    Register { low: Variable, high: Variable },
     /// A scalar field element
-    Scalar(Variable)
+    Scalar(Variable),
 }
 
 impl ExtractedVariable {
     /// Create a new register
     pub fn register(reg: [Variable; 2]) -> Self {
-        Self::Register { low: reg[0], high: reg[1] }
+        Self::Register {
+            low: reg[0],
+            high: reg[1],
+        }
     }
     /// Create a new felt
     pub fn scalar(v: Variable) -> Self {
@@ -110,7 +115,7 @@ impl<F: PrimeField> VariableExtractor for OpcodeFamilyCircuitState<F> {
     fn get_outputs(&self) -> Result<Vec<ExtractedVariable>> {
         let mut outputs = vec![
             ExtractedVariable::register(self.cycle_end_state.pc),
-            ExtractedVariable::register(self.cycle_end_state.timestamp)
+            ExtractedVariable::register(self.cycle_end_state.timestamp),
         ];
         outputs.sort();
         Ok(outputs)
@@ -126,7 +131,9 @@ impl<F: PrimeField> VariableExtractor for CircuitOutput<F> {
         // Inputs are:
         // - RAM read queries
         // - Inputs from the executor machine state
-        let exec_state = &self.executor_machine_state.ok_or_else(|| anyhow!("executor_machine_state not initialized"))?;
+        let exec_state = &self
+            .executor_machine_state
+            .ok_or_else(|| anyhow!("executor_machine_state not initialized"))?;
         let mut inputs = exec_state.get_inputs()?;
 
         for query in &self.shuffle_ram_queries {
@@ -142,7 +149,9 @@ impl<F: PrimeField> VariableExtractor for CircuitOutput<F> {
         // Outputs are:
         // - RAM write queries
         // - end state from the executor_machine_state
-        let exec_state = &self.executor_machine_state.ok_or_else(|| anyhow!("executor_machine_state not initialized"))?;
+        let exec_state = &self
+            .executor_machine_state
+            .ok_or_else(|| anyhow!("executor_machine_state not initialized"))?;
         let mut outputs = exec_state.get_outputs()?;
         for query in &self.shuffle_ram_queries {
             if !query.is_readonly() {
@@ -165,9 +174,10 @@ impl<F: PrimeField> VariableExtractor for CircuitOutput<F> {
             .map(|i| Variable(i))
             .filter(|v| {
                 // TODO: We check the ram queries explicitly to ignore the prior write values
-                let in_ram_reads = self.shuffle_ram_queries.iter().any(|&q| {
-                    q.read_value[0] == *v || q.read_value[1] == *v
-                });
+                let in_ram_reads = self
+                    .shuffle_ram_queries
+                    .iter()
+                    .any(|&q| q.read_value[0] == *v || q.read_value[1] == *v);
                 let in_io = io.iter().any(|x| x.contains(v));
                 !in_io && !in_ram_reads
             })
@@ -181,22 +191,43 @@ impl<F: PrimeField> VariableExtractor for CircuitOutput<F> {
 
 /// Trait for generating LLZK within a given module.
 pub trait GenerateLlzk {
-    fn generate_in_module<'ctx>(&self, context: &'ctx Context, module: &Module<'ctx>) -> Result<()>;
+    fn generate_in_module<'ctx>(
+        &self,
+        context: &'ctx Context,
+        module: &Module<'ctx>,
+        struct_name: &str,
+    ) -> Result<()>;
 }
 
 impl<F: PrimeField> GenerateLlzk for CircuitOutput<F> {
     // TODO: break down the monolith
-    fn generate_in_module<'ctx>(&self, ctx: &'ctx Context, module: &Module<'ctx>) -> Result<()> {
+    fn generate_in_module<'ctx>(
+        &self,
+        ctx: &'ctx Context,
+        module: &Module<'ctx>,
+        struct_name: &str,
+    ) -> Result<()> {
         let llzk_builder = Builder::new(&ctx);
-        // TODO: Fix struct naming
-        let mut struct_builder = StructBuilder::new(&ctx, "add_sub_lui_auipc_mop");
+        let mut struct_builder = StructBuilder::new(&ctx, struct_name);
 
         // Sanity check: all variables should be an input, output, or intermediate,
         // with the exception of the 2 variables used to encode the RAM write's
         // prior value (i.e., the read_value of one RAM query).
-        let num_input_vars = self.get_inputs()?.iter().map(|x| x.num_vars()).sum::<usize>();
-        let num_output_vars = self.get_outputs()?.iter().map(|x| x.num_vars()).sum::<usize>();
-        let num_intermediate_vars = self.get_intermediates()?.iter().map(|x| x.num_vars()).sum::<usize>();
+        let num_input_vars = self
+            .get_inputs()?
+            .iter()
+            .map(|x| x.num_vars())
+            .sum::<usize>();
+        let num_output_vars = self
+            .get_outputs()?
+            .iter()
+            .map(|x| x.num_vars())
+            .sum::<usize>();
+        let num_intermediate_vars = self
+            .get_intermediates()?
+            .iter()
+            .map(|x| x.num_vars())
+            .sum::<usize>();
         let extracted = num_input_vars + num_output_vars + num_intermediate_vars;
         let expected = self.num_of_variables - 2;
         assert_eq!(extracted, expected);
@@ -211,11 +242,11 @@ impl<F: PrimeField> GenerateLlzk for CircuitOutput<F> {
                     arg_map.insert(*low, (arg_no, Some(0)));
                     arg_map.insert(*high, (arg_no, Some(1)));
                     struct_builder.with_input(llzk_builder.register_type());
-                },
+                }
                 ExtractedVariable::Scalar(variable) => {
                     arg_map.insert(*variable, (arg_no, None));
                     struct_builder.with_input(llzk_builder.felt_type());
-                },
+                }
             };
         }
         // Add outputs to struct
@@ -229,7 +260,7 @@ impl<F: PrimeField> GenerateLlzk for CircuitOutput<F> {
                     field_map.insert(*low, (name.clone(), Some(0)));
                     field_map.insert(*high, (name.clone(), Some(1)));
                     struct_builder.with_member(name, llzk_builder.register_type(), true);
-                },
+                }
                 ExtractedVariable::Scalar(variable) => {
                     let name = format!("out_var_{}", variable.0);
                     field_map.insert(*variable, (name.clone(), None));
@@ -245,7 +276,7 @@ impl<F: PrimeField> GenerateLlzk for CircuitOutput<F> {
                     field_map.insert(*low, (name.clone(), Some(0)));
                     field_map.insert(*high, (name.clone(), Some(1)));
                     struct_builder.with_member(name, llzk_builder.register_type(), false);
-                },
+                }
                 ExtractedVariable::Scalar(variable) => {
                     let name = format!("internal_var_{}", variable.0);
                     field_map.insert(*variable, (name.clone(), None));
@@ -256,25 +287,37 @@ impl<F: PrimeField> GenerateLlzk for CircuitOutput<F> {
 
         let struct_op = struct_builder.build_in_module(&module)?;
 
-        fn get_input_val<'ctx, 'sco>(arg_map: &HashMap<Variable, (usize, Option<u64>)>, builder: &OpsBuilder<'ctx, 'sco>, var: &Variable) -> Result<Option<Value<'ctx, 'sco>>> {
+        fn get_input_val<'ctx, 'sco>(
+            arg_map: &HashMap<Variable, (usize, Option<u64>)>,
+            builder: &OpsBuilder<'ctx, 'sco>,
+            var: &Variable,
+        ) -> Result<Option<Value<'ctx, 'sco>>> {
             match arg_map.get(var) {
                 None => Ok(None),
                 Some((arg_no, index)) => {
                     let arg_val = builder.get_arg_value(*arg_no)?;
                     let val = match index {
-                        None => {
-                            arg_val
-                        }
+                        None => arg_val,
                         Some(index) => {
-                            let indices = &[builder.get_constant_from_start(builder.index_type(), *index)?];
-                            builder.append_array_read(builder.unknown_location(), arg_val, indices)?
+                            let indices = &[
+                                builder.get_constant_from_start(builder.index_type(), *index)?
+                            ];
+                            builder.append_array_read(
+                                builder.unknown_location(),
+                                arg_val,
+                                indices,
+                            )?
                         }
                     };
                     Ok(Some(val))
                 }
             }
         }
-        fn get_member_val<'ctx, 'sco> (field_map: &HashMap<Variable, (String, Option<u64>)>, builder: &OpsBuilder<'ctx, 'sco>, var: &Variable) -> Result<Option<Value<'ctx, 'sco>>> {
+        fn get_member_val<'ctx, 'sco>(
+            field_map: &HashMap<Variable, (String, Option<u64>)>,
+            builder: &OpsBuilder<'ctx, 'sco>,
+            var: &Variable,
+        ) -> Result<Option<Value<'ctx, 'sco>>> {
             match field_map.get(var) {
                 None => Ok(None),
                 Some((member_name, index)) => {
@@ -284,14 +327,30 @@ impl<F: PrimeField> GenerateLlzk for CircuitOutput<F> {
                         None => {
                             // TODO: specify field?
                             let member_ty = builder.felt_type();
-                            let member_val = builder.append_member_read(location, self_val, member_ty, &member_name)?;
+                            let member_val = builder.append_member_read(
+                                location,
+                                self_val,
+                                member_ty,
+                                &member_name,
+                            )?;
                             Ok(Some(member_val))
-                        },
+                        }
                         Some(index) => {
                             let member_ty = builder.register_type();
-                            let member_val = builder.append_member_read(location, self_val, member_ty, &member_name)?;
-                            let indices = &[builder.get_constant_from_start(builder.index_type(), *index)?];
-                            let read_val = builder.append_array_read(builder.unknown_location(), member_val, indices)?;
+                            let member_val = builder.append_member_read(
+                                location,
+                                self_val,
+                                member_ty,
+                                &member_name,
+                            )?;
+                            let indices = &[
+                                builder.get_constant_from_start(builder.index_type(), *index)?
+                            ];
+                            let read_val = builder.append_array_read(
+                                builder.unknown_location(),
+                                member_val,
+                                indices,
+                            )?;
                             Ok(Some(read_val))
                         }
                     }
@@ -306,7 +365,9 @@ impl<F: PrimeField> GenerateLlzk for CircuitOutput<F> {
                 } else if let Some(val) = get_member_val(&field_map, builder, var)? {
                     Ok(val)
                 } else {
-                    Err(anyhow!("Could not find {var:?} in args or member definitions"))
+                    Err(anyhow!(
+                        "Could not find {var:?} in args or member definitions"
+                    ))
                 }
             };
             // Add some constants to reuse at the beginning here.
@@ -319,7 +380,6 @@ impl<F: PrimeField> GenerateLlzk for CircuitOutput<F> {
                 let val = get_val(builder, bool_var)?;
                 let _ = builder.felt_type();
                 builder.append_boolean_constraint(val)?;
-
             }
             // Add range constraints
             for r in self.range_check_expressions.iter() {
@@ -339,11 +399,15 @@ impl<F: PrimeField> GenerateLlzk for CircuitOutput<F> {
                         Term::Constant(c) => {
                             let coeff = c.as_u64_reduced();
                             let coeff_opp = F::CHARACTERISTICS - coeff;
-                            let coeff_val = builder.get_constant_from_start(builder.felt_type(), coeff)?;
+                            let coeff_val =
+                                builder.get_constant_from_start(builder.felt_type(), coeff)?;
                             if coeff < coeff_opp {
                                 coeff_val
                             } else {
-                                builder.append_op_with_result(felt::neg(builder.unknown_location(), coeff_val)?)?
+                                builder.append_op_with_result(felt::neg(
+                                    builder.unknown_location(),
+                                    coeff_val,
+                                )?)?
                             }
                         }
                         Term::Expression {
@@ -354,7 +418,8 @@ impl<F: PrimeField> GenerateLlzk for CircuitOutput<F> {
                             let coeff = coeff.as_u64_reduced();
 
                             let coeff_opp = F::CHARACTERISTICS - coeff;
-                            let mut monomial = builder.get_constant_from_start(builder.felt_type(), 1)?;
+                            let mut monomial =
+                                builder.get_constant_from_start(builder.felt_type(), 1)?;
                             for var in inner.iter().take(*degree) {
                                 let var_val = get_val(builder, var)?;
                                 let mul = felt::mul(builder.unknown_location(), monomial, var_val)?;
@@ -365,23 +430,44 @@ impl<F: PrimeField> GenerateLlzk for CircuitOutput<F> {
                                 if coeff == 1 {
                                     monomial
                                 } else {
-                                    let coeff_val = builder.get_constant_from_start(builder.felt_type(), coeff)?;
-                                    let mul = felt::mul(builder.unknown_location(), coeff_val, monomial)?;
+                                    let coeff_val = builder
+                                        .get_constant_from_start(builder.felt_type(), coeff)?;
+                                    let mul =
+                                        felt::mul(builder.unknown_location(), coeff_val, monomial)?;
                                     builder.append_op_with_result(mul)?
                                 }
                             } else if coeff_opp == 1 {
-                                builder.append_op_with_result(felt::neg(builder.unknown_location(), monomial)?)?
+                                builder.append_op_with_result(felt::neg(
+                                    builder.unknown_location(),
+                                    monomial,
+                                )?)?
                             } else {
-                                let coeff_opp_val = builder.get_constant_from_start(builder.felt_type(), coeff_opp)?;
-                                let mul = builder.append_op_with_result(felt::mul(builder.unknown_location(), coeff_opp_val, monomial)?)?;
-                                builder.append_op_with_result(felt::neg(builder.unknown_location(), mul)?)?
+                                let coeff_opp_val = builder
+                                    .get_constant_from_start(builder.felt_type(), coeff_opp)?;
+                                let mul = builder.append_op_with_result(felt::mul(
+                                    builder.unknown_location(),
+                                    coeff_opp_val,
+                                    monomial,
+                                )?)?;
+                                builder.append_op_with_result(felt::neg(
+                                    builder.unknown_location(),
+                                    mul,
+                                )?)?
                             }
                         }
                     };
-                    sum = builder.append_op_with_result(felt::add(builder.unknown_location(), sum, term_val)?)?;
+                    sum = builder.append_op_with_result(felt::add(
+                        builder.unknown_location(),
+                        sum,
+                        term_val,
+                    )?)?;
                 }
                 let zero = builder.get_constant_from_start(builder.felt_type(), 0)?;
-                builder.append_op_with_no_results(constrain::eq(builder.unknown_location(), sum, zero))?;
+                builder.append_op_with_no_results(constrain::eq(
+                    builder.unknown_location(),
+                    sum,
+                    zero,
+                ))?;
             }
             Ok(())
         })
