@@ -10,9 +10,12 @@ use std::io::Write as _;
 use std::path::Path;
 
 use crate::codegen::GenerateLlzk as _;
+use crate::output_format::OutputFormat;
 
 mod builder;
 mod codegen;
+mod field;
+pub mod output_format;
 
 pub fn setup_logging() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -22,7 +25,7 @@ pub fn setup_logging() {
         .init();
 }
 
-pub fn dump_add_sub_lui_auipc_mop(output: &str) -> Result<()> {
+pub fn dump_add_sub_lui_auipc_mop(output: &str, format: OutputFormat, opt_level: u8) -> Result<()> {
     use add_sub_lui_auipc_mop::ROM_ADDRESS_SPACE_SECOND_WORD_BITS;
     use add_sub_lui_auipc_mop::TRACE_LEN_LOG2;
     use prover::cs::machine::ops::unrolled::add_sub_lui_auipc_mop::add_sub_lui_auipc_mop_circuit_with_preprocessed_bytecode;
@@ -31,6 +34,8 @@ pub fn dump_add_sub_lui_auipc_mop(output: &str) -> Result<()> {
     dump_llzk_command(
         "add_sub_lui_auipc_mop",
         output,
+        format,
+        opt_level,
         (1 << (16 + ROM_ADDRESS_SPACE_SECOND_WORD_BITS)) / 4,
         TRACE_LEN_LOG2 as usize,
         |cs| {
@@ -43,6 +48,8 @@ pub fn dump_add_sub_lui_auipc_mop(output: &str) -> Result<()> {
 fn dump_llzk_command(
     name: &str,
     output: &str,
+    format: OutputFormat,
+    opt_level: u8,
     bytecode_size: usize,
     trace_len_log2: usize,
     synthesis_fn: impl Fn(&mut BasicAssembly<Mersenne31Field>),
@@ -65,7 +72,7 @@ fn dump_llzk_command(
 
     // Generate an empty LLZK module
     let ctx = LlzkContext::new();
-    let module = llzk_module(Location::unknown(&ctx));
+    let mut module = llzk_module(Location::unknown(&ctx));
 
     // Add the circuit output to it.
     circuit_output.generate_in_module(&ctx, &module, name)?;
@@ -73,22 +80,82 @@ fn dump_llzk_command(
     // Verify the module
     verify_operation_with_diags(&module.as_operation())?;
 
+    // Run optimizer
+    run_optimizer_pipeline(&ctx, &mut module, format, opt_level)?;
+
+    // Verify again
+    verify_operation_with_diags(&module.as_operation())?;
+
     // Write to file
-    let outpath = Path::new(output).join(format!("{name}.llzk"));
-    // Ensure parent directories exist
-    if let Some(parent) = outpath.parent() {
-        fs::create_dir_all(parent).map_err(anyhow::Error::from)?;
+    write_result(&module, output, name)?;
+
+    Ok(())
+}
+
+fn write_result(module: &Module, output: &str, name: &str) -> Result<()> {
+    match output {
+        // Stdout.
+        "-" => {
+            let mut file = std::io::stdout();
+            write!(file, "{}", module.as_operation())?;
+            eprintln!("Written successfully!");
+        }
+        // A file.
+        output
+            if [".llzk", ".mlir", ".pcl"]
+                .into_iter()
+                .any(|suffix| output.ends_with(suffix)) =>
+        {
+            let outpath = Path::new(output);
+            let mut file = File::create(&outpath).map_err(anyhow::Error::from)?;
+            write!(file, "{}", module.as_operation())?;
+            println!("{} {}", "Written successfully:", outpath.display());
+        }
+        // A directory.
+        output => {
+            // Write to file
+            let outpath = Path::new(output).join(format!("{name}.llzk"));
+            // Ensure parent directories exist
+            if let Some(parent) = outpath.parent() {
+                fs::create_dir_all(parent).map_err(anyhow::Error::from)?;
+            }
+            let mut file = File::create(&outpath).map_err(anyhow::Error::from)?;
+            write!(file, "{}", module.as_operation())?;
+            println!("{} {}", "Written successfully:", outpath.display());
+        }
     }
-    let mut file = File::create(&outpath).map_err(anyhow::Error::from)?;
-    write!(file, "{}", module.as_operation())?;
-    println!("{} {}", "Written successfully:", outpath.display());
+    Ok(())
+}
 
-    // Also transform to PCL
-    // TODO: Need to get the PCL pass exposed
-    // llzk::passes::register_all_llzk_passes();
-    // let pm = PassManager::new(&ctx);
-    // pm.add_pass(llzk::passes::create_pcl_to_llzk_pass());
-    // pm.run(&mut module).expect("failed to convert to PCL");
+fn run_optimizer_pipeline(
+    ctx: &Context,
+    module: &mut Module,
+    format: OutputFormat,
+    opt_level: u8,
+) -> Result<()> {
+    let pm = PassManager::new(&ctx);
+    // First cleanup the IR
+    match opt_level {
+        0 => {} // No opt.
+        1 => {
+            pm.add_pass(melior_passes::create_cse());
+            pm.add_pass(melior_passes::create_canonicalizer());
+        }
+        2 => {
+            pm.add_pass(melior_passes::create_canonicalizer());
+            pm.add_pass(llzk::passes::create_redundant_read_and_write_elimination_pass());
+            pm.add_pass(melior_passes::create_cse());
+            pm.add_pass(melior_passes::create_canonicalizer());
+        }
+        _ => anyhow::bail!("Unrecognized optimization level: {opt_level}"),
+    }
 
+    // Then, if enabled, convert the LLZK IR into PCL IR.
+    if matches!(format, OutputFormat::Pcl) {
+        pm.add_pass(llzk::passes::create_array_to_scalar_pass());
+        todo!("PCL pass not exposed yet!");
+        // pm.add_pass(llzk::passes::create_pcl_to_llzk_pass());
+    }
+    pm.run(module)?;
     Ok(())
 }
