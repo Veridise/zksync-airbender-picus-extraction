@@ -13,7 +13,7 @@ categories.workspace = true
 clap = { workspace = true }
 prover = { workspace = true, features = ["prover"] }
 add_sub_lui_auipc_mop = { path = "../circuit_defs/unrolled_circuits/add_sub_lui_auipc_mop"}
-llzk = { git = "https://github.com/project-llzk/llzk-rs", package = "llzk" }
+llzk = { git = "https://github.com/project-llzk/llzk-rs", package = "llzk", branch = "dani/fix-felt-op-ctors" }
 
 env_logger = "0.11"
 base64 = "0.21.7"

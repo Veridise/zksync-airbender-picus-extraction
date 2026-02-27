@@ -15,6 +15,7 @@ use prover::{
 };
 
 use crate::builder::*;
+use crate::field::FieldInfo;
 
 /// This enum holds the possible representations for SSA values
 pub enum SsaAddress<'ctx, 'val> {
@@ -228,8 +229,7 @@ fn num_vars(vars: impl IntoIterator<Item = ExtractedVariable>) -> usize {
     vars.into_iter().map(|v| v.num_vars()).sum()
 }
 
-impl<F: PrimeField> GenerateLlzk for CircuitOutput<F> {
-    // TODO: break down the monolith
+impl<F: PrimeField + FieldInfo> GenerateLlzk for CircuitOutput<F> {
     fn generate_in_module<'ctx>(
         &self,
         ctx: &'ctx Context,
@@ -254,15 +254,15 @@ impl<F: PrimeField> GenerateLlzk for CircuitOutput<F> {
 
         struct_op.add_constraints(|builder: &mut OpsBuilder<'_, '_>| -> Result<()> {
             // Add some constants to reuse at the beginning here.
-            builder.insert_constant_at_start(builder.index_type(), 1)?;
-            builder.insert_constant_at_start(builder.index_type(), 0)?;
-            builder.insert_constant_at_start(builder.felt_type(), 1)?;
-            builder.insert_constant_at_start(builder.felt_type(), 0)?;
+            builder.insert_constant_at_start::<F>(builder.index_type(), 1)?;
+            builder.insert_constant_at_start::<F>(builder.index_type(), 0)?;
+            builder.insert_constant_at_start::<F>(builder.felt_type::<F>(), 1)?;
+            builder.insert_constant_at_start::<F>(builder.felt_type::<F>(), 0)?;
             // Add boolean constraints
             for bool_var in self.boolean_vars.iter() {
-                let val = vars.get_val(builder, bool_var)?;
-                let _ = builder.felt_type();
-                builder.append_boolean_constraint(val)?;
+                let val = vars.get_val::<F>(builder, bool_var)?;
+                let _ = builder.felt_type::<F>();
+                builder.append_boolean_constraint::<F>(val)?;
             }
             // Add range constraints
             self.range_check_expressions.emit_llzk(builder, &vars)?;
@@ -272,7 +272,7 @@ impl<F: PrimeField> GenerateLlzk for CircuitOutput<F> {
     }
 }
 
-impl<'ctx: 'sco, 'sco, F: PrimeField> EmitLLZK<'ctx, 'sco> for RangeCheckQuery<F> {
+impl<'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZK<'ctx, 'sco> for RangeCheckQuery<F> {
     type Output = ();
 
     fn emit_llzk(
@@ -282,8 +282,8 @@ impl<'ctx: 'sco, 'sco, F: PrimeField> EmitLLZK<'ctx, 'sco> for RangeCheckQuery<F
     ) -> Result<Self::Output> {
         match &self.input {
             LookupInput::Variable(variable) => {
-                let val = vars.get_val(builder, variable)?;
-                builder.append_range_constraint(val, self.width)?;
+                let val = vars.get_val::<F>(builder, variable)?;
+                builder.append_range_constraint::<F>(val, self.width)?;
             }
             LookupInput::Expression { .. } => todo!("expression range check"),
         }
@@ -291,7 +291,7 @@ impl<'ctx: 'sco, 'sco, F: PrimeField> EmitLLZK<'ctx, 'sco> for RangeCheckQuery<F
     }
 }
 
-impl<'ctx: 'sco, 'sco, F: PrimeField> EmitLLZK<'ctx, 'sco> for (Constraint<F>, bool) {
+impl<'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZK<'ctx, 'sco> for (Constraint<F>, bool) {
     type Output = ();
 
     fn emit_llzk(
@@ -301,7 +301,7 @@ impl<'ctx: 'sco, 'sco, F: PrimeField> EmitLLZK<'ctx, 'sco> for (Constraint<F>, b
     ) -> Result<Self::Output> {
         let (constraint, _prevent_optimization) = self;
 
-        let zero = builder.get_constant_from_start(builder.felt_type(), 0)?;
+        let zero = builder.get_constant_from_start::<F>(builder.felt_type::<F>(), 0)?;
         let sum = constraint
             .terms
             .iter()
@@ -317,7 +317,7 @@ impl<'ctx: 'sco, 'sco, F: PrimeField> EmitLLZK<'ctx, 'sco> for (Constraint<F>, b
     }
 }
 
-impl<'ctx: 'sco, 'sco, F: PrimeField> EmitLLZK<'ctx, 'sco> for Term<F> {
+impl<'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZK<'ctx, 'sco> for Term<F> {
     type Output = Value<'ctx, 'sco>;
 
     fn emit_llzk(
@@ -329,7 +329,8 @@ impl<'ctx: 'sco, 'sco, F: PrimeField> EmitLLZK<'ctx, 'sco> for Term<F> {
             Term::Constant(c) => {
                 let coeff = c.as_u64_reduced();
                 let coeff_opp = F::CHARACTERISTICS - coeff;
-                let coeff_val = builder.get_constant_from_start(builder.felt_type(), coeff)?;
+                let coeff_val =
+                    builder.get_constant_from_start::<F>(builder.felt_type::<F>(), coeff)?;
                 Ok(if coeff < coeff_opp {
                     coeff_val
                 } else {
@@ -345,9 +346,10 @@ impl<'ctx: 'sco, 'sco, F: PrimeField> EmitLLZK<'ctx, 'sco> for Term<F> {
                 let coeff = coeff.as_u64_reduced();
 
                 let coeff_opp = F::CHARACTERISTICS - coeff;
-                let mut monomial = builder.get_constant_from_start(builder.felt_type(), 1)?;
+                let mut monomial =
+                    builder.get_constant_from_start::<F>(builder.felt_type::<F>(), 1)?;
                 for var in inner.iter().take(*degree) {
-                    let var_val = vars.get_val(builder, var)?;
+                    let var_val = vars.get_val::<F>(builder, var)?;
                     let mul = felt::mul(builder.unknown_location(), monomial, var_val)?;
                     monomial = builder.append_op_with_result(mul)?;
                 }
@@ -356,8 +358,8 @@ impl<'ctx: 'sco, 'sco, F: PrimeField> EmitLLZK<'ctx, 'sco> for Term<F> {
                     if coeff == 1 {
                         monomial
                     } else {
-                        let coeff_val =
-                            builder.get_constant_from_start(builder.felt_type(), coeff)?;
+                        let coeff_val = builder
+                            .get_constant_from_start::<F>(builder.felt_type::<F>(), coeff)?;
                         let mul = felt::mul(builder.unknown_location(), coeff_val, monomial)?;
                         builder.append_op_with_result(mul)?
                     }
@@ -365,8 +367,8 @@ impl<'ctx: 'sco, 'sco, F: PrimeField> EmitLLZK<'ctx, 'sco> for Term<F> {
                     builder
                         .append_op_with_result(felt::neg(builder.unknown_location(), monomial)?)?
                 } else {
-                    let coeff_opp_val =
-                        builder.get_constant_from_start(builder.felt_type(), coeff_opp)?;
+                    let coeff_opp_val = builder
+                        .get_constant_from_start::<F>(builder.felt_type::<F>(), coeff_opp)?;
                     let mul = builder.append_op_with_result(felt::mul(
                         builder.unknown_location(),
                         coeff_opp_val,
@@ -386,7 +388,7 @@ struct StructVars {
 }
 
 impl StructVars {
-    fn new<'ctx, F: PrimeField>(
+    fn new<'ctx, F: PrimeField + FieldInfo>(
         co: &CircuitOutput<F>,
         struct_builder: &mut StructBuilder<'ctx, '_>,
         llzk_builder: &Builder<'ctx>,
@@ -400,11 +402,11 @@ impl StructVars {
                 ExtractedVariable::Register { low, high } => {
                     arg_map.insert(*low, (arg_no, Some(0)));
                     arg_map.insert(*high, (arg_no, Some(1)));
-                    struct_builder.with_input(llzk_builder.register_type());
+                    struct_builder.with_input(llzk_builder.register_type::<F>());
                 }
                 ExtractedVariable::Scalar(variable) => {
                     arg_map.insert(*variable, (arg_no, None));
-                    struct_builder.with_input(llzk_builder.felt_type());
+                    struct_builder.with_input(llzk_builder.felt_type::<F>());
                 }
             };
         }
@@ -418,12 +420,12 @@ impl StructVars {
                     let name = format!("out_reg_{}_{}", low.0, high.0);
                     field_map.insert(*low, (name.clone(), Some(0)));
                     field_map.insert(*high, (name.clone(), Some(1)));
-                    struct_builder.with_member(name, llzk_builder.register_type(), true);
+                    struct_builder.with_member(name, llzk_builder.register_type::<F>(), true);
                 }
                 ExtractedVariable::Scalar(variable) => {
                     let name = format!("out_var_{}", variable.0);
                     field_map.insert(*variable, (name.clone(), None));
-                    struct_builder.with_member(name, llzk_builder.felt_type(), true);
+                    struct_builder.with_member(name, llzk_builder.felt_type::<F>(), true);
                 }
             }
         }
@@ -434,12 +436,12 @@ impl StructVars {
                     let name = format!("internal_reg_{}_{}", low.0, high.0);
                     field_map.insert(*low, (name.clone(), Some(0)));
                     field_map.insert(*high, (name.clone(), Some(1)));
-                    struct_builder.with_member(name, llzk_builder.register_type(), false);
+                    struct_builder.with_member(name, llzk_builder.register_type::<F>(), false);
                 }
                 ExtractedVariable::Scalar(variable) => {
                     let name = format!("internal_var_{}", variable.0);
                     field_map.insert(*variable, (name.clone(), None));
-                    struct_builder.with_member(name, llzk_builder.felt_type(), false);
+                    struct_builder.with_member(name, llzk_builder.felt_type::<F>(), false);
                 }
             }
         }
@@ -447,14 +449,14 @@ impl StructVars {
         Ok(Self { field_map, arg_map })
     }
 
-    fn get_val<'ctx, 'sco>(
+    fn get_val<'ctx, 'sco, F: FieldInfo>(
         &self,
         builder: &OpsBuilder<'ctx, 'sco>,
         var: &Variable,
     ) -> Result<Value<'ctx, 'sco>> {
-        if let Some(val) = self.get_input_val(builder, var)? {
+        if let Some(val) = self.get_input_val::<F>(builder, var)? {
             Ok(val)
-        } else if let Some(val) = self.get_member_val(builder, var)? {
+        } else if let Some(val) = self.get_member_val::<F>(builder, var)? {
             Ok(val)
         } else {
             Err(anyhow!(
@@ -463,7 +465,7 @@ impl StructVars {
         }
     }
 
-    fn get_input_val<'ctx, 'sco>(
+    fn get_input_val<'ctx, 'sco, F: FieldInfo>(
         &self,
         builder: &OpsBuilder<'ctx, 'sco>,
         var: &Variable,
@@ -476,7 +478,8 @@ impl StructVars {
                     None => arg_val,
                     Some(index) => {
                         let indices =
-                            &[builder.get_constant_from_start(builder.index_type(), *index)?];
+                            &[builder
+                                .get_constant_from_start::<F>(builder.index_type(), *index)?];
                         builder.append_array_read(builder.unknown_location(), arg_val, indices)?
                     }
                 };
@@ -485,7 +488,7 @@ impl StructVars {
         }
     }
 
-    fn get_member_val<'ctx, 'sco>(
+    fn get_member_val<'ctx, 'sco, F: FieldInfo>(
         &self,
         builder: &OpsBuilder<'ctx, 'sco>,
         var: &Variable,
@@ -498,7 +501,7 @@ impl StructVars {
                 match index {
                     None => {
                         // TODO: specify field?
-                        let member_ty = builder.felt_type();
+                        let member_ty = builder.felt_type::<F>();
                         let member_val = builder.append_member_read(
                             location,
                             self_val,
@@ -508,7 +511,7 @@ impl StructVars {
                         Ok(Some(member_val))
                     }
                     Some(index) => {
-                        let member_ty = builder.register_type();
+                        let member_ty = builder.register_type::<F>();
                         let member_val = builder.append_member_read(
                             location,
                             self_val,
@@ -516,7 +519,8 @@ impl StructVars {
                             &member_name,
                         )?;
                         let indices =
-                            &[builder.get_constant_from_start(builder.index_type(), *index)?];
+                            &[builder
+                                .get_constant_from_start::<F>(builder.index_type(), *index)?];
                         let read_val = builder.append_array_read(
                             builder.unknown_location(),
                             member_val,
