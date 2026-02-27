@@ -25,6 +25,8 @@ use llzk::{
 };
 use prover::cs::definitions::REGISTER_SIZE;
 
+use crate::field::FieldInfo;
+
 /// Generic builder with convenience factory methods.
 pub struct Builder<'ctx> {
     context: &'ctx Context,
@@ -47,11 +49,8 @@ impl<'ctx> Builder<'ctx> {
     }
 
     /// Creates a `!felt.type`.
-    pub fn felt_type(&self) -> Type<'ctx> {
-        // TODO: eventually we will want to use whatever field the circuit output
-        // is parameterized on, but that will also require possibly injecting a field
-        // spec at the module level for unsupported fields.
-        FeltType::with_field(self.context, "mersenne31").into()
+    pub fn felt_type<F: FieldInfo>(&self) -> Type<'ctx> {
+        FeltType::with_field(self.context, F::field_name()).into()
     }
 
     /// Get the index type
@@ -72,8 +71,8 @@ impl<'ctx> Builder<'ctx> {
     }
 
     /// Create a constant felt attribute.
-    pub fn felt_attr(&self, value: u64) -> FeltConstAttribute<'ctx> {
-        FeltConstAttribute::new(self.context, value)
+    pub fn felt_attr<F: FieldInfo>(&self, value: u64) -> FeltConstAttribute<'ctx> {
+        FeltConstAttribute::new(self.context, value, Some(F::field_name()))
     }
 
     /// Create a constant int attribute of the given int type.
@@ -84,9 +83,9 @@ impl<'ctx> Builder<'ctx> {
 
     /// Get a register type, which is a two-element felt array.
     /// TODO: This is probably too representation dependent, move elsewhere.
-    pub fn register_type(&self) -> Type<'ctx> {
+    pub fn register_type<F: FieldInfo>(&self) -> Type<'ctx> {
         ArrayType::new(
-            self.felt_type(),
+            self.felt_type::<F>(),
             &[self.index_attr(
                 i64::try_from(REGISTER_SIZE).expect("REGISTER_SIZE is unexpectedly large"),
             )],
@@ -296,11 +295,11 @@ impl<'ctx, 'sco> OpsBuilder<'ctx, 'sco> {
     }
 
     /// Append a boolean constraint for the given value.
-    pub fn append_boolean_constraint(&self, val: Value<'ctx, 'sco>) -> Result<()> {
-        assert_eq!(val.r#type(), self.felt_type());
+    pub fn append_boolean_constraint<F: FieldInfo>(&self, val: Value<'ctx, 'sco>) -> Result<()> {
+        assert_eq!(val.r#type(), self.felt_type::<F>());
         let unk = self.unknown_location();
-        let zero = self.get_constant_from_start(self.felt_type(), 0)?;
-        let one = self.get_constant_from_start(self.felt_type(), 1)?;
+        let zero = self.get_constant_from_start::<F>(self.felt_type::<F>(), 0)?;
+        let one = self.get_constant_from_start::<F>(self.felt_type::<F>(), 1)?;
         let minus_one = self.append_op_with_result(felt::sub(unk, val, one)?)?;
         let product = self.append_op_with_result(felt::mul(unk, val, minus_one)?)?;
         self.append_op_with_no_results(constrain::eq(unk, product, zero))
@@ -308,12 +307,16 @@ impl<'ctx, 'sco> OpsBuilder<'ctx, 'sco> {
 
     /// Append a range constraint for the given value.
     /// Enforces that `val` must be within `width`.
-    pub fn append_range_constraint(&self, val: Value<'ctx, 'sco>, width: usize) -> Result<()> {
-        assert_eq!(val.r#type(), self.felt_type());
+    pub fn append_range_constraint<F: FieldInfo>(
+        &self,
+        val: Value<'ctx, 'sco>,
+        width: usize,
+    ) -> Result<()> {
+        assert_eq!(val.r#type(), self.felt_type::<F>());
         let unk = self.unknown_location();
-        let bound = self.get_constant_from_start(self.felt_type(), 1 << width)?;
+        let bound = self.get_constant_from_start::<F>(self.felt_type::<F>(), 1 << width)?;
         let bound_check = self.append_op_with_result(bool::lt(unk, val, bound)?)?;
-        let truth = self.get_constant_from_start(self.int_type(1), 1)?;
+        let truth = self.get_constant_from_start::<F>(self.int_type(1), 1)?;
         self.append_op_with_no_results(constrain::eq(unk, bound_check, truth))
     }
 
@@ -358,7 +361,11 @@ impl<'ctx, 'sco> OpsBuilder<'ctx, 'sco> {
 
     /// Lookup a previously generated constant in the function scope or
     /// create one if needed. Then return the SSA value.
-    pub fn get_constant_from_start(&self, r#type: Type<'ctx>, i: u64) -> Result<Value<'ctx, 'sco>> {
+    pub fn get_constant_from_start<F: FieldInfo>(
+        &self,
+        r#type: Type<'ctx>,
+        i: u64,
+    ) -> Result<Value<'ctx, 'sco>> {
         let key = ConstOpKey(r#type, i);
         let mut const_val_cache = self.const_vals.borrow_mut();
         match const_val_cache.get(&key) {
@@ -370,8 +377,8 @@ impl<'ctx, 'sco> OpsBuilder<'ctx, 'sco> {
                         self.int_attr(r#type, i64::try_from(i)?),
                         self.unknown_location(),
                     )
-                } else if r#type == self.felt_type() {
-                    felt::constant(self.unknown_location(), self.felt_attr(i))?
+                } else if r#type == self.felt_type::<F>() {
+                    felt::constant(self.unknown_location(), self.felt_attr::<F>(i))?
                 } else {
                     anyhow::bail!("unsupported type {}", r#type)
                 };
@@ -386,8 +393,8 @@ impl<'ctx, 'sco> OpsBuilder<'ctx, 'sco> {
     }
 
     // Perform the index constant insertion without producing a return value.
-    pub fn insert_constant_at_start(&self, r#type: Type<'ctx>, i: u64) -> Result<()> {
-        let _ = self.get_constant_from_start(r#type, i)?;
+    pub fn insert_constant_at_start<F: FieldInfo>(&self, r#type: Type<'ctx>, i: u64) -> Result<()> {
+        let _ = self.get_constant_from_start::<F>(r#type, i)?;
         Ok(())
     }
 }
