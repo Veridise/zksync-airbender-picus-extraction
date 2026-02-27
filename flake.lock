@@ -81,6 +81,7 @@
           "llzk-pkgs",
           "nixpkgs"
         ],
+        "pcl-mlir-pkg": "pcl-mlir-pkg_2",
         "release-helpers": [
           "llzk-rs-pkgs",
           "llzk-lib",
@@ -88,11 +89,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1770401785,
-        "narHash": "sha256-vRuzFQ7zjLnot6g3+u2aK66Eq1aDwS7jHTu6okCrBR4=",
+        "lastModified": 1772210748,
+        "narHash": "sha256-UKY5D2I8Gort88Wfsw3MzhraXgTwA1ZWwiJc5k6Jjx4=",
         "ref": "refs/heads/main",
-        "rev": "779d537c4ef34da1b0d66670317f9070bcb1ce6b",
-        "revCount": 335,
+        "rev": "31e58688616951cd2e63f654cef86fcabb8471f3",
+        "revCount": 342,
         "submodules": true,
         "type": "git",
         "url": "https://github.com/project-llzk/llzk-rs"
@@ -162,6 +163,41 @@
         "owner": "Veridise",
         "repo": "pcl-mlir",
         "rev": "a82620c4dabf6e51ceda66bba2abb19f7f74ac7d",
+        "type": "github"
+      },
+      "original": {
+        "owner": "Veridise",
+        "repo": "pcl-mlir",
+        "type": "github"
+      }
+    },
+    "pcl-mlir-pkg_2": {
+      "inputs": {
+        "flake-utils": [
+          "llzk-rs-pkgs",
+          "llzk-pkgs",
+          "flake-utils"
+        ],
+        "nixpkgs": [
+          "llzk-rs-pkgs",
+          "llzk-pkgs",
+          "nixpkgs"
+        ],
+        "release-helpers": [
+          "llzk-rs-pkgs",
+          "release-helpers"
+        ],
+        "shared-pkgs": [
+          "llzk-rs-pkgs",
+          "llzk-pkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1762544039,
+        "narHash": "sha256-Esd4SAzUt5G3esTa6fTmivKpRScEROwSME4nN/SAU4w=",
+        "owner": "Veridise",
+        "repo": "pcl-mlir",
+        "rev": "55cf619b032314198aacafc305871fb66b12b70e",
         "type": "github"
       },
       "original": {

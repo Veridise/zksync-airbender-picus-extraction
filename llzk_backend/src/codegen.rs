@@ -7,6 +7,7 @@ use llzk::dialect::felt;
 use llzk::prelude::*;
 use prover::cs::constraint::Constraint;
 use prover::cs::constraint::Term;
+use prover::cs::cs::circuit::CircuitOutput;
 use prover::cs::cs::circuit::RangeCheckQuery;
 use prover::cs::definitions::LookupInput;
 use prover::cs::definitions::OpcodeFamilyCircuitState;

@@ -3,6 +3,7 @@ use clap::Parser;
 use clap::Subcommand;
 use clap::ValueEnum;
 use llzk_backend::dump_add_sub_lui_auipc_mop;
+use llzk_backend::output_format::OutputFormat;
 use llzk_backend::setup_logging;
 
 #[derive(ValueEnum, Clone, Copy, PartialEq, Eq)]
