@@ -248,12 +248,13 @@ impl<F: PrimeField + FieldInfo> Deref for NamedCircuitOutput<F> {
     }
 }
 
-// TODO: when PrimeField is implemented by more than one class (currently only
-// ever mersenne31), then we should implement EmitLLZKInModule for PrimeField.
 impl<'ctx, F: PrimeField + FieldInfo> EmitLLZKInModule<'ctx> for NamedCircuitOutput<F> {
     type Output = ();
 
     fn emit_llzk(&self, builder: &ModuleBuilder<'ctx>) -> Result<Self::Output> {
+        // TODO: emit field spec for FieldInfo, if needed (currently not, since mersenne31
+        // is builtin)
+
         let mut struct_builder = StructBuilder::new(builder.context(), self.name());
 
         // Sanity check: all variables should be an input, output, or intermediate,
