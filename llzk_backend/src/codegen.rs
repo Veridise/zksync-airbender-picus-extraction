@@ -222,15 +222,6 @@ impl<F: PrimeField> VariableExtractor for CircuitOutput<F> {
     }
 }
 
-/// Trait for generating LLZK within a given module.
-pub trait GenerateLlzk {
-    fn generate_in_module<'ctx>(
-        &self,
-        builder: &'ctx ModuleBuilder<'ctx>,
-        struct_name: &str,
-    ) -> Result<()>;
-}
-
 fn num_vars(vars: impl IntoIterator<Item = ExtractedVariable>) -> usize {
     vars.into_iter().map(|v| v.num_vars()).sum()
 }
@@ -298,7 +289,9 @@ impl<'ctx, F: PrimeField + FieldInfo> EmitLLZKInModule<'ctx> for NamedCircuitOut
     }
 }
 
-impl<'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZKInStruct<'ctx, 'sco> for RangeCheckQuery<F> {
+impl<'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZKInStruct<'ctx, 'sco>
+    for RangeCheckQuery<F>
+{
     type Output = ();
 
     fn emit_llzk(
@@ -317,7 +310,9 @@ impl<'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZKInStruct<'ctx, 'sco> f
     }
 }
 
-impl<'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZKInStruct<'ctx, 'sco> for (Constraint<F>, bool) {
+impl<'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZKInStruct<'ctx, 'sco>
+    for (Constraint<F>, bool)
+{
     type Output = ();
 
     fn emit_llzk(

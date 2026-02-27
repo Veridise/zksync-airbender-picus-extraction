@@ -7,7 +7,6 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::iter::Map;
 use std::ops::Deref;
 
 use anyhow::anyhow;
@@ -106,6 +105,7 @@ enum InsertionPoint {
     /// End of function (before the terminator, if any)
     End,
     /// At a concrete position.
+    #[allow(dead_code)]
     At(usize),
 }
 
@@ -171,6 +171,7 @@ impl<'ctx, 'sco> OpsBuilder<'ctx, 'sco> {
 
     /// Inserts an operation with no results at the start.
     #[inline]
+    #[allow(dead_code)]
     pub fn insert_op_with_no_results_at_start(&self, op: Operation<'ctx>) -> Result<()> {
         let _ = self.insert_operation(InsertionPoint::Start, op)?;
         Ok(())
@@ -178,6 +179,7 @@ impl<'ctx, 'sco> OpsBuilder<'ctx, 'sco> {
 
     /// Inserts an operation with results at the start.
     #[inline]
+    #[allow(dead_code)]
     pub fn insert_op_with_results_at_start<const N: usize>(
         &self,
         op: Operation<'ctx>,
@@ -194,6 +196,7 @@ impl<'ctx, 'sco> OpsBuilder<'ctx, 'sco> {
 
     /// Inserts an operation with no results at the given position.
     #[inline]
+    #[allow(dead_code)]
     pub fn insert_op_with_no_results_at(&self, pos: usize, op: Operation<'ctx>) -> Result<()> {
         let _ = self.insert_operation(InsertionPoint::At(pos), op)?;
         Ok(())
@@ -201,6 +204,7 @@ impl<'ctx, 'sco> OpsBuilder<'ctx, 'sco> {
 
     /// Inserts an operation with results at the given position.
     #[inline]
+    #[allow(dead_code)]
     pub fn insert_op_with_results_at<const N: usize>(
         &self,
         pos: usize,
@@ -212,6 +216,7 @@ impl<'ctx, 'sco> OpsBuilder<'ctx, 'sco> {
 
     /// Inserts an operation with one result at the given position.
     #[inline]
+    #[allow(dead_code)]
     pub fn insert_op_with_result_at(
         &self,
         pos: usize,
@@ -452,6 +457,7 @@ impl<'ctx, 'str> StructBuilder<'ctx, 'str> {
     }
 
     /// Sets the location of the struct.
+    #[allow(dead_code)]
     pub fn with_location(&mut self, location: Location<'ctx>) -> &mut Self {
         self.location = Some(location);
         self

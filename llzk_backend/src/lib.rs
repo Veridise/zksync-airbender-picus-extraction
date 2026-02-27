@@ -10,10 +10,9 @@ use std::io::Write as _;
 use std::path::Path;
 
 use crate::builder::ModuleBuilder;
-use crate::codegen::EmitLLZKInModule;
-use crate::codegen::GenerateLlzk as _;
-use crate::output_format::OutputFormat;
+use crate::codegen::EmitLLZKInModule as _;
 use crate::codegen::NamedCircuitOutput;
+use crate::output_format::OutputFormat;
 
 mod builder;
 mod codegen;
@@ -158,8 +157,7 @@ fn run_optimizer_pipeline(
     // Then, if enabled, convert the LLZK IR into PCL IR.
     if matches!(format, OutputFormat::Pcl) {
         pm.add_pass(llzk::passes::create_array_to_scalar_pass());
-        todo!("PCL pass not exposed yet!");
-        // pm.add_pass(llzk::passes::create_pcl_to_llzk_pass());
+        pm.add_pass(llzk::passes::create_pcl_lowering_pass());
     }
     pm.run(module)?;
     Ok(())
