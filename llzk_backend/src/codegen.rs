@@ -1,4 +1,7 @@
+//! Traits and implementations for primary LLZK generation tasks.
+
 use std::collections::HashMap;
+use std::ops::Deref;
 
 use anyhow::anyhow;
 use anyhow::Result;
@@ -17,15 +20,15 @@ use prover::field::PrimeField;
 use crate::builder::*;
 use crate::field::FieldInfo;
 
-/// This enum holds the possible representations for SSA values
-pub enum SsaAddress<'ctx, 'val> {
-    /// Represents a single variable that is neither an input or an output.
-    /// It's encoded as a struct member of [`FeltType`].
-    Intermediate(Value<'ctx, 'val>),
+/// Trait implemented by types that can emit LLZK IR within the module scope.
+pub(crate) trait EmitLLZKInModule<'ctx> {
+    type Output;
+
+    fn emit_llzk(&self, builder: &ModuleBuilder<'ctx>) -> Result<Self::Output>;
 }
 
-/// Trait implemented by types that can emit LLZK IR.
-trait EmitLLZK<'ctx: 'sco, 'sco> {
+/// Trait implemented by types that can emit LLZK IR within a struct function scope.
+trait EmitLLZKInStruct<'ctx: 'sco, 'sco> {
     type Output;
 
     fn emit_llzk(
@@ -35,7 +38,9 @@ trait EmitLLZK<'ctx: 'sco, 'sco> {
     ) -> Result<Self::Output>;
 }
 
-impl<'ctx: 'sco, 'sco, T: EmitLLZK<'ctx, 'sco, Output = ()>> EmitLLZK<'ctx, 'sco> for Vec<T> {
+impl<'ctx: 'sco, 'sco, T: EmitLLZKInStruct<'ctx, 'sco, Output = ()>> EmitLLZKInStruct<'ctx, 'sco>
+    for Vec<T>
+{
     type Output = ();
 
     fn emit_llzk(
@@ -55,6 +60,7 @@ pub trait AddConstraints<'ctx: 'op, 'op>: StructDefOpLike<'ctx, 'op> {
     /// All ops added with the [`OpsBuilder`] are automatically added to that function.
     fn add_constraints(
         &'op self,
+        builder: &'ctx ModuleBuilder<'ctx>,
         f: impl FnOnce(&mut OpsBuilder<'ctx, 'op>) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
         let constrain_fn = self.get_constrain_func().ok_or_else(|| {
@@ -63,8 +69,8 @@ pub trait AddConstraints<'ctx: 'op, 'op>: StructDefOpLike<'ctx, 'op> {
                 StructDefOpLike::name(self)
             )
         })?;
-        let mut builder = OpsBuilder::new(unsafe { self.context().to_ref() }, constrain_fn);
-        f(&mut builder)
+        let mut ops_builder = OpsBuilder::new(builder, constrain_fn);
+        f(&mut ops_builder)
     }
 }
 
@@ -220,8 +226,7 @@ impl<F: PrimeField> VariableExtractor for CircuitOutput<F> {
 pub trait GenerateLlzk {
     fn generate_in_module<'ctx>(
         &self,
-        context: &'ctx Context,
-        module: &Module<'ctx>,
+        builder: &'ctx ModuleBuilder<'ctx>,
         struct_name: &str,
     ) -> Result<()>;
 }
@@ -230,15 +235,35 @@ fn num_vars(vars: impl IntoIterator<Item = ExtractedVariable>) -> usize {
     vars.into_iter().map(|v| v.num_vars()).sum()
 }
 
-impl<F: PrimeField + FieldInfo> GenerateLlzk for CircuitOutput<F> {
-    fn generate_in_module<'ctx>(
-        &self,
-        ctx: &'ctx Context,
-        module: &Module<'ctx>,
-        struct_name: &str,
-    ) -> Result<()> {
-        let llzk_builder = Builder::new(&ctx);
-        let mut struct_builder = StructBuilder::new(&ctx, struct_name);
+/// Associates a struct name with a CircuitOutput
+pub struct NamedCircuitOutput<F: PrimeField + FieldInfo>(CircuitOutput<F>, String);
+
+impl<F: PrimeField + FieldInfo> NamedCircuitOutput<F> {
+    pub fn new(co: CircuitOutput<F>, name: &str) -> Self {
+        Self(co, name.to_string())
+    }
+
+    /// Return a reference to the circuit's name.
+    pub fn name(&self) -> &str {
+        &self.1
+    }
+}
+
+impl<F: PrimeField + FieldInfo> Deref for NamedCircuitOutput<F> {
+    type Target = CircuitOutput<F>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+// TODO: when PrimeField is implemented by more than one class (currently only
+// ever mersenne31), then we should implement EmitLLZKInModule for PrimeField.
+impl<'ctx, F: PrimeField + FieldInfo> EmitLLZKInModule<'ctx> for NamedCircuitOutput<F> {
+    type Output = ();
+
+    fn emit_llzk(&self, builder: &ModuleBuilder<'ctx>) -> Result<Self::Output> {
+        let mut struct_builder = StructBuilder::new(builder.context(), self.name());
 
         // Sanity check: all variables should be an input, output, or intermediate,
         // with the exception of the 2 variables used to encode the RAM write's
@@ -250,10 +275,10 @@ impl<F: PrimeField + FieldInfo> GenerateLlzk for CircuitOutput<F> {
         let expected = self.num_of_variables - 2;
         assert_eq!(extracted, expected);
 
-        let vars = StructVars::new(self, &mut struct_builder, &llzk_builder)?;
-        let struct_op = struct_builder.build_in_module(&module)?;
+        let vars = StructVars::new(self, &mut struct_builder, &builder)?;
+        let struct_op = struct_builder.build_in_module(builder.module())?;
 
-        struct_op.add_constraints(|builder: &mut OpsBuilder<'_, '_>| -> Result<()> {
+        struct_op.add_constraints(builder, |builder: &mut OpsBuilder<'_, '_>| -> Result<()> {
             // Add some constants to reuse at the beginning here.
             builder.insert_constant_at_start::<F>(builder.index_type(), 1)?;
             builder.insert_constant_at_start::<F>(builder.index_type(), 0)?;
@@ -273,7 +298,7 @@ impl<F: PrimeField + FieldInfo> GenerateLlzk for CircuitOutput<F> {
     }
 }
 
-impl<'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZK<'ctx, 'sco> for RangeCheckQuery<F> {
+impl<'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZKInStruct<'ctx, 'sco> for RangeCheckQuery<F> {
     type Output = ();
 
     fn emit_llzk(
@@ -292,7 +317,7 @@ impl<'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZK<'ctx, 'sco> for Range
     }
 }
 
-impl<'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZK<'ctx, 'sco> for (Constraint<F>, bool) {
+impl<'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZKInStruct<'ctx, 'sco> for (Constraint<F>, bool) {
     type Output = ();
 
     fn emit_llzk(
@@ -318,7 +343,7 @@ impl<'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZK<'ctx, 'sco> for (Cons
     }
 }
 
-impl<'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZK<'ctx, 'sco> for Term<F> {
+impl<'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZKInStruct<'ctx, 'sco> for Term<F> {
     type Output = Value<'ctx, 'sco>;
 
     fn emit_llzk(
@@ -384,7 +409,14 @@ impl<'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZK<'ctx, 'sco> for Term<
 
 /// Holds the information about the variables and their representation in the LLZK struct.
 struct StructVars {
-    field_map: HashMap<Variable, (String, Option<u64>)>,
+    /// Maps internal and output Variables to a tuple (member name, optional index if the member is
+    /// an array type). All members are assumed to be either felts or "registers", which are
+    /// flat, two-element felt arrays.
+    member_map: HashMap<Variable, (String, Option<u64>)>,
+    /// Maps input Variables to a tuple (arg number, optional index if the member is an array
+    /// type). Argument numbers start at 1 since the 0th argument is the `self` argument to the
+    /// LLZK @constrain function. All members are assumed to be either felts or "registers",
+    /// which are flat, two-element felt arrays.
     arg_map: HashMap<Variable, (usize, Option<u64>)>,
 }
 
@@ -392,7 +424,7 @@ impl StructVars {
     fn new<'ctx, F: PrimeField + FieldInfo>(
         co: &CircuitOutput<F>,
         struct_builder: &mut StructBuilder<'ctx, '_>,
-        llzk_builder: &Builder<'ctx>,
+        llzk_builder: &ModuleBuilder<'ctx>,
     ) -> Result<Self> {
         // Add inputs to struct
         // maps Variable to (input argument, optional index if array)
@@ -413,19 +445,19 @@ impl StructVars {
         }
         // Add outputs to struct
         // Maps CircuitOutput variable to (field name, index)
-        let mut field_map: HashMap<Variable, (String, Option<u64>)> = HashMap::new();
+        let mut member_map: HashMap<Variable, (String, Option<u64>)> = HashMap::new();
         for output in co.get_outputs()?.iter() {
             // TODO: better naming scheme
             match &output {
                 ExtractedVariable::Register { low, high } => {
                     let name = format!("out_reg_{}_{}", low.0, high.0);
-                    field_map.insert(*low, (name.clone(), Some(0)));
-                    field_map.insert(*high, (name.clone(), Some(1)));
+                    member_map.insert(*low, (name.clone(), Some(0)));
+                    member_map.insert(*high, (name.clone(), Some(1)));
                     struct_builder.with_member(name, llzk_builder.register_type::<F>(), true);
                 }
                 ExtractedVariable::Scalar(variable) => {
                     let name = format!("out_var_{}", variable.0);
-                    field_map.insert(*variable, (name.clone(), None));
+                    member_map.insert(*variable, (name.clone(), None));
                     struct_builder.with_member(name, llzk_builder.felt_type::<F>(), true);
                 }
             }
@@ -435,19 +467,22 @@ impl StructVars {
             match &output {
                 ExtractedVariable::Register { low, high } => {
                     let name = format!("internal_reg_{}_{}", low.0, high.0);
-                    field_map.insert(*low, (name.clone(), Some(0)));
-                    field_map.insert(*high, (name.clone(), Some(1)));
+                    member_map.insert(*low, (name.clone(), Some(0)));
+                    member_map.insert(*high, (name.clone(), Some(1)));
                     struct_builder.with_member(name, llzk_builder.register_type::<F>(), false);
                 }
                 ExtractedVariable::Scalar(variable) => {
                     let name = format!("internal_var_{}", variable.0);
-                    field_map.insert(*variable, (name.clone(), None));
+                    member_map.insert(*variable, (name.clone(), None));
                     struct_builder.with_member(name, llzk_builder.felt_type::<F>(), false);
                 }
             }
         }
 
-        Ok(Self { field_map, arg_map })
+        Ok(Self {
+            member_map,
+            arg_map,
+        })
     }
 
     fn get_val<'ctx, 'sco, F: FieldInfo>(
@@ -494,7 +529,7 @@ impl StructVars {
         builder: &OpsBuilder<'ctx, 'sco>,
         var: &Variable,
     ) -> Result<Option<Value<'ctx, 'sco>>> {
-        match self.field_map.get(var) {
+        match self.member_map.get(var) {
             None => Ok(None),
             Some((member_name, index)) => {
                 let self_val = builder.get_arg_value(0)?;

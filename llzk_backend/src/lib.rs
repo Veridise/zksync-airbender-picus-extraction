@@ -9,8 +9,11 @@ use std::fs::{self};
 use std::io::Write as _;
 use std::path::Path;
 
+use crate::builder::ModuleBuilder;
+use crate::codegen::EmitLLZKInModule;
 use crate::codegen::GenerateLlzk as _;
 use crate::output_format::OutputFormat;
+use crate::codegen::NamedCircuitOutput;
 
 mod builder;
 mod codegen;
@@ -73,9 +76,11 @@ fn dump_llzk_command(
     // Generate an empty LLZK module
     let ctx = LlzkContext::new();
     let mut module = llzk_module(Location::unknown(&ctx));
+    let builder = ModuleBuilder::new(&ctx, &module);
 
     // Add the circuit output to it.
-    circuit_output.generate_in_module(&ctx, &module, name)?;
+    let named_circuit_output = NamedCircuitOutput::new(circuit_output, name);
+    named_circuit_output.emit_llzk(&builder)?;
 
     // Verify the module
     verify_operation_with_diags(&module.as_operation())?;

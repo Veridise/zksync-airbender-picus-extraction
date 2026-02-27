@@ -25,20 +25,27 @@ use prover::cs::definitions::REGISTER_SIZE;
 
 use crate::field::FieldInfo;
 
-/// Generic builder with convenience factory methods.
-pub struct Builder<'ctx> {
+/// Root builder with convenience factory methods and access to the root LLZK module.
+pub struct ModuleBuilder<'ctx> {
     context: &'ctx Context,
+    /// The root LLZK module.
+    module: &'ctx Module<'ctx>,
 }
 
-impl<'ctx> Builder<'ctx> {
+impl<'ctx> ModuleBuilder<'ctx> {
     /// Creates a new builder.
-    pub fn new(context: &'ctx Context) -> Self {
-        Self { context }
+    pub fn new(context: &'ctx Context, module: &'ctx Module<'ctx>) -> Self {
+        Self { context, module }
     }
 
     /// Returns a reference to the context.
     pub fn context(&self) -> &'ctx Context {
         self.context
+    }
+
+    /// Returns a reference to the root module.
+    pub fn module(&self) -> &Module<'ctx> {
+        self.module
     }
 
     /// Returns the unknown location.
@@ -80,7 +87,7 @@ impl<'ctx> Builder<'ctx> {
     }
 
     /// Get a register type, which is a two-element felt array.
-    /// TODO: This is probably too representation dependent, move elsewhere.
+    /// TODO: This is probably too representation dependent, move elsewhere?
     pub fn register_type<F: FieldInfo>(&self) -> Type<'ctx> {
         ArrayType::new(
             self.felt_type::<F>(),
@@ -122,7 +129,7 @@ impl<'ctx> PartialOrd for ConstOpKey<'ctx> {
 
 /// Operations builder that handles insertion of operations in the target function.
 pub struct OpsBuilder<'ctx, 'sco> {
-    builder: Builder<'ctx>,
+    builder: &'ctx ModuleBuilder<'ctx>,
     scope: FuncDefOpRef<'ctx, 'sco>,
     /// Cache of constant op values of specified type at the beginning of the
     /// function scope. Using a BTreeMap since [Type] is not hashable.
@@ -131,10 +138,10 @@ pub struct OpsBuilder<'ctx, 'sco> {
 
 impl<'ctx, 'sco> OpsBuilder<'ctx, 'sco> {
     /// Creates a new builder.
-    pub fn new(context: &'ctx Context, scope: FuncDefOpRef<'ctx, 'sco>) -> Self {
+    pub fn new(builder: &'ctx ModuleBuilder<'ctx>, scope: FuncDefOpRef<'ctx, 'sco>) -> Self {
         Self {
             scope,
-            builder: Builder::new(context),
+            builder,
             const_vals: BTreeMap::new().into(),
         }
     }
@@ -398,7 +405,7 @@ impl<'ctx, 'sco> OpsBuilder<'ctx, 'sco> {
 }
 
 impl<'ctx> Deref for OpsBuilder<'ctx, '_> {
-    type Target = Builder<'ctx>;
+    type Target = ModuleBuilder<'ctx>;
 
     fn deref(&self) -> &Self::Target {
         &self.builder
