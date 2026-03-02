@@ -1,6 +1,10 @@
 use std::collections::BTreeMap;
 
-use crate::pcl::{current_modulus, reduce_mod, PicusCall, PicusConstraint, PicusExpr};
+use crate::pcl::current_modulus;
+use crate::pcl::reduce_mod;
+use crate::pcl::PicusCall;
+use crate::pcl::PicusConstraint;
+use crate::pcl::PicusExpr;
 
 // === Helpers ===
 
