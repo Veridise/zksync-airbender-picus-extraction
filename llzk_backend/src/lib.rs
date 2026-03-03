@@ -1,8 +1,6 @@
 use anyhow::Result;
 use clap::ValueEnum;
 use llzk::prelude::*;
-use picus::PicusModule;
-use picus::PicusProgram;
 use prover::cs::cs::circuit::Circuit as _;
 use prover::cs::cs::cs_reference::BasicAssembly;
 use prover::cs::one_row_compiler::OneRowCompiler;
@@ -17,13 +15,13 @@ use crate::builder::ModuleBuilder;
 use crate::codegen::EmitLLZKInModule as _;
 use crate::codegen::NamedCircuitOutput;
 use crate::output_format::OutputFormat;
-use crate::pcl_conversion::to_pcl;
+
+use llzk::target::translate_module_to_pcl;
 
 mod builder;
 mod codegen;
 mod field;
 pub mod output_format;
-mod pcl_conversion;
 
 pub fn setup_logging() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -61,17 +59,21 @@ pub fn gen_add_sub_lui_auipc_mop(
 /// and PCL code.
 enum GenCircuitResult<'ctx> {
     Mlir(&'ctx Module<'ctx>),
-    Pcl(PicusProgram),
+    Pcl(String),
 }
 
 impl<'ctx> GenCircuitResult<'ctx> {
     /// Construct a new result from the given MLIR module based on the expected
     /// output format.
-    pub fn new<F: PrimeField>(format: OutputFormat, module: &'ctx Module<'ctx>) -> Self {
-        match format {
+    pub fn new<F: PrimeField>(format: OutputFormat, module: &'ctx Module<'ctx>) -> Result<Self> {
+        Ok(match format {
             OutputFormat::Llzk | OutputFormat::PclMlir => Self::Mlir(module),
-            OutputFormat::Pcl => Self::Pcl(to_pcl::<F>(module)),
-        }
+            OutputFormat::Pcl => {
+                let mut buf = String::new();
+                translate_module_to_pcl(module, &mut buf)?;
+                Self::Pcl(buf)
+            }
+        })
     }
 
     /// Write the result to the given file.
@@ -128,7 +130,7 @@ fn generate_circuit_command(
     verify_operation_with_diags(&module.as_operation())?;
 
     // Convert to the correct output format
-    let res = GenCircuitResult::new::<Mersenne31Field>(format, &module);
+    let res = GenCircuitResult::new::<Mersenne31Field>(format, &module)?;
 
     // Write to file
     write_result(&res, format, output, name)?;
