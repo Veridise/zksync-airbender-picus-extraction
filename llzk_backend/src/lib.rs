@@ -1,23 +1,29 @@
 use anyhow::Result;
+use clap::ValueEnum;
 use llzk::prelude::*;
+use picus::PicusModule;
+use picus::PicusProgram;
 use prover::cs::cs::circuit::Circuit as _;
 use prover::cs::cs::cs_reference::BasicAssembly;
 use prover::cs::one_row_compiler::OneRowCompiler;
 use prover::field::Mersenne31Field;
+use prover::field::PrimeField;
 use std::fs::File;
 use std::fs::{self};
-use std::io::Write as _;
+use std::io::Write;
 use std::path::Path;
 
 use crate::builder::ModuleBuilder;
 use crate::codegen::EmitLLZKInModule as _;
 use crate::codegen::NamedCircuitOutput;
 use crate::output_format::OutputFormat;
+use crate::pcl_conversion::to_pcl;
 
 mod builder;
 mod codegen;
 mod field;
 pub mod output_format;
+mod pcl_conversion;
 
 pub fn setup_logging() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -27,13 +33,17 @@ pub fn setup_logging() {
         .init();
 }
 
-pub fn dump_add_sub_lui_auipc_mop(output: &str, format: OutputFormat, opt_level: u8) -> Result<()> {
+pub fn gen_add_sub_lui_auipc_mop(
+    output: &str,
+    format: OutputFormat,
+    opt_level: OptLevel,
+) -> Result<()> {
     use add_sub_lui_auipc_mop::ROM_ADDRESS_SPACE_SECOND_WORD_BITS;
     use add_sub_lui_auipc_mop::TRACE_LEN_LOG2;
     use prover::cs::machine::ops::unrolled::add_sub_lui_auipc_mop::add_sub_lui_auipc_mop_circuit_with_preprocessed_bytecode;
     use prover::cs::machine::ops::unrolled::add_sub_lui_auipc_mop::add_sub_lui_auipc_mop_table_addition_fn;
 
-    dump_llzk_command(
+    generate_circuit_command(
         "add_sub_lui_auipc_mop",
         output,
         format,
@@ -47,11 +57,38 @@ pub fn dump_add_sub_lui_auipc_mop(output: &str, format: OutputFormat, opt_level:
     )
 }
 
-fn dump_llzk_command(
+/// A wrapper for the two circuit outputs, that being MLIR formats (LLZK and PCL IR)
+/// and PCL code.
+enum GenCircuitResult<'ctx> {
+    Mlir(&'ctx Module<'ctx>),
+    Pcl(PicusProgram),
+}
+
+impl<'ctx> GenCircuitResult<'ctx> {
+    /// Construct a new result from the given MLIR module based on the expected
+    /// output format.
+    pub fn new<F: PrimeField>(format: OutputFormat, module: &'ctx Module<'ctx>) -> Self {
+        match format {
+            OutputFormat::Llzk | OutputFormat::PclMlir => Self::Mlir(module),
+            OutputFormat::Pcl => Self::Pcl(to_pcl::<F>(module)),
+        }
+    }
+
+    /// Write the result to the given file.
+    pub fn dump<F: Write>(&self, file: &mut F) -> Result<()> {
+        match self {
+            GenCircuitResult::Mlir(module) => write!(file, "{}", module.as_operation())?,
+            GenCircuitResult::Pcl(picus_program) => write!(file, "{}", picus_program)?,
+        }
+        Ok(())
+    }
+}
+
+fn generate_circuit_command(
     name: &str,
     output: &str,
     format: OutputFormat,
-    opt_level: u8,
+    opt_level: OptLevel,
     bytecode_size: usize,
     trace_len_log2: usize,
     synthesis_fn: impl Fn(&mut BasicAssembly<Mersenne31Field>),
@@ -90,18 +127,26 @@ fn dump_llzk_command(
     // Verify again
     verify_operation_with_diags(&module.as_operation())?;
 
+    // Convert to the correct output format
+    let res = GenCircuitResult::new::<Mersenne31Field>(format, &module);
+
     // Write to file
-    write_result(&module, output, name)?;
+    write_result(&res, format, output, name)?;
 
     Ok(())
 }
 
-fn write_result(module: &Module, output: &str, name: &str) -> Result<()> {
+fn write_result<'ctx>(
+    res: &GenCircuitResult<'ctx>,
+    format: OutputFormat,
+    output: &str,
+    name: &str,
+) -> Result<()> {
     match output {
         // Stdout.
         "-" => {
             let mut file = std::io::stdout();
-            write!(file, "{}", module.as_operation())?;
+            res.dump(&mut file)?;
             eprintln!("Written successfully!");
         }
         // A file.
@@ -112,53 +157,81 @@ fn write_result(module: &Module, output: &str, name: &str) -> Result<()> {
         {
             let outpath = Path::new(output);
             let mut file = File::create(&outpath).map_err(anyhow::Error::from)?;
-            write!(file, "{}", module.as_operation())?;
+            res.dump(&mut file)?;
             println!("{} {}", "Written successfully:", outpath.display());
         }
         // A directory.
         output => {
             // Write to file
-            let outpath = Path::new(output).join(format!("{name}.llzk"));
+            let file_name = format!("{}.{}", name, format.extension());
+            let outpath = Path::new(output).join(file_name);
             // Ensure parent directories exist
             if let Some(parent) = outpath.parent() {
                 fs::create_dir_all(parent).map_err(anyhow::Error::from)?;
             }
             let mut file = File::create(&outpath).map_err(anyhow::Error::from)?;
-            write!(file, "{}", module.as_operation())?;
+            res.dump(&mut file)?;
             println!("{} {}", "Written successfully:", outpath.display());
         }
     }
     Ok(())
 }
 
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum OptLevel {
+    /// No optimizations
+    #[value(name = "0")]
+    O0,
+    /// Basic MLIR optimizations
+    #[value(name = "1")]
+    O1,
+    /// MLIR and LLZK optimizations
+    #[value(name = "2")]
+    O2,
+}
+
+impl std::fmt::Display for OptLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            self.to_possible_value()
+                .expect("ValueEnum variant should always have a PossibleValue")
+                .get_name(),
+        )
+    }
+}
+
 fn run_optimizer_pipeline(
     ctx: &Context,
     module: &mut Module,
     format: OutputFormat,
-    opt_level: u8,
+    opt_level: OptLevel,
 ) -> Result<()> {
     let pm = PassManager::new(&ctx);
     // First cleanup the IR
     match opt_level {
-        0 => {} // No opt.
-        1 => {
+        OptLevel::O0 => {} // No opt.
+        OptLevel::O1 => {
             pm.add_pass(melior_passes::create_cse());
             pm.add_pass(melior_passes::create_canonicalizer());
         }
-        2 => {
+        OptLevel::O2 => {
             pm.add_pass(melior_passes::create_canonicalizer());
             pm.add_pass(llzk::passes::create_redundant_read_and_write_elimination_pass());
             pm.add_pass(melior_passes::create_cse());
             pm.add_pass(melior_passes::create_canonicalizer());
         }
-        _ => anyhow::bail!("Unrecognized optimization level: {opt_level}"),
+    }
+    // Then convert to the output format
+    match format {
+        OutputFormat::Llzk => {} // LLZK is the default
+        OutputFormat::PclMlir | OutputFormat::Pcl => {
+            // Convert to PCL IR
+            pm.add_pass(llzk::passes::create_array_to_scalar_pass());
+            pm.add_pass(llzk::passes::create_pcl_lowering_pass());
+        }
     }
 
-    // Then, if enabled, convert the LLZK IR into PCL IR.
-    if matches!(format, OutputFormat::Pcl) {
-        pm.add_pass(llzk::passes::create_array_to_scalar_pass());
-        pm.add_pass(llzk::passes::create_pcl_lowering_pass());
-    }
     pm.run(module)?;
     Ok(())
 }

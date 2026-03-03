@@ -252,8 +252,9 @@ impl<'ctx, F: PrimeField + FieldInfo> EmitLLZKInModule<'ctx> for NamedCircuitOut
     type Output = ();
 
     fn emit_llzk(&self, builder: &ModuleBuilder<'ctx>) -> Result<Self::Output> {
-        // TODO: emit field spec for FieldInfo, if needed (currently not, since mersenne31
-        // is builtin)
+        if !F::is_built_in() {
+            todo!("expose FieldSpecAttr and add the attribute to the module")
+        }
 
         let mut struct_builder = StructBuilder::new(builder.context(), self.name());
 
