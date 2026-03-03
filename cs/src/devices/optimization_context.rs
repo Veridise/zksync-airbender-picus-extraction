@@ -1691,6 +1691,16 @@ impl<F: PrimeField, CS: Circuit<F>> OptimizationContext<F, CS> {
 
             assert!(flags.len() > 0);
 
+            // Build disjunctive lookup cases by pairing each execution flag with its row values and table id;
+            // later selection logic will pick one active case (or the zero fallback when none is active).
+            let cases: Vec<DisjunctiveLookupCase<F>> = flags
+                .iter()
+                .cloned()
+                .zip(var_arrays.iter().cloned())
+                .zip(table_ids.iter().cloned())
+                .map(|((flag, row), table)| DisjunctiveLookupCase { flag, row, table })
+                .collect();
+
             // NOTE: here we must select such that in case if particular opcode doesn't use a table all available
             // lookups, then it would degrade to 0/0/0 case. So we select from orthogonal values, and in the worst
             // case we will indeed get 0s everywhere
@@ -1715,6 +1725,10 @@ impl<F: PrimeField, CS: Circuit<F>> OptimizationContext<F, CS> {
                     .collect();
 
                 cs.choose_from_orthogonal_variants_for_linear_terms(&flags, &variants)
+            });
+            cs.add_disjunctive_lookup_hint(DisjunctiveLookup {
+                relation_index: cur_index,
+                cases,
             });
             let table_id = cs.choose_from_orthogonal_variants(&flags, &table_ids);
 

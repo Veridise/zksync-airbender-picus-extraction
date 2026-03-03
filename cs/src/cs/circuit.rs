@@ -134,6 +134,24 @@ pub struct LookupQuery<F: PrimeField> {
     pub table: LookupQueryTableType,
 }
 
+#[derive(Clone, Debug)]
+pub struct DisjunctiveLookupCase<F: PrimeField> {
+    pub flag: Boolean,
+    pub row: [LookupInput<F>; COMMON_TABLE_WIDTH],
+    pub table: Num<F>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DisjunctiveLookup<F: PrimeField> {
+    pub relation_index: usize,
+    pub cases: Vec<DisjunctiveLookupCase<F>>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PicusExtractionMetadata<F: PrimeField> {
+    pub disjunctive_lookups: Vec<DisjunctiveLookup<F>>,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum LookupQueryTableType {
     Variable(Variable),
@@ -296,6 +314,7 @@ pub struct CircuitOutput<F: PrimeField> {
     pub range_check_expressions: Vec<RangeCheckQuery<F>>,
     pub boolean_vars: Vec<Variable>,
     pub substitutions: HashMap<(Placeholder, usize), Variable>,
+    pub picus_extraction_metadata: PicusExtractionMetadata<F>,
 }
 
 impl<F: PrimeField> CircuitOutput<F> {
@@ -348,6 +367,7 @@ pub trait Circuit<F: PrimeField>: Sized {
 
     fn materialize_table(&mut self, table_type: TableType);
     fn add_table_with_content(&mut self, table_type: TableType, table: LookupWrapper<F>);
+    fn add_disjunctive_lookup_hint(&mut self, _hint: DisjunctiveLookup<F>) {}
 
     #[track_caller]
     fn add_boolean_variable(&mut self) -> Boolean {

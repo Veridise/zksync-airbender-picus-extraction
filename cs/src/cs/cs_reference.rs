@@ -43,6 +43,7 @@ pub struct BasicAssembly<F: PrimeField, W: WitnessPlacer<F> = CSDebugWitnessEval
     witness_graph: WitnessResolutionGraph<F, W>,
 
     logger: Vec<(&'static str, u64, OptCtxIndexers)>,
+    picus_extraction_metadata: PicusExtractionMetadata<F>,
 }
 
 impl<F: PrimeField, W: WitnessPlacer<F>> Circuit<F> for BasicAssembly<F, W> {
@@ -71,6 +72,7 @@ impl<F: PrimeField, W: WitnessPlacer<F>> Circuit<F> for BasicAssembly<F, W> {
             witness_placer: None,
 
             logger: vec![],
+            picus_extraction_metadata: PicusExtractionMetadata::default(),
         }
     }
 
@@ -124,6 +126,12 @@ impl<F: PrimeField, W: WitnessPlacer<F>> Circuit<F> for BasicAssembly<F, W> {
                 }
             }
         }
+    }
+
+    fn add_disjunctive_lookup_hint(&mut self, hint: DisjunctiveLookup<F>) {
+        self.picus_extraction_metadata
+            .disjunctive_lookups
+            .push(hint);
     }
 
     #[track_caller]
@@ -1006,6 +1014,7 @@ impl<F: PrimeField, W: WitnessPlacer<F>> Circuit<F> for BasicAssembly<F, W> {
             register_and_indirect_memory_accesses,
             decoder_machine_state,
             executor_machine_state,
+            picus_extraction_metadata,
             ..
         } = self;
 
@@ -1036,6 +1045,7 @@ impl<F: PrimeField, W: WitnessPlacer<F>> Circuit<F> for BasicAssembly<F, W> {
             register_and_indirect_memory_accesses,
             decoder_machine_state,
             executor_machine_state,
+            picus_extraction_metadata,
         };
 
         (output, self.witness_placer)

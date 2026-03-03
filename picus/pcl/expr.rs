@@ -1,27 +1,17 @@
-use std::collections::HashMap;
-use std::fmt::Display;
-use std::fmt::Formatter;
-use std::fmt::{self};
-use std::iter::Product;
-use std::iter::Sum;
-use std::ops::Add;
-use std::ops::AddAssign;
-use std::ops::Mul;
-use std::ops::MulAssign;
-use std::ops::Neg;
-use std::ops::Sub;
-use std::ops::SubAssign;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use std::sync::OnceLock;
-use std::sync::RwLock;
+use std::{
+    collections::HashMap,
+    fmt::{self, Display, Formatter},
+    iter::{Product, Sum},
+    ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, OnceLock, RwLock,
+    },
+};
 
-use field::Mersenne31Field;
-use field::PrimeField;
+use field::{Mersenne31Field, PrimeField};
 
-/// Mapping from column ids to variable names. This mapping should be derived in the `PicusInfo`
-/// struct
+/// Mapping from column ids to variable names. This mapping should be derived in the `PicusInfo` struct
 static PICUS_NAMES_GLOBAL: OnceLock<RwLock<HashMap<usize, String>>> = OnceLock::new();
 
 /// Maintains col indices for fresh variables during the course of extraction
@@ -87,8 +77,8 @@ pub fn reduce_mod(c: i64) -> u64 {
 /// Arithmetic expressions over the Picus constraint language (PCL).
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub enum PicusExpr {
-    /// Constant field element. We use a `u64` to be safe because the prime is 31 bits and we don't
-    /// want to deal with underflows or overflows
+    /// Constant field element. We use a `u64` to be safe because the prime is 31 bits and we don't want to deal with
+    /// underflows or overflows
     Const(u64),
     /// Variable identified by `(name, index, tag)`, printed as `name_index_tag`. NOTE: Tag might
     /// be droppable
@@ -161,9 +151,7 @@ impl Add<Felt> for PicusAtom {
 
     fn add(self, rhs: Felt) -> Self::Output {
         match self {
-            PicusAtom::Const(c) => {
-                PicusExpr::Const((c + (rhs.0 as u64)).rem_euclid(Felt::CHARACTERISTICS))
-            }
+            PicusAtom::Const(c) => PicusExpr::Const((c + (rhs.0 as u64)).rem_euclid(Felt::CHARACTERISTICS)),
             PicusAtom::Var(v) => PicusExpr::Var(v) + PicusExpr::Const(rhs.as_u64()),
         }
     }
@@ -510,6 +498,8 @@ pub enum PicusConstraint {
     And(Box<PicusConstraint>, Box<PicusConstraint>),
     /// p || q
     Or(Box<PicusConstraint>, Box<PicusConstraint>),
+    /// Determinism predicate over an expression
+    Det(Box<PicusExpr>),
     /// Canonical equality-to-zero form: `Eq(e)` represents `e = 0`.
     Eq(Box<PicusExpr>),
 }
@@ -552,6 +542,12 @@ impl PicusConstraint {
     #[must_use]
     pub fn new_geq(left: PicusExpr, right: PicusExpr) -> PicusConstraint {
         PicusConstraint::Geq(Box::new(left), Box::new(right))
+    }
+
+    /// Build a determinism predicate `Det(expr)`.
+    #[must_use]
+    pub fn new_det(expr: PicusExpr) -> PicusConstraint {
+        PicusConstraint::Det(Box::new(expr))
     }
 
     /// Assumes ``l`` and ``u`` fit into the prime
@@ -616,6 +612,7 @@ impl PicusConstraint {
                 let new_right = r.apply_multiplier(multiplier);
                 PicusConstraint::Or(Box::new(new_left), Box::new(new_right))
             }
+            Det(e) => PicusConstraint::Det(Box::new(*e.clone())),
             Eq(e) => {
                 let new_e = multiplier.clone() * (*e.clone());
                 PicusConstraint::Eq(Box::new(new_e))
