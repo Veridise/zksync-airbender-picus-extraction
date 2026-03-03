@@ -49,7 +49,6 @@
             llzk-lib.overlays.default
             llzk-rs-pkgs.overlays.default
             release-helpers.overlays.default
-            pcl-mlir.overlays.default
             rust-overlay.overlays.default
           ];
         };
@@ -101,7 +100,7 @@
         devShells = flake-utils.lib.flattenTree {
           default = pkgs.mkShell (
             {
-              nativeBuildInputs = [ rustToolchain ] ++ pkgs.llzkSharedEnvironment.nativeBuildInputs;
+              nativeBuildInputs = [ rustToolchain pkgs.pre-commit ] ++ pkgs.llzkSharedEnvironment.nativeBuildInputs;
               buildInputs = pkgs.llzkSharedEnvironment.devBuildInputs;
 
               shellHook = ''
@@ -109,6 +108,11 @@
                 set -uo pipefail
                 ${createFileCheckSymlink}
                 echo "Welcome to the airbender-to-llzk devshell!"
+
+                # set up pre-commit
+                pre-commit install
+
+                echo "To commit without pre-commit hooks, use \`git commit --no-verify\`"
               '';
             }
             // pkgs.llzkSharedEnvironment.env

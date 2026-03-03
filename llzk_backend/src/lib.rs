@@ -1,19 +1,16 @@
 use anyhow::Result;
 use llzk::prelude::*;
-use prover::{
-    cs::{
-        cs::{circuit::Circuit as _, cs_reference::BasicAssembly},
-        one_row_compiler::OneRowCompiler,
-    },
-    field::Mersenne31Field,
-};
-use std::{
-    fs::{self, File},
-    io::Write as _,
-    path::Path,
-};
+use prover::cs::cs::circuit::Circuit as _;
+use prover::cs::cs::cs_reference::BasicAssembly;
+use prover::cs::one_row_compiler::OneRowCompiler;
+use prover::field::Mersenne31Field;
+use std::fs::File;
+use std::fs::{self};
+use std::io::Write as _;
+use std::path::Path;
 
-use crate::{codegen::GenerateLlzk as _, output_format::OutputFormat};
+use crate::codegen::GenerateLlzk as _;
+use crate::output_format::OutputFormat;
 
 mod builder;
 mod codegen;
@@ -157,7 +154,7 @@ fn run_optimizer_pipeline(
     if matches!(format, OutputFormat::Pcl) {
         pm.add_pass(llzk::passes::create_array_to_scalar_pass());
         todo!("PCL pass not exposed yet!");
-        //pm.add_pass(llzk::passes::create_pcl_to_llzk_pass());
+        // pm.add_pass(llzk::passes::create_pcl_to_llzk_pass());
     }
     pm.run(module)?;
     Ok(())

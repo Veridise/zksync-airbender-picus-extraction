@@ -1,6 +1,10 @@
 use std::collections::BTreeMap;
 
-use crate::pcl::{current_modulus, reduce_mod, PicusCall, PicusConstraint, PicusExpr};
+use crate::pcl::current_modulus;
+use crate::pcl::reduce_mod;
+use crate::pcl::PicusCall;
+use crate::pcl::PicusConstraint;
+use crate::pcl::PicusExpr;
 
 // === Helpers ===
 
@@ -96,7 +100,11 @@ pub fn subst_call(call: &PicusCall, env: &BTreeMap<usize, u64>) -> PicusCall {
     for output in &call.outputs {
         new_outputs.push(subst_expr(output, env));
     }
-    PicusCall { inputs: new_inputs, outputs: new_outputs, mod_name: call.mod_name.clone() }
+    PicusCall {
+        inputs: new_inputs,
+        outputs: new_outputs,
+        mod_name: call.mod_name.clone(),
+    }
 }
 
 // === Constraint substitution/simplification ===

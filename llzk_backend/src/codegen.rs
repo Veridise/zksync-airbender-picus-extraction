@@ -2,17 +2,17 @@ use std::collections::HashMap;
 
 use anyhow::anyhow;
 use anyhow::Result;
-use llzk::dialect::{constrain, felt};
+use llzk::dialect::constrain;
+use llzk::dialect::felt;
 use llzk::prelude::*;
 use prover::cs::constraint::Constraint;
 use prover::cs::constraint::Term;
+use prover::cs::cs::circuit::CircuitOutput;
 use prover::cs::cs::circuit::RangeCheckQuery;
 use prover::cs::definitions::LookupInput;
 use prover::cs::definitions::OpcodeFamilyCircuitState;
-use prover::{
-    cs::{cs::circuit::CircuitOutput, definitions::Variable},
-    field::PrimeField,
-};
+use prover::cs::definitions::Variable;
+use prover::field::PrimeField;
 
 use crate::builder::*;
 use crate::field::FieldInfo;
@@ -47,7 +47,8 @@ impl<'ctx: 'sco, 'sco, T: EmitLLZK<'ctx, 'sco, Output = ()>> EmitLLZK<'ctx, 'sco
     }
 }
 
-/// Extension trait for [`StructDefOpLike`] that adds a method for filling the `@constrain` function.
+/// Extension trait for [`StructDefOpLike`] that adds a method for filling the `@constrain`
+/// function.
 pub trait AddConstraints<'ctx: 'op, 'op>: StructDefOpLike<'ctx, 'op> {
     /// Invokes the callback scoped in `@constrain`.
     ///

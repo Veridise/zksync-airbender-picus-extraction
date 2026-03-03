@@ -5,24 +5,23 @@
 //! - An operations builder meant for creating ops inside a function.
 //! - A struct builder.
 
-use std::{
-    cell::RefCell,
-    collections::{BTreeMap, HashMap},
-    iter::Map,
-    ops::Deref,
-};
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::iter::Map;
+use std::ops::Deref;
 
-use anyhow::{anyhow, Result};
-use llzk::{
-    builder::OpBuilder,
-    dialect::{bool, constrain, felt},
-    prelude::{
-        dialect::{array, r#struct},
-        melior_dialects::arith,
-        *,
-    },
-    utils::IsA,
-};
+use anyhow::anyhow;
+use anyhow::Result;
+use llzk::builder::OpBuilder;
+use llzk::dialect::bool;
+use llzk::dialect::constrain;
+use llzk::dialect::felt;
+use llzk::prelude::dialect::array;
+use llzk::prelude::dialect::r#struct;
+use llzk::prelude::melior_dialects::arith;
+use llzk::prelude::*;
+use llzk::utils::IsA;
 use prover::cs::definitions::REGISTER_SIZE;
 
 use crate::field::FieldInfo;
