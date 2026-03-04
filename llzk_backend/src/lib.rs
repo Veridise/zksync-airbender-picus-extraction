@@ -16,7 +16,7 @@ use crate::codegen::EmitLLZKInModule as _;
 use crate::codegen::NamedCircuitOutput;
 use crate::output_format::OutputFormat;
 
-use llzk::target::translate_module_to_pcl;
+use llzk::targets::pcl::translate_module;
 
 mod builder;
 mod codegen;
@@ -68,11 +68,7 @@ impl<'ctx> GenCircuitResult<'ctx> {
     pub fn new<F: PrimeField>(format: OutputFormat, module: &'ctx Module<'ctx>) -> Result<Self> {
         Ok(match format {
             OutputFormat::Llzk | OutputFormat::PclMlir => Self::Mlir(module),
-            OutputFormat::Pcl => {
-                let mut buf = String::new();
-                translate_module_to_pcl(module, &mut buf)?;
-                Self::Pcl(buf)
-            }
+            OutputFormat::Pcl => Self::Pcl(translate_module(module)?),
         })
     }
 
