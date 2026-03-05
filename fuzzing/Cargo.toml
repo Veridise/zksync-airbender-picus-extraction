@@ -1,0 +1,22 @@
+[package]
+name = "fuzzing"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "witgen-fuzz"
+path = "src/bin/witgen.rs"
+
+[dependencies]
+clap = { workspace = true }
+env_logger = "0.11"
+log = "0.4"
+prover = { workspace = true, features = ["prover"] }
+add_sub_lui_auipc_mop = { path = "../circuit_defs/unrolled_circuits/add_sub_lui_auipc_mop" }
+rand = "0.10"

@@ -61,7 +61,7 @@ members = [
     "circuit_defs/unrolled_circuits/shift_binary_csr",
     "circuit_defs/unrolled_circuits/unified_reduced_machine",
 
-    "riscv_transpiler", "llzk_backend",
+    "riscv_transpiler", "llzk_backend", "fuzzing"
 ]
 
 default-members = [
