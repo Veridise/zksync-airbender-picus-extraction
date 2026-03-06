@@ -1,3 +1,5 @@
+use add_sub_lui_auipc_mop::ROM_ADDRESS_SPACE_SECOND_WORD_BITS;
+use add_sub_lui_auipc_mop::TRACE_LEN_LOG2;
 use prover::cs::cs::cs_reference::BasicAssembly;
 use prover::cs::cs::oracle::ExecutorFamilyDecoderData;
 use prover::cs::machine::ops::unrolled::add_sub_lui_auipc_mop::add_sub_lui_auipc_mop_circuit_with_preprocessed_bytecode;
@@ -6,12 +8,15 @@ use prover::field::PrimeField;
 use rand::prelude::SmallRng;
 use rand::Rng as _;
 
-use crate::witgen::run_fuzzer;
 use crate::witgen::FuzzTarget;
 
-struct Target;
+pub(crate) struct Target;
 
 impl<F: PrimeField> FuzzTarget<F> for Target {
+    fn name(&self) -> &'static str {
+        "add_sub_lui_auipc_mop"
+    }
+
     fn synthesize(&self, cs: &mut BasicAssembly<F>) {
         add_sub_lui_auipc_mop_table_addition_fn(cs);
         add_sub_lui_auipc_mop_circuit_with_preprocessed_bytecode(cs);
@@ -38,8 +43,12 @@ impl<F: PrimeField> FuzzTarget<F> for Target {
             opcode_family_bits,
         }
     }
-}
 
-pub fn run() {
-    run_fuzzer(&Target);
+    fn bytecode_size(&self) -> usize {
+        (1 << (16 + ROM_ADDRESS_SPACE_SECOND_WORD_BITS)) / 4
+    }
+
+    fn trace_len_log2(&self) -> usize {
+        TRACE_LEN_LOG2 as usize
+    }
 }
