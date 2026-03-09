@@ -12,7 +12,7 @@ use prover::cs::cs::circuit::LookupQuery;
 use prover::cs::tables::TableType;
 use prover::field::PrimeField;
 
-///
+/// Add constraints that the LookupQuery represents based on the parsed table type.
 pub fn add_lookup_constraints_for_table<'ctx, 'sco, F: PrimeField + FieldInfo>(
     builder: &OpsBuilder<'ctx, 'sco>,
     vars: &StructVars,
@@ -31,6 +31,8 @@ pub fn add_lookup_constraints_for_table<'ctx, 'sco, F: PrimeField + FieldInfo>(
     }
 }
 
+/// Multiplies the value by the row_multiplier if one is provided, otherwise
+/// yield the original value.
 fn apply_row_multiplier<'ctx, 'sco, F: PrimeField + FieldInfo>(
     builder: &OpsBuilder<'ctx, 'sco>,
     row_multiplier: Option<Value<'ctx, 'sco>>,

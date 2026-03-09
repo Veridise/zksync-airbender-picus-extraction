@@ -5,7 +5,6 @@ use prover::cs::cs::circuit::Circuit as _;
 use prover::cs::cs::cs_reference::BasicAssembly;
 use prover::cs::one_row_compiler::OneRowCompiler;
 use prover::field::Mersenne31Field;
-use prover::field::PrimeField;
 use std::fs::File;
 use std::fs::{self};
 use std::io::Write;
@@ -90,7 +89,7 @@ enum GenCircuitResult<'ctx> {
 impl<'ctx> GenCircuitResult<'ctx> {
     /// Construct a new result from the given MLIR module based on the expected
     /// output format.
-    pub fn new<F: PrimeField>(format: OutputFormat, module: &'ctx Module<'ctx>) -> Result<Self> {
+    pub fn new(format: OutputFormat, module: &'ctx Module<'ctx>) -> Result<Self> {
         Ok(match format {
             OutputFormat::Llzk | OutputFormat::PclMlir => Self::Mlir(module),
             OutputFormat::Pcl => Self::Pcl(translate_module(module)?),
@@ -154,7 +153,7 @@ fn generate_circuit_command(
     verify_operation_with_diags(&module.as_operation())?;
 
     // Convert to the correct output format
-    let res = GenCircuitResult::new::<Mersenne31Field>(format, &module)?;
+    let res = GenCircuitResult::new(format, &module)?;
 
     // Write to file
     write_result(&res, format, output, name)?;
@@ -182,9 +181,9 @@ fn write_result<'ctx>(
                 .any(|suffix| output.ends_with(suffix)) =>
         {
             let outpath = Path::new(output);
-            let mut file = File::create(&outpath).map_err(anyhow::Error::from)?;
+            let mut file = File::create(outpath).map_err(anyhow::Error::from)?;
             res.dump(&mut file)?;
-            println!("{} {}", "Written successfully:", outpath.display());
+            println!("Written successfully: {}", outpath.display());
         }
         // A directory.
         output => {
@@ -197,7 +196,7 @@ fn write_result<'ctx>(
             }
             let mut file = File::create(&outpath).map_err(anyhow::Error::from)?;
             res.dump(&mut file)?;
-            println!("{} {}", "Written successfully:", outpath.display());
+            println!("Written successfully: {}", outpath.display());
         }
     }
     Ok(())
@@ -233,7 +232,7 @@ fn run_optimizer_pipeline(
     format: OutputFormat,
     opt_level: OptLevel,
 ) -> Result<()> {
-    let pm = PassManager::new(&ctx);
+    let pm = PassManager::new(ctx);
     // First cleanup the IR
     match opt_level {
         OptLevel::O0 => {} // No opt.

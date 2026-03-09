@@ -14,7 +14,8 @@ enum Circuits {
     JumpBranchSlt,
 }
 
-const CIRCUITS: &[(Circuits, fn(&str, OutputFormat, OptLevel) -> Result<()>)] = &[
+type CircuitFnTuple = (Circuits, fn(&str, OutputFormat, OptLevel) -> Result<()>);
+const CIRCUITS: &[CircuitFnTuple] = &[
     (Circuits::AddSubLuiAuipcMop, gen_add_sub_lui_auipc_mop),
     (Circuits::JumpBranchSlt, gen_jump_branch_slt),
 ];

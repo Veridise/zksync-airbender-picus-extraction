@@ -208,7 +208,7 @@ impl<F: PrimeField> VariableExtractor for CircuitOutput<F> {
         // ignore them for now, but they will need to be constrained by the shuffle
         // ram constraints.
         let mut intermediates = (0u64..u64::try_from(self.num_of_variables)?)
-            .map(|i| Variable(i))
+            .map(Variable)
             .filter(|v| {
                 // TODO: We check the ram queries explicitly to ignore the prior write values
                 let in_ram_reads = self
@@ -218,7 +218,7 @@ impl<F: PrimeField> VariableExtractor for CircuitOutput<F> {
                 let in_io = io.iter().any(|x| x.contains(v));
                 !in_io && !in_ram_reads
             })
-            .map(|v| ExtractedVariable::Scalar(v))
+            .map(ExtractedVariable::Scalar)
             .collect::<Vec<_>>();
 
         intermediates.sort();
@@ -272,7 +272,7 @@ impl<'ctx, F: PrimeField + FieldInfo> EmitLLZKInModule<'ctx> for NamedCircuitOut
         let expected = self.num_of_variables - 2;
         assert_eq!(extracted, expected);
 
-        let vars = StructVars::new(self, &mut struct_builder, &builder)?;
+        let vars = StructVars::new(self, &mut struct_builder, builder)?;
         let struct_op = struct_builder.build_in_module(builder.module())?;
 
         struct_op.add_constraints(builder, |builder: &mut OpsBuilder<'_, '_>| -> Result<()> {
@@ -462,7 +462,7 @@ impl<'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZKInStruct<'ctx, 'sco> f
         vars: &StructVars,
     ) -> Result<Self::Output> {
         match self.table {
-            LookupQueryTableType::Variable(variable) => todo!("support variable table lookups"),
+            LookupQueryTableType::Variable(_variable) => todo!("support variable table lookups"),
             LookupQueryTableType::Constant(table_type) => {
                 add_lookup_constraints_for_table(builder, vars, self, table_type, None)
             }
@@ -613,13 +613,12 @@ impl StructVars {
                 let location = builder.unknown_location();
                 match index {
                     None => {
-                        // TODO: specify field?
                         let member_ty = builder.felt_type::<F>();
                         let member_val = builder.append_member_read(
                             location,
                             self_val,
                             member_ty,
-                            &member_name,
+                            member_name,
                         )?;
                         Ok(Some(member_val))
                     }
@@ -629,7 +628,7 @@ impl StructVars {
                             location,
                             self_val,
                             member_ty,
-                            &member_name,
+                            member_name,
                         )?;
                         let indices =
                             &[builder

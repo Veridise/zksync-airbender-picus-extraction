@@ -5,10 +5,8 @@
 //! - An operations builder meant for creating ops inside a function.
 //! - A struct builder.
 
-use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::collections::HashSet;
 use std::ops::Deref;
 
 use anyhow::anyhow;
@@ -23,7 +21,6 @@ use llzk::prelude::melior_dialects::arith;
 use llzk::prelude::*;
 use llzk::utils::IsA;
 use prover::cs::definitions::REGISTER_SIZE;
-use prover::field::Field;
 
 use crate::field::FieldInfo;
 
@@ -280,8 +277,7 @@ impl<'ctx, 'sco> OpsBuilder<'ctx, 'sco> {
             InsertionPoint::At(pos) => {
                 let op = self
                     .operations()
-                    .skip(pos - 1)
-                    .next()
+                    .nth(pos - 1)
                     .ok_or_else(|| anyhow!("operation position {pos} is out of bounds"))?;
 
                 (
@@ -444,7 +440,7 @@ impl<'ctx, 'sco> OpsBuilder<'ctx, 'sco> {
         ) -> Result<Operation<'ctx>, llzk::error::Error>,
     {
         values
-            .into_iter()
+            .iter()
             .map(|v| Ok(*v))
             .reduce(|acc, v| {
                 let add = operation_fn(location, acc?, v?)?;
@@ -496,8 +492,7 @@ impl<'ctx, 'sco> OpsBuilder<'ctx, 'sco> {
         bits: usize,
     ) -> Result<Vec<Value<'ctx, 'sco>>> {
         let bits = (0..bits)
-            .into_iter()
-            .map(|i| {
+            .map(|_| {
                 let bit = self.new_nondet_felt::<F>()?;
                 self.append_boolean_constraint::<F>(bit)?;
                 Ok(bit)
@@ -519,7 +514,7 @@ impl<'ctx, 'sco> OpsBuilder<'ctx, 'sco> {
         bits: &[Value<'ctx, 'sco>],
     ) -> Result<Value<'ctx, 'sco>> {
         let (_, res) = bits
-            .into_iter()
+            .iter()
             .enumerate()
             .map(|(i, v)| Ok((i, *v)))
             .reduce(
@@ -551,7 +546,7 @@ impl<'ctx> Deref for OpsBuilder<'ctx, '_> {
     type Target = ModuleBuilder<'ctx>;
 
     fn deref(&self) -> &Self::Target {
-        &self.builder
+        self.builder
     }
 }
 
