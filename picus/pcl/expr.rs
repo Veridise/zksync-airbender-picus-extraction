@@ -1,17 +1,27 @@
-use std::{
-    collections::HashMap,
-    fmt::{self, Display, Formatter},
-    iter::{Product, Sum},
-    ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, OnceLock, RwLock,
-    },
-};
+use std::collections::HashMap;
+use std::fmt::Display;
+use std::fmt::Formatter;
+use std::fmt::{self};
+use std::iter::Product;
+use std::iter::Sum;
+use std::ops::Add;
+use std::ops::AddAssign;
+use std::ops::Mul;
+use std::ops::MulAssign;
+use std::ops::Neg;
+use std::ops::Sub;
+use std::ops::SubAssign;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::RwLock;
 
-use field::{Mersenne31Field, PrimeField};
+use field::Mersenne31Field;
+use field::PrimeField;
 
-/// Mapping from column ids to variable names. This mapping should be derived in the `PicusInfo` struct
+/// Mapping from column ids to variable names. This mapping should be derived in the `PicusInfo`
+/// struct
 static PICUS_NAMES_GLOBAL: OnceLock<RwLock<HashMap<usize, String>>> = OnceLock::new();
 
 /// Maintains col indices for fresh variables during the course of extraction
@@ -77,8 +87,8 @@ pub fn reduce_mod(c: i64) -> u64 {
 /// Arithmetic expressions over the Picus constraint language (PCL).
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub enum PicusExpr {
-    /// Constant field element. We use a `u64` to be safe because the prime is 31 bits and we don't want to deal with
-    /// underflows or overflows
+    /// Constant field element. We use a `u64` to be safe because the prime is 31 bits and we don't
+    /// want to deal with underflows or overflows
     Const(u64),
     /// Variable identified by `(name, index, tag)`, printed as `name_index_tag`. NOTE: Tag might
     /// be droppable

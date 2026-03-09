@@ -1,14 +1,15 @@
-use crate::pcl::{
-    expr::{PicusConstraint, PicusExpr},
-    partial_evaluate, partial_evaluate_calls,
-};
-use std::{
-    collections::BTreeMap,
-    fmt::{self, Display, Formatter},
-    fs::File,
-    io::{self, Write},
-    path::Path,
-};
+use crate::pcl::expr::PicusConstraint;
+use crate::pcl::expr::PicusExpr;
+use crate::pcl::partial_evaluate;
+use crate::pcl::partial_evaluate_calls;
+use std::collections::BTreeMap;
+use std::fmt::Display;
+use std::fmt::Formatter;
+use std::fmt::{self};
+use std::fs::File;
+use std::io::Write;
+use std::io::{self};
+use std::path::Path;
 
 /// A call to another Picus module (by name).
 ///
@@ -215,7 +216,14 @@ impl Display for PicusModule {
 /// - `Pow(2, e)`        → `(pow 2 e)`
 impl Display for PicusExpr {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        use PicusExpr::{Add, Const, Div, Mul, Neg, Pow, Sub, Var};
+        use PicusExpr::Add;
+        use PicusExpr::Const;
+        use PicusExpr::Div;
+        use PicusExpr::Mul;
+        use PicusExpr::Neg;
+        use PicusExpr::Pow;
+        use PicusExpr::Sub;
+        use PicusExpr::Var;
         match self {
             Const(v) => write!(f, "{v}"),
             Var(id) => write!(f, "x_{id}"),
