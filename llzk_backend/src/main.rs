@@ -2,17 +2,18 @@ use anyhow::Result;
 use clap::Parser;
 use clap::Subcommand;
 use clap::ValueEnum;
-use llzk_backend::dump_add_sub_lui_auipc_mop;
+use llzk_backend::gen_add_sub_lui_auipc_mop;
 use llzk_backend::output_format::OutputFormat;
 use llzk_backend::setup_logging;
+use llzk_backend::OptLevel;
 
 #[derive(ValueEnum, Clone, Copy, PartialEq, Eq)]
 enum Circuits {
     AddSubLuiAuipcMop,
 }
 
-const CIRCUITS: &[(Circuits, fn(&str, OutputFormat, u8) -> Result<()>)] =
-    &[(Circuits::AddSubLuiAuipcMop, dump_add_sub_lui_auipc_mop)];
+const CIRCUITS: &[(Circuits, fn(&str, OutputFormat, OptLevel) -> Result<()>)] =
+    &[(Circuits::AddSubLuiAuipcMop, gen_add_sub_lui_auipc_mop)];
 
 #[derive(Parser)]
 #[command(version, about, long_about=None)]
@@ -23,16 +24,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Generate LLZK IR from the circuits
-    DumpLLZK {
+    /// Generate the specified output for the specified circuit
+    GenCircuit {
+        /// Output directory or output file name
         #[arg(short, long)]
         output: String,
         #[arg(long)]
         circuit: Circuits,
         #[arg(short, long, default_value_t = OutputFormat::Pcl)]
         format: OutputFormat,
-        #[arg(short = 'O', default_value_t = 1)]
-        opt_level: u8,
+        #[arg(short = 'O', default_value_t = OptLevel::O1)]
+        opt_level: OptLevel,
     },
 }
 
@@ -40,7 +42,7 @@ fn main() -> Result<()> {
     setup_logging();
     let cli = Cli::parse();
     match &cli.command {
-        Commands::DumpLLZK {
+        Commands::GenCircuit {
             output,
             circuit,
             format,
