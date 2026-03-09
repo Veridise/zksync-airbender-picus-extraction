@@ -5,8 +5,10 @@
 //! - An operations builder meant for creating ops inside a function.
 //! - A struct builder.
 
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::ops::Deref;
 
 use anyhow::anyhow;
@@ -21,6 +23,7 @@ use llzk::prelude::melior_dialects::arith;
 use llzk::prelude::*;
 use llzk::utils::IsA;
 use prover::cs::definitions::REGISTER_SIZE;
+use prover::field::Field;
 
 use crate::field::FieldInfo;
 
@@ -402,10 +405,145 @@ impl<'ctx, 'sco> OpsBuilder<'ctx, 'sco> {
         }
     }
 
-    // Perform the index constant insertion without producing a return value.
+    /// Get a `felt.type` constant from the function prologue.
+    #[inline]
+    pub fn get_felt_constant_from_start<F: FieldInfo>(&self, i: u64) -> Result<Value<'ctx, 'sco>> {
+        self.get_constant_from_start::<F>(self.felt_type::<F>(), i)
+    }
+
+    /// Perform the index constant insertion without producing a return value.
     pub fn insert_constant_at_start<F: FieldInfo>(&self, r#type: Type<'ctx>, i: u64) -> Result<()> {
         let _ = self.get_constant_from_start::<F>(r#type, i)?;
         Ok(())
+    }
+
+    /// Create a new nondet value of the specified type.
+    #[inline]
+    pub fn new_nondet(&self, r#type: Type<'ctx>) -> Result<Value<'ctx, 'sco>> {
+        self.append_op_with_result(llzk::dialect::llzk::nondet(self.unknown_location(), r#type))
+    }
+
+    /// Create a new nondet felt.
+    #[inline]
+    pub fn new_nondet_felt<F: FieldInfo>(&self) -> Result<Value<'ctx, 'sco>> {
+        self.new_nondet(self.felt_type::<F>())
+    }
+
+    /// Fold the given values using the binary operation provided.
+    fn append_fold<F: FieldInfo, FN>(
+        &self,
+        location: Location<'ctx>,
+        operation_fn: FN,
+        values: &[Value<'ctx, 'sco>],
+    ) -> Result<Value<'ctx, 'sco>>
+    where
+        FN: Fn(
+            Location<'ctx>,
+            Value<'ctx, 'sco>,
+            Value<'ctx, 'sco>,
+        ) -> Result<Operation<'ctx>, llzk::error::Error>,
+    {
+        values
+            .into_iter()
+            .map(|v| Ok(*v))
+            .reduce(|acc, v| {
+                let add = operation_fn(location, acc?, v?)?;
+                self.append_op_with_result(add)
+            })
+            .ok_or_else(|| anyhow!("must provide values to append_fold"))?
+    }
+
+    /// Perform addition using `felt.add` over all specified values.
+    #[inline]
+    pub fn append_sum<F: FieldInfo>(
+        &self,
+        location: Location<'ctx>,
+        values: &[Value<'ctx, 'sco>],
+    ) -> Result<Value<'ctx, 'sco>> {
+        self.append_fold::<F, _>(location, felt::add, values)
+    }
+
+    /// Perform multiplication using `felt.mul` over all specified values.
+    #[inline]
+    pub fn append_product<F: FieldInfo>(
+        &self,
+        location: Location<'ctx>,
+        values: &[Value<'ctx, 'sco>],
+    ) -> Result<Value<'ctx, 'sco>> {
+        self.append_fold::<F, _>(location, felt::mul, values)
+    }
+
+    /// Append a multiplication by the given constant felt value using `felt.mul`.
+    pub fn append_const_scaling<F: FieldInfo>(
+        &self,
+        location: Location<'ctx>,
+        const_coeff: u64,
+        val: Value<'ctx, 'sco>,
+    ) -> Result<Value<'ctx, 'sco>> {
+        self.append_op_with_result(felt::mul(
+            location,
+            self.get_felt_constant_from_start::<F>(const_coeff)?,
+            val,
+        )?)
+    }
+
+    /// Create a vector of N `felt.type` nondets constrained such that:
+    /// - They are all boolean
+    /// - Only one of them is 1 (i.e., one bit hot)
+    pub fn append_one_hot<F: FieldInfo>(
+        &self,
+        location: Location<'ctx>,
+        bits: usize,
+    ) -> Result<Vec<Value<'ctx, 'sco>>> {
+        let bits = (0..bits)
+            .into_iter()
+            .map(|i| {
+                let bit = self.new_nondet_felt::<F>()?;
+                self.append_boolean_constraint::<F>(bit)?;
+                Ok(bit)
+            })
+            .collect::<Result<Vec<Value<'ctx, 'sco>>>>()?;
+        let sum = self.append_sum::<F>(location, &bits)?;
+        self.append_op_with_no_results(constrain::eq(
+            location,
+            sum,
+            self.get_felt_constant_from_start::<F>(1)?,
+        ))?;
+        Ok(bits)
+    }
+
+    /// Convert a one-hot bit vector into the original single value.
+    pub fn append_one_hot_reconstruction<F: FieldInfo>(
+        &self,
+        location: Location<'ctx>,
+        bits: &[Value<'ctx, 'sco>],
+    ) -> Result<Value<'ctx, 'sco>> {
+        let (_, res) = bits
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| Ok((i, *v)))
+            .reduce(
+                |a: Result<(usize, Value<'ctx, 'sco>)>, x: Result<(usize, Value<'ctx, 'sco>)>| {
+                    let (_, acc) = a?;
+                    let (i, bit) = x?;
+                    let new_val = self.append_sum::<F>(
+                        location,
+                        &[
+                            acc,
+                            self.append_product::<F>(
+                                location,
+                                &[
+                                    self.get_felt_constant_from_start::<F>(u64::try_from(i)?)?,
+                                    bit,
+                                ],
+                            )?,
+                        ],
+                    )?;
+                    Ok((i, new_val))
+                },
+            )
+            .ok_or_else(|| anyhow!("must provide non-empty bits slice"))??;
+        Ok(res)
     }
 }
 
@@ -434,7 +572,7 @@ pub struct StructBuilder<'ctx, 'str> {
     name: &'str str,
     /// Inputs of the struct (excluding self in @constrain).
     inputs: Vec<Type<'ctx>>,
-    /// List of members. Contains the name, type and wether is marked public or not.
+    /// List of members. Contains the name, type and whether is marked public or not.
     members: Vec<(String, Type<'ctx>, bool)>,
 }
 

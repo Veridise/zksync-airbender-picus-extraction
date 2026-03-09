@@ -21,6 +21,8 @@ use llzk::targets::pcl::translate_module;
 mod builder;
 mod codegen;
 mod field;
+mod lookups;
+// mod expr;
 pub mod output_format;
 
 pub fn setup_logging() {
@@ -31,6 +33,7 @@ pub fn setup_logging() {
         .init();
 }
 
+/// Generate the `add_sub_lui_auipc_mop` circuit.
 pub fn gen_add_sub_lui_auipc_mop(
     output: &str,
     format: OutputFormat,
@@ -51,6 +54,28 @@ pub fn gen_add_sub_lui_auipc_mop(
         |cs| {
             add_sub_lui_auipc_mop_table_addition_fn(cs);
             add_sub_lui_auipc_mop_circuit_with_preprocessed_bytecode(cs);
+        },
+    )
+}
+
+/// Generate the `jump_branch_slt` circuit with `SUPPORT_SIGNED=true`
+/// (all invocations appear use this configuration).
+pub fn gen_jump_branch_slt(output: &str, format: OutputFormat, opt_level: OptLevel) -> Result<()> {
+    use jump_branch_slt::ROM_ADDRESS_SPACE_SECOND_WORD_BITS;
+    use jump_branch_slt::TRACE_LEN_LOG2;
+    use prover::cs::machine::ops::unrolled::jump_branch_slt::jump_branch_slt_circuit_with_preprocessed_bytecode;
+    use prover::cs::machine::ops::unrolled::jump_branch_slt::jump_branch_slt_table_addition_fn;
+
+    generate_circuit_command(
+        "jump_branch_slt",
+        output,
+        format,
+        opt_level,
+        (1 << (16 + ROM_ADDRESS_SPACE_SECOND_WORD_BITS)) / 4,
+        TRACE_LEN_LOG2 as usize,
+        |cs| {
+            jump_branch_slt_table_addition_fn(cs);
+            jump_branch_slt_circuit_with_preprocessed_bytecode::<_, _, true>(cs);
         },
     )
 }
@@ -111,6 +136,9 @@ fn generate_circuit_command(
     let ctx = LlzkContext::new();
     let mut module = llzk_module(Location::unknown(&ctx));
     let builder = ModuleBuilder::new(&ctx, &module);
+
+    println!("Circuit Output:\n{:#?}", circuit_output);
+    println!("Compiled:\n{:#?}", _compiled);
 
     // Add the circuit output to it.
     let named_circuit_output = NamedCircuitOutput::new(circuit_output, name);

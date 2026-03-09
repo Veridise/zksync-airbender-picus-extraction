@@ -3,6 +3,7 @@ use clap::Parser;
 use clap::Subcommand;
 use clap::ValueEnum;
 use llzk_backend::gen_add_sub_lui_auipc_mop;
+use llzk_backend::gen_jump_branch_slt;
 use llzk_backend::output_format::OutputFormat;
 use llzk_backend::setup_logging;
 use llzk_backend::OptLevel;
@@ -10,10 +11,13 @@ use llzk_backend::OptLevel;
 #[derive(ValueEnum, Clone, Copy, PartialEq, Eq)]
 enum Circuits {
     AddSubLuiAuipcMop,
+    JumpBranchSlt,
 }
 
-const CIRCUITS: &[(Circuits, fn(&str, OutputFormat, OptLevel) -> Result<()>)] =
-    &[(Circuits::AddSubLuiAuipcMop, gen_add_sub_lui_auipc_mop)];
+const CIRCUITS: &[(Circuits, fn(&str, OutputFormat, OptLevel) -> Result<()>)] = &[
+    (Circuits::AddSubLuiAuipcMop, gen_add_sub_lui_auipc_mop),
+    (Circuits::JumpBranchSlt, gen_jump_branch_slt),
+];
 
 #[derive(Parser)]
 #[command(version, about, long_about=None)]

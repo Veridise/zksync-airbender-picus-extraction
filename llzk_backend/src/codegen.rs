@@ -11,6 +11,9 @@ use llzk::prelude::*;
 use prover::cs::constraint::Constraint;
 use prover::cs::constraint::Term;
 use prover::cs::cs::circuit::CircuitOutput;
+use prover::cs::cs::circuit::DisjunctiveLookup;
+use prover::cs::cs::circuit::LookupQuery;
+use prover::cs::cs::circuit::LookupQueryTableType;
 use prover::cs::cs::circuit::RangeCheckQuery;
 use prover::cs::definitions::LookupInput;
 use prover::cs::definitions::OpcodeFamilyCircuitState;
@@ -19,6 +22,7 @@ use prover::field::PrimeField;
 
 use crate::builder::*;
 use crate::field::FieldInfo;
+use crate::lookups::add_lookup_constraints_for_table;
 
 /// Trait implemented by types that can emit LLZK IR within the module scope.
 pub(crate) trait EmitLLZKInModule<'ctx> {
@@ -28,7 +32,7 @@ pub(crate) trait EmitLLZKInModule<'ctx> {
 }
 
 /// Trait implemented by types that can emit LLZK IR within a struct function scope.
-trait EmitLLZKInStruct<'ctx: 'sco, 'sco> {
+pub(crate) trait EmitLLZKInStruct<'ctx: 'sco, 'sco> {
     type Output;
 
     fn emit_llzk(
@@ -285,6 +289,8 @@ impl<'ctx, F: PrimeField + FieldInfo> EmitLLZKInModule<'ctx> for NamedCircuitOut
             }
             // Add range constraints
             self.range_check_expressions.emit_llzk(builder, &vars)?;
+            // Add lookup constraints
+            self.lookups.emit_llzk(builder, &vars)?;
             // Add all other constraints
             self.constraints.emit_llzk(builder, &vars)
         })
@@ -404,8 +410,82 @@ impl<'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZKInStruct<'ctx, 'sco> f
     }
 }
 
+impl<'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZKInStruct<'ctx, 'sco> for LookupInput<F> {
+    type Output = Value<'ctx, 'sco>;
+
+    fn emit_llzk(
+        &self,
+        builder: &OpsBuilder<'ctx, 'sco>,
+        vars: &StructVars,
+    ) -> Result<Self::Output> {
+        match self {
+            LookupInput::Variable(var) => vars.get_val::<F>(builder, var),
+            LookupInput::Expression {
+                linear_terms,
+                constant_coeff,
+            } => {
+                let init = builder.get_constant_from_start::<F>(
+                    builder.felt_type::<F>(),
+                    constant_coeff.as_u64_reduced(),
+                )?;
+                linear_terms
+                    .iter()
+                    .map(|(coeff, var)| {
+                        let coeff_val = builder.get_constant_from_start::<F>(
+                            builder.felt_type::<F>(),
+                            coeff.as_u64_reduced(),
+                        )?;
+                        builder.append_op_with_result(felt::mul(
+                            builder.unknown_location(),
+                            coeff_val,
+                            vars.get_val::<F>(builder, var)?,
+                        )?)
+                    })
+                    .try_fold(init, |sum, term_val| {
+                        builder.append_op_with_result(felt::add(
+                            builder.unknown_location(),
+                            sum,
+                            term_val?,
+                        )?)
+                    })
+            }
+        }
+    }
+}
+
+impl<'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZKInStruct<'ctx, 'sco> for LookupQuery<F> {
+    type Output = ();
+
+    fn emit_llzk(
+        &self,
+        builder: &OpsBuilder<'ctx, 'sco>,
+        vars: &StructVars,
+    ) -> Result<Self::Output> {
+        match self.table {
+            LookupQueryTableType::Variable(variable) => todo!("support variable table lookups"),
+            LookupQueryTableType::Constant(table_type) => {
+                add_lookup_constraints_for_table(builder, vars, self, table_type, None)
+            }
+        }
+    }
+}
+
+impl<'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZKInStruct<'ctx, 'sco>
+    for DisjunctiveLookup<F>
+{
+    type Output = ();
+
+    fn emit_llzk(
+        &self,
+        builder: &OpsBuilder<'ctx, 'sco>,
+        vars: &StructVars,
+    ) -> Result<Self::Output> {
+        todo!("support disjunctive lookups")
+    }
+}
+
 /// Holds the information about the variables and their representation in the LLZK struct.
-struct StructVars {
+pub struct StructVars {
     /// Maps internal and output Variables to a tuple (member name, optional index if the member is
     /// an array type). All members are assumed to be either felts or "registers", which are
     /// flat, two-element felt arrays.
@@ -482,7 +562,7 @@ impl StructVars {
         })
     }
 
-    fn get_val<'ctx, 'sco, F: FieldInfo>(
+    pub fn get_val<'ctx, 'sco, F: FieldInfo>(
         &self,
         builder: &OpsBuilder<'ctx, 'sco>,
         var: &Variable,
