@@ -1,3 +1,4 @@
+pub mod rv32im;
 pub mod witgen;
 
 pub fn setup_logging() {

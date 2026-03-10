@@ -13,10 +13,21 @@ categories.workspace = true
 name = "witgen-fuzz"
 path = "src/bin/witgen.rs"
 
+[[bin]]
+name = "rv32im-afl"
+path = "src/bin/rv32im.rs"
+
 [dependencies]
 clap = { workspace = true }
 env_logger = "0.11"
 log = "0.4"
+
+# witgen dependencies
 prover = { workspace = true, features = ["prover"] }
 add_sub_lui_auipc_mop = { path = "../circuit_defs/unrolled_circuits/add_sub_lui_auipc_mop" }
 rand = "0.10"
+
+# rv32im dependencies
+afl = "0.17"
+risc_v_simulator = { path = "../risc_v_simulator" }
+unicorn-engine = "2.1.5"
