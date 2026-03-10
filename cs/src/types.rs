@@ -68,7 +68,7 @@ impl<F: PrimeField> Num<F> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Boolean {
     /// Existential view of the boolean variable
     Is(Variable),
@@ -162,7 +162,7 @@ impl Boolean {
             var
         });
 
-        //setting values
+        // setting values
         let value_fn = move |placer: &mut CS::WitnessPlacer| {
             use crate::cs::witness_placer::*;
             let input_value = placer.get_field(input).as_integer();
@@ -328,7 +328,7 @@ impl Boolean {
             | (_not @ &Boolean::Not(_), _is @ &Boolean::Is(_)) => {
                 unreachable!();
 
-                //Boolean::xor(is, &not.toggle(), cs).toggle()
+                // Boolean::xor(is, &not.toggle(), cs).toggle()
             }
             // a XOR b = (NOT a) XOR (NOT b)
             (&Boolean::Is(a), &Boolean::Is(b)) => {
@@ -647,7 +647,8 @@ impl Boolean {
 
                         cs.set_values(value_fn);
 
-                        // new_var = flag * a + (1 - flag) * constant = flag * (if_true - constant) + constant
+                        // new_var = flag * a + (1 - flag) * constant = flag * (if_true - constant)
+                        // + constant
                         let cnstr: Constraint<F> = {
                             Term::from(cond)
                                 * (Term::from(a)
@@ -846,7 +847,8 @@ impl Boolean {
 
                         cs.set_values(value_fn);
 
-                        // new_var = flag * a + (1 - flag) * constant = flag * (if_true - constant) + constant
+                        // new_var = flag * a + (1 - flag) * constant = flag * (if_true - constant)
+                        // + constant
                         let cnstr: Constraint<F> = {
                             Term::from(cond)
                                 * (Term::from(a)
@@ -1074,7 +1076,7 @@ impl<F: PrimeField> RegisterDecomposition<F> {
 
         let outputs = chunks.map(|x| x.get_variable());
         let register_limbs = [reg.0[0].get_variable(), reg.0[1].get_variable()];
-        //setting values for overflow flags
+        // setting values for overflow flags
         let value_fn = move |placer: &mut CS::WitnessPlacer| {
             let low_limb = placer.get_u16(register_limbs[0]);
             let high_limb = placer.get_u16(register_limbs[1]);
@@ -1145,7 +1147,7 @@ impl<F: PrimeField> RegisterDecomposition<F> {
 
         let outputs = chunks.map(|x| x.get_variable());
         let register_limbs = [reg.0[0].get_variable(), reg.0[1].get_variable()];
-        //setting values for overflow flags
+        // setting values for overflow flags
         let value_fn = move |placer: &mut CS::WitnessPlacer| {
             let low_limb = placer.get_u16(register_limbs[0]);
             let high_limb = placer.get_u16(register_limbs[1]);
@@ -1213,7 +1215,7 @@ impl<F: PrimeField> RegisterDecompositionWithSign<F> {
     pub fn parse_reg<CS: Circuit<F>>(cs: &mut CS, reg: Register<F>) -> Self {
         let byte_0 = cs.add_variable();
         let low_word = reg.0[0].get_variable();
-        //setting values for overflow flags
+        // setting values for overflow flags
         let value_fn = move |placer: &mut CS::WitnessPlacer| {
             let low_limb = placer.get_u16(low_word);
 
