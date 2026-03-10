@@ -1,7 +1,6 @@
 //! Encodings of lookup tables into LLZK.
 
 use crate::builder::OpsBuilder;
-use crate::codegen::EmitLLZKInStruct;
 use crate::codegen::EmitLLZKInStruct as _;
 use crate::codegen::StructVars;
 use crate::field::FieldInfo;
@@ -115,11 +114,7 @@ pub fn add_disjunctive_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     let flags = relation
         .cases
         .iter()
-        .map(|case| {
-            <prover::cs::types::Boolean as EmitLLZKInStruct<'_, '_, F>>::emit_llzk(
-                &case.flag, builder, vars,
-            )
-        })
+        .map(|case| case.flag.emit_llzk(builder, vars))
         .collect::<Result<Vec<Value<'ctx, 'sco>>>>()?;
 
     for flag in &flags {
@@ -397,8 +392,6 @@ fn add_conditional_jmp_branch_slt_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     )?;
     Ok(())
 }
-
-/// TODO:
 
 /// Translation for `MemoryGetOffsetAndMaskWithTrap` lookup.
 ///

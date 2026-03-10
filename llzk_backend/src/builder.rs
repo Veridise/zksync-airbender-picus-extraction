@@ -22,8 +22,6 @@ use llzk::prelude::melior_dialects::arith;
 use llzk::prelude::*;
 use llzk::utils::IsA;
 use prover::cs::definitions::REGISTER_SIZE;
-use prover::field::Field;
-use prover::field::PrimeField;
 
 use crate::field::FieldInfo;
 
