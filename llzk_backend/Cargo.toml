@@ -16,6 +16,7 @@ llzk = { git = "https://github.com/project-llzk/llzk-rs", package = "llzk", feat
 # Circuits
 add_sub_lui_auipc_mop = { path = "../circuit_defs/unrolled_circuits/add_sub_lui_auipc_mop" }
 jump_branch_slt = { path = "../circuit_defs/unrolled_circuits/jump_branch_slt"}
+load_store_subword_only = { path = "../circuit_defs/unrolled_circuits/load_store_subword_only" }
 
 
 env_logger = "0.11"

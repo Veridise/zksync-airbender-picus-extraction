@@ -100,7 +100,11 @@ pub fn subst_call(call: &PicusCall, env: &BTreeMap<usize, u64>) -> PicusCall {
     for output in &call.outputs {
         new_outputs.push(subst_expr(output, env));
     }
-    PicusCall { inputs: new_inputs, outputs: new_outputs, mod_name: call.mod_name.clone() }
+    PicusCall {
+        inputs: new_inputs,
+        outputs: new_outputs,
+        mod_name: call.mod_name.clone(),
+    }
 }
 
 // === Constraint substitution/simplification ===

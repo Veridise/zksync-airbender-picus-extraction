@@ -4,6 +4,7 @@ use clap::Subcommand;
 use clap::ValueEnum;
 use llzk_backend::gen_add_sub_lui_auipc_mop;
 use llzk_backend::gen_jump_branch_slt;
+use llzk_backend::gen_load_store_subword_only;
 use llzk_backend::output_format::OutputFormat;
 use llzk_backend::setup_logging;
 use llzk_backend::OptLevel;
@@ -12,12 +13,14 @@ use llzk_backend::OptLevel;
 enum Circuits {
     AddSubLuiAuipcMop,
     JumpBranchSlt,
+    LoadStoreSubwordOnly,
 }
 
 type CircuitFnTuple = (Circuits, fn(&str, OutputFormat, OptLevel) -> Result<()>);
 const CIRCUITS: &[CircuitFnTuple] = &[
     (Circuits::AddSubLuiAuipcMop, gen_add_sub_lui_auipc_mop),
     (Circuits::JumpBranchSlt, gen_jump_branch_slt),
+    (Circuits::LoadStoreSubwordOnly, gen_load_store_subword_only),
 ];
 
 #[derive(Parser)]

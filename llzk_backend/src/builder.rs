@@ -7,6 +7,7 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::marker::PhantomData;
 use std::ops::Deref;
 
 use anyhow::anyhow;
@@ -21,20 +22,27 @@ use llzk::prelude::melior_dialects::arith;
 use llzk::prelude::*;
 use llzk::utils::IsA;
 use prover::cs::definitions::REGISTER_SIZE;
+use prover::field::Field;
+use prover::field::PrimeField;
 
 use crate::field::FieldInfo;
 
 /// Root builder with convenience factory methods and access to the root LLZK module.
-pub struct ModuleBuilder<'ctx> {
+pub struct ModuleBuilder<'ctx, F: FieldInfo> {
     context: &'ctx Context,
     /// The root LLZK module.
     module: &'ctx Module<'ctx>,
+    _field: core::marker::PhantomData<F>,
 }
 
-impl<'ctx> ModuleBuilder<'ctx> {
+impl<'ctx, F: FieldInfo> ModuleBuilder<'ctx, F> {
     /// Creates a new builder.
     pub fn new(context: &'ctx Context, module: &'ctx Module<'ctx>) -> Self {
-        Self { context, module }
+        Self {
+            context,
+            module,
+            _field: PhantomData,
+        }
     }
 
     /// Returns a reference to the context.
@@ -53,7 +61,7 @@ impl<'ctx> ModuleBuilder<'ctx> {
     }
 
     /// Creates a `!felt.type`.
-    pub fn felt_type<F: FieldInfo>(&self) -> Type<'ctx> {
+    pub fn felt_type(&self) -> Type<'ctx> {
         FeltType::with_field(self.context, F::field_name()).into()
     }
 
@@ -68,6 +76,11 @@ impl<'ctx> ModuleBuilder<'ctx> {
         IntegerType::new(self.context, bits).into()
     }
 
+    /// Get the boolean type (i.e., i1)
+    pub fn bool_type(&self) -> Type<'ctx> {
+        IntegerType::new(self.context, 1).into()
+    }
+
     /// Get a constant index-type integer attribute
     #[inline]
     pub fn index_attr(&self, integer: i64) -> Attribute<'ctx> {
@@ -75,7 +88,7 @@ impl<'ctx> ModuleBuilder<'ctx> {
     }
 
     /// Create a constant felt attribute.
-    pub fn felt_attr<F: FieldInfo>(&self, value: u64) -> FeltConstAttribute<'ctx> {
+    pub fn felt_attr(&self, value: u64) -> FeltConstAttribute<'ctx> {
         FeltConstAttribute::new(self.context, value, Some(F::field_name()))
     }
 
@@ -87,9 +100,9 @@ impl<'ctx> ModuleBuilder<'ctx> {
 
     /// Get a register type, which is a two-element felt array.
     /// TODO: This is probably too representation dependent, move elsewhere?
-    pub fn register_type<F: FieldInfo>(&self) -> Type<'ctx> {
+    pub fn register_type(&self) -> Type<'ctx> {
         ArrayType::new(
-            self.felt_type::<F>(),
+            self.felt_type(),
             &[self.index_attr(
                 i64::try_from(REGISTER_SIZE).expect("REGISTER_SIZE is unexpectedly large"),
             )],
@@ -128,17 +141,17 @@ impl<'ctx> PartialOrd for ConstOpKey<'ctx> {
 }
 
 /// Operations builder that handles insertion of operations in the target function.
-pub struct OpsBuilder<'ctx, 'sco> {
-    builder: &'ctx ModuleBuilder<'ctx>,
+pub struct OpsBuilder<'ctx: 'sco, 'sco, F: FieldInfo> {
+    builder: &'ctx ModuleBuilder<'ctx, F>,
     scope: FuncDefOpRef<'ctx, 'sco>,
     /// Cache of constant op values of specified type at the beginning of the
     /// function scope. Using a BTreeMap since [Type] is not hashable.
     const_vals: RefCell<BTreeMap<ConstOpKey<'ctx>, Value<'ctx, 'sco>>>,
 }
 
-impl<'ctx, 'sco> OpsBuilder<'ctx, 'sco> {
+impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
     /// Creates a new builder.
-    pub fn new(builder: &'ctx ModuleBuilder<'ctx>, scope: FuncDefOpRef<'ctx, 'sco>) -> Self {
+    pub fn new(builder: &'ctx ModuleBuilder<'ctx, F>, scope: FuncDefOpRef<'ctx, 'sco>) -> Self {
         Self {
             scope,
             builder,
@@ -303,30 +316,119 @@ impl<'ctx, 'sco> OpsBuilder<'ctx, 'sco> {
         })
     }
 
-    /// Append a boolean constraint for the given value.
-    pub fn append_boolean_constraint<F: FieldInfo>(&self, val: Value<'ctx, 'sco>) -> Result<()> {
-        assert_eq!(val.r#type(), self.felt_type::<F>());
+    /// Insert a `constrain.eq` operation to constrain `lhs` equal to `rhs`. If
+    /// `conditional` is supplied, then the constraint will be `conditional => (lhs === rhs)`
+    /// (implemented as `!conditional || (lhs === rhs)` since LLZK has no implication operation).
+    #[inline]
+    pub fn append_constrain_eq(
+        &self,
+        location: Location<'ctx>,
+        lhs: Value<'ctx, 'sco>,
+        rhs: Value<'ctx, 'sco>,
+    ) -> Result<()> {
+        self.append_op_with_no_results(constrain::eq(location, lhs, rhs))
+    }
+
+    /// If not None, insert a `constrain.eq` operation to constrain `conditional => (lhs === rhs)`
+    /// (implemented as `!conditional || (lhs === rhs)` since LLZK has no implication operation).
+    /// Assumes `conditional` is a felt.type that is constrained to be in a boolean range.
+    /// If `conditional` is None, just inserts a regular equality constraint between `lhs` and
+    /// `rhs`.
+    pub fn append_conditional_constrain_eq(
+        &self,
+        location: Location<'ctx>,
+        conditional: Option<Value<'ctx, 'sco>>,
+        lhs: Value<'ctx, 'sco>,
+        rhs: Value<'ctx, 'sco>,
+    ) -> Result<()> {
+        match conditional {
+            None => self.append_constrain_eq(location, lhs, rhs),
+            Some(conditional) => {
+                let not_conditional = self.append_op_with_result(bool::eq(
+                    location,
+                    self.get_felt_constant_from_start(0)?,
+                    conditional,
+                )?)?;
+                let sides_eq = self.append_op_with_result(bool::eq(location, lhs, rhs)?)?;
+                let implication =
+                    self.append_op_with_result(bool::or(location, not_conditional, sides_eq)?)?;
+                let truth = self.get_constant_from_start(self.bool_type(), 1)?;
+                self.append_constrain_eq(location, implication, truth)
+            }
+        }
+    }
+
+    /// Compute the inner values used to generate a boolean constraint.
+    /// Used so both the conditional and unconditional constraint variants use
+    /// the same logic.
+    fn compute_boolean_constraint_expression(
+        &self,
+        val: Value<'ctx, 'sco>,
+    ) -> Result<(Value<'ctx, 'sco>, Value<'ctx, 'sco>)> {
+        assert_eq!(val.r#type(), self.felt_type());
         let unk = self.unknown_location();
-        let zero = self.get_constant_from_start::<F>(self.felt_type::<F>(), 0)?;
-        let one = self.get_constant_from_start::<F>(self.felt_type::<F>(), 1)?;
+        let zero = self.get_constant_from_start(self.felt_type(), 0)?;
+        let one = self.get_constant_from_start(self.felt_type(), 1)?;
         let minus_one = self.append_op_with_result(felt::sub(unk, val, one)?)?;
         let product = self.append_op_with_result(felt::mul(unk, val, minus_one)?)?;
-        self.append_op_with_no_results(constrain::eq(unk, product, zero))
+        Ok((product, zero))
+    }
+
+    /// Append a boolean constraint for the given value.
+    #[inline]
+    pub fn append_boolean_constraint(&self, val: Value<'ctx, 'sco>) -> Result<()> {
+        let (product, zero) = self.compute_boolean_constraint_expression(val)?;
+        self.append_constrain_eq(self.unknown_location(), product, zero)
+    }
+
+    /// Append a conditional (if provided) boolean constraint for the given value.
+    #[inline]
+    pub fn append_conditional_boolean_constraint(
+        &self,
+        conditional: Option<Value<'ctx, 'sco>>,
+        val: Value<'ctx, 'sco>,
+    ) -> Result<()> {
+        let (product, zero) = self.compute_boolean_constraint_expression(val)?;
+        self.append_conditional_constrain_eq(self.unknown_location(), conditional, product, zero)
+    }
+
+    /// Compute the inner values ised to generate a range constraint.
+    /// Used so both the conditional and unconditioanl constraint variants use the same logic.
+    fn compute_range_constraint_expression(
+        &self,
+        val: Value<'ctx, 'sco>,
+        width: usize,
+    ) -> Result<(Value<'ctx, 'sco>, Value<'ctx, 'sco>)> {
+        assert_eq!(val.r#type(), self.felt_type());
+        let bound = self.get_constant_from_start(self.felt_type(), 1 << width)?;
+        let bound_check =
+            self.append_op_with_result(bool::lt(self.unknown_location(), val, bound)?)?;
+        let truth = self.get_constant_from_start(self.int_type(1), 1)?;
+        Ok((bound_check, truth))
     }
 
     /// Append a range constraint for the given value.
     /// Enforces that `val` must be within `width`.
-    pub fn append_range_constraint<F: FieldInfo>(
+    pub fn append_range_constraint(&self, val: Value<'ctx, 'sco>, width: usize) -> Result<()> {
+        let (bound_check, truth) = self.compute_range_constraint_expression(val, width)?;
+        self.append_constrain_eq(self.unknown_location(), bound_check, truth)
+    }
+
+    /// Append a range constraint for the given value.
+    /// Enforces that `val` must be within `width` if `conditional` is provided and is true.
+    pub fn append_conditional_range_constraint(
         &self,
+        conditional: Option<Value<'ctx, 'sco>>,
         val: Value<'ctx, 'sco>,
         width: usize,
     ) -> Result<()> {
-        assert_eq!(val.r#type(), self.felt_type::<F>());
-        let unk = self.unknown_location();
-        let bound = self.get_constant_from_start::<F>(self.felt_type::<F>(), 1 << width)?;
-        let bound_check = self.append_op_with_result(bool::lt(unk, val, bound)?)?;
-        let truth = self.get_constant_from_start::<F>(self.int_type(1), 1)?;
-        self.append_op_with_no_results(constrain::eq(unk, bound_check, truth))
+        let (bound_check, truth) = self.compute_range_constraint_expression(val, width)?;
+        self.append_conditional_constrain_eq(
+            self.unknown_location(),
+            conditional,
+            bound_check,
+            truth,
+        )
     }
 
     /// Get the value from the contained function scope.
@@ -370,11 +472,7 @@ impl<'ctx, 'sco> OpsBuilder<'ctx, 'sco> {
 
     /// Lookup a previously generated constant in the function scope or
     /// create one if needed. Then return the SSA value.
-    pub fn get_constant_from_start<F: FieldInfo>(
-        &self,
-        r#type: Type<'ctx>,
-        i: u64,
-    ) -> Result<Value<'ctx, 'sco>> {
+    pub fn get_constant_from_start(&self, r#type: Type<'ctx>, i: u64) -> Result<Value<'ctx, 'sco>> {
         let key = ConstOpKey(r#type, i);
         let mut const_val_cache = self.const_vals.borrow_mut();
         match const_val_cache.get(&key) {
@@ -386,8 +484,8 @@ impl<'ctx, 'sco> OpsBuilder<'ctx, 'sco> {
                         self.int_attr(r#type, i64::try_from(i)?),
                         self.unknown_location(),
                     )
-                } else if r#type == self.felt_type::<F>() {
-                    felt::constant(self.unknown_location(), self.felt_attr::<F>(i))?
+                } else if r#type == self.felt_type() {
+                    felt::constant(self.unknown_location(), self.felt_attr(i))?
                 } else {
                     anyhow::bail!("unsupported type {}", r#type)
                 };
@@ -403,13 +501,13 @@ impl<'ctx, 'sco> OpsBuilder<'ctx, 'sco> {
 
     /// Get a `felt.type` constant from the function prologue.
     #[inline]
-    pub fn get_felt_constant_from_start<F: FieldInfo>(&self, i: u64) -> Result<Value<'ctx, 'sco>> {
-        self.get_constant_from_start::<F>(self.felt_type::<F>(), i)
+    pub fn get_felt_constant_from_start(&self, i: u64) -> Result<Value<'ctx, 'sco>> {
+        self.get_constant_from_start(self.felt_type(), i)
     }
 
     /// Perform the index constant insertion without producing a return value.
-    pub fn insert_constant_at_start<F: FieldInfo>(&self, r#type: Type<'ctx>, i: u64) -> Result<()> {
-        let _ = self.get_constant_from_start::<F>(r#type, i)?;
+    pub fn insert_constant_at_start(&self, r#type: Type<'ctx>, i: u64) -> Result<()> {
+        let _ = self.get_constant_from_start(r#type, i)?;
         Ok(())
     }
 
@@ -421,12 +519,12 @@ impl<'ctx, 'sco> OpsBuilder<'ctx, 'sco> {
 
     /// Create a new nondet felt.
     #[inline]
-    pub fn new_nondet_felt<F: FieldInfo>(&self) -> Result<Value<'ctx, 'sco>> {
-        self.new_nondet(self.felt_type::<F>())
+    pub fn new_nondet_felt(&self) -> Result<Value<'ctx, 'sco>> {
+        self.new_nondet(self.felt_type())
     }
 
     /// Fold the given values using the binary operation provided.
-    fn append_fold<F: FieldInfo, FN>(
+    fn append_fold<FN>(
         &self,
         location: Location<'ctx>,
         operation_fn: FN,
@@ -451,26 +549,26 @@ impl<'ctx, 'sco> OpsBuilder<'ctx, 'sco> {
 
     /// Perform addition using `felt.add` over all specified values.
     #[inline]
-    pub fn append_sum<F: FieldInfo>(
+    pub fn append_sum(
         &self,
         location: Location<'ctx>,
         values: &[Value<'ctx, 'sco>],
     ) -> Result<Value<'ctx, 'sco>> {
-        self.append_fold::<F, _>(location, felt::add, values)
+        self.append_fold::<_>(location, felt::add, values)
     }
 
     /// Perform multiplication using `felt.mul` over all specified values.
     #[inline]
-    pub fn append_product<F: FieldInfo>(
+    pub fn append_product(
         &self,
         location: Location<'ctx>,
         values: &[Value<'ctx, 'sco>],
     ) -> Result<Value<'ctx, 'sco>> {
-        self.append_fold::<F, _>(location, felt::mul, values)
+        self.append_fold::<_>(location, felt::mul, values)
     }
 
     /// Append a multiplication by the given constant felt value using `felt.mul`.
-    pub fn append_const_scaling<F: FieldInfo>(
+    pub fn append_const_scaling(
         &self,
         location: Location<'ctx>,
         const_coeff: u64,
@@ -478,7 +576,7 @@ impl<'ctx, 'sco> OpsBuilder<'ctx, 'sco> {
     ) -> Result<Value<'ctx, 'sco>> {
         self.append_op_with_result(felt::mul(
             location,
-            self.get_felt_constant_from_start::<F>(const_coeff)?,
+            self.get_felt_constant_from_start(const_coeff)?,
             val,
         )?)
     }
@@ -486,29 +584,29 @@ impl<'ctx, 'sco> OpsBuilder<'ctx, 'sco> {
     /// Create a vector of N `felt.type` nondets constrained such that:
     /// - They are all boolean
     /// - Only one of them is 1 (i.e., one bit hot)
-    pub fn append_one_hot<F: FieldInfo>(
+    pub fn append_one_hot(
         &self,
         location: Location<'ctx>,
         bits: usize,
     ) -> Result<Vec<Value<'ctx, 'sco>>> {
         let bits = (0..bits)
             .map(|_| {
-                let bit = self.new_nondet_felt::<F>()?;
-                self.append_boolean_constraint::<F>(bit)?;
+                let bit = self.new_nondet_felt()?;
+                self.append_boolean_constraint(bit)?;
                 Ok(bit)
             })
             .collect::<Result<Vec<Value<'ctx, 'sco>>>>()?;
-        let sum = self.append_sum::<F>(location, &bits)?;
+        let sum = self.append_sum(location, &bits)?;
         self.append_op_with_no_results(constrain::eq(
             location,
             sum,
-            self.get_felt_constant_from_start::<F>(1)?,
+            self.get_felt_constant_from_start(1)?,
         ))?;
         Ok(bits)
     }
 
     /// Convert a one-hot bit vector into the original single value.
-    pub fn append_one_hot_reconstruction<F: FieldInfo>(
+    pub fn append_one_hot_reconstruction(
         &self,
         location: Location<'ctx>,
         bits: &[Value<'ctx, 'sco>],
@@ -521,16 +619,13 @@ impl<'ctx, 'sco> OpsBuilder<'ctx, 'sco> {
                 |a: Result<(usize, Value<'ctx, 'sco>)>, x: Result<(usize, Value<'ctx, 'sco>)>| {
                     let (_, acc) = a?;
                     let (i, bit) = x?;
-                    let new_val = self.append_sum::<F>(
+                    let new_val = self.append_sum(
                         location,
                         &[
                             acc,
-                            self.append_product::<F>(
+                            self.append_product(
                                 location,
-                                &[
-                                    self.get_felt_constant_from_start::<F>(u64::try_from(i)?)?,
-                                    bit,
-                                ],
+                                &[self.get_felt_constant_from_start(u64::try_from(i)?)?, bit],
                             )?,
                         ],
                     )?;
@@ -542,8 +637,8 @@ impl<'ctx, 'sco> OpsBuilder<'ctx, 'sco> {
     }
 }
 
-impl<'ctx> Deref for OpsBuilder<'ctx, '_> {
-    type Target = ModuleBuilder<'ctx>;
+impl<'ctx, 'sco, F: FieldInfo> Deref for OpsBuilder<'ctx, 'sco, F> {
+    type Target = ModuleBuilder<'ctx, F>;
 
     fn deref(&self) -> &Self::Target {
         self.builder

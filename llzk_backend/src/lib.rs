@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::ValueEnum;
 use llzk::prelude::*;
+use prover::common_constants;
 use prover::cs::cs::circuit::Circuit as _;
 use prover::cs::cs::cs_reference::BasicAssembly;
 use prover::cs::one_row_compiler::OneRowCompiler;
@@ -79,6 +80,35 @@ pub fn gen_jump_branch_slt(output: &str, format: OutputFormat, opt_level: OptLev
     )
 }
 
+/// Generate the `load_store_subword_only` circuit.
+pub fn gen_load_store_subword_only(
+    output: &str,
+    format: OutputFormat,
+    opt_level: OptLevel,
+) -> Result<()> {
+    use load_store_subword_only::ROM_ADDRESS_SPACE_SECOND_WORD_BITS;
+    use load_store_subword_only::TRACE_LEN_LOG2;
+    use prover::cs::machine::ops::unrolled::load_store_subword_only::subword_only_load_store_circuit_with_preprocessed_bytecode;
+    use prover::cs::machine::ops::unrolled::load_store_subword_only::subword_only_load_store_table_addition_fn;
+
+    generate_circuit_command(
+        "load_store_subword_only",
+        output,
+        format,
+        opt_level,
+        (1 << (16 + ROM_ADDRESS_SPACE_SECOND_WORD_BITS)) / 4,
+        TRACE_LEN_LOG2 as usize,
+        |cs| {
+            subword_only_load_store_table_addition_fn(cs);
+            subword_only_load_store_circuit_with_preprocessed_bytecode::<
+                _,
+                _,
+                { common_constants::ROM_SECOND_WORD_BITS },
+            >(cs);
+        },
+    )
+}
+
 /// A wrapper for the two circuit outputs, that being MLIR formats (LLZK and PCL IR)
 /// and PCL code.
 enum GenCircuitResult<'ctx> {
@@ -134,7 +164,7 @@ fn generate_circuit_command(
     // Generate an empty LLZK module
     let ctx = LlzkContext::new();
     let mut module = llzk_module(Location::unknown(&ctx));
-    let builder = ModuleBuilder::new(&ctx, &module);
+    let builder: ModuleBuilder<'_, Mersenne31Field> = ModuleBuilder::new(&ctx, &module);
 
     println!("Circuit Output:\n{:#?}", circuit_output);
     println!("Compiled:\n{:#?}", _compiled);

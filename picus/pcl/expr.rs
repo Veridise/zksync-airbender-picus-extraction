@@ -161,7 +161,9 @@ impl Add<Felt> for PicusAtom {
 
     fn add(self, rhs: Felt) -> Self::Output {
         match self {
-            PicusAtom::Const(c) => PicusExpr::Const((c + (rhs.0 as u64)).rem_euclid(Felt::CHARACTERISTICS)),
+            PicusAtom::Const(c) => {
+                PicusExpr::Const((c + (rhs.0 as u64)).rem_euclid(Felt::CHARACTERISTICS))
+            }
             PicusAtom::Var(v) => PicusExpr::Var(v) + PicusExpr::Const(rhs.as_u64()),
         }
     }

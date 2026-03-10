@@ -245,7 +245,17 @@ impl Display for PicusExpr {
 ///   constraints/expressions.
 impl Display for PicusConstraint {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        use PicusConstraint::{And, Det, Eq, Geq, Gt, Iff, Implies, Leq, Lt, Not, Or};
+        use PicusConstraint::And;
+        use PicusConstraint::Det;
+        use PicusConstraint::Eq;
+        use PicusConstraint::Geq;
+        use PicusConstraint::Gt;
+        use PicusConstraint::Iff;
+        use PicusConstraint::Implies;
+        use PicusConstraint::Leq;
+        use PicusConstraint::Lt;
+        use PicusConstraint::Not;
+        use PicusConstraint::Or;
         match self {
             Lt(e1, e2) => write!(f, "(< {e1} {e2})"),
             Leq(e1, e2) => write!(f, "(<= {e1} {e2})"),
