@@ -433,7 +433,8 @@ pub(crate) fn layout_executor_state_for_preprocessed_bytecode<F: PrimeField>(
         layout,
     );
 
-    // in decoder PC/Timestamp for the current state - always in memory as they are part of permutation
+    // in decoder PC/Timestamp for the current state - always in memory as they are part of
+    // permutation
     let pc = layout_memory_subtree_multiple_variables(
         memory_tree_offset,
         state.cycle_start_state.pc,
@@ -630,9 +631,9 @@ pub(crate) fn allocate_range_check_expressions<F: PrimeField>(
         );
     }
 
-    // range checks 16 deserve their own treatment and own table, and for lookups over explicit variables
-    // we just layout those continously in the row. We will also declare formal lookup expressions over them,
-    // as below we will declare less-trivial range-check 16 expressions
+    // range checks 16 deserve their own treatment and own table, and for lookups over explicit
+    // variables we just layout those continously in the row. We will also declare formal lookup
+    // expressions over them, as below we will declare less-trivial range-check 16 expressions
 
     let mut range_check_16_lookup_expressions = vec![];
 
@@ -808,7 +809,8 @@ pub(crate) fn compile_timestamp_range_check_expressions<
 ) -> (usize, std::vec::Vec<LookupExpression<F>>) {
     let mut compiled_timestamp_comparion_expressions = vec![];
 
-    // we already have enough information to compile range check expressions that are left from memory accesses layout
+    // we already have enough information to compile range check expressions that are left from
+    // memory accesses layout
     for input in timestamp_range_check_expressions_to_compile.into_iter() {
         let (linear_terms, constant_coeff) = match input {
             LookupInput::Expression {
@@ -837,8 +839,8 @@ pub(crate) fn compile_timestamp_range_check_expressions<
     // timestamps deserve separate range checks for shuffle RAM in the main circuit,
     // as those also take contribution from circuit index in the sequence
 
-    // NOTE: these expressions are separate, as we will have to add to them a circuit sequence constant
-    // that comes during the proving only
+    // NOTE: these expressions are separate, as we will have to add to them a circuit sequence
+    // constant that comes during the proving only
 
     let offset_for_special_shuffle_ram_timestamps_range_check_expressions =
         compiled_timestamp_comparion_expressions.len();
@@ -929,7 +931,7 @@ pub(crate) fn compile_timestamp_range_check_expressions<
     )
 }
 
-pub(crate) fn optimize_out_linear_constraints<F: PrimeField>(
+pub fn optimize_out_linear_constraints<F: PrimeField>(
     state_input: &[Variable],
     state_output: &[Variable],
     substitutions: &HashMap<(Placeholder, usize), Variable>,

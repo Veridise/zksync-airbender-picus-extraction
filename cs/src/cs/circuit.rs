@@ -1,4 +1,5 @@
 use super::spec_selection::*;
+use crate::constraint::*;
 use crate::cs::placeholder::*;
 use crate::cs::utils::collapse_max_quadratic_constraint_into;
 use crate::cs::witness_placer::*;
@@ -6,12 +7,10 @@ use crate::definitions::*;
 use crate::devices::optimization_context::OptimizationContext;
 use crate::one_row_compiler::LookupInput;
 use crate::tables::LookupWrapper;
+use crate::tables::TableDriver;
+use crate::types::Boolean;
+use crate::types::Num;
 use crate::types::Register;
-use crate::{
-    constraint::*,
-    tables::TableDriver,
-    types::{Boolean, Num},
-};
 use field::PrimeField;
 use std::collections::HashMap;
 
@@ -28,7 +27,7 @@ pub enum Invariant {
     Substituted((Placeholder, usize)),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ShuffleRamQueryType {
     RegisterOnly {
         register_index: Variable,
@@ -88,7 +87,7 @@ impl ShuffleRamQueryType {
 // Prover would have to substitute global timestamp here
 // but itself, and ensure that eventually global read timestamp
 // is < global write timestamp + local offset
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ShuffleRamMemQuery {
     pub query_type: ShuffleRamQueryType,
     pub local_timestamp_in_cycle: usize,
@@ -128,7 +127,7 @@ impl ShuffleRamMemQuery {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct LookupQuery<F: PrimeField> {
     pub row: [LookupInput<F>; COMMON_TABLE_WIDTH],
     pub table: LookupQueryTableType,
@@ -152,19 +151,19 @@ pub struct PicusExtractionMetadata<F: PrimeField> {
     pub disjunctive_lookups: Vec<DisjunctiveLookup<F>>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LookupQueryTableType {
     Variable(Variable),
     Constant(TableType),
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LinkedVariablesPair {
     pub initial_var: Variable,
     pub final_var: Variable,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RangeCheckQuery<F: PrimeField> {
     pub input: LookupInput<F>,
     pub width: usize,
@@ -296,7 +295,7 @@ pub struct RegisterAndIndirectAccesses {
     pub indirect_accesses: Vec<IndirectAccessType>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CircuitOutput<F: PrimeField> {
     pub state_input: Vec<Variable>,
     pub state_output: Vec<Variable>,
@@ -510,8 +509,9 @@ pub trait Circuit<F: PrimeField>: Sized {
 
                         // // new_var = flag * b + (1 - flag) * a = flag * (b - a) + a
                         // let cnstr: Constraint<F> =
-                        //     { Term::from(cond) * (Term::from(b) - Term::from(a)) + Term::from(a) };
-                        // let new_var = self.add_variable_from_constraint(cnstr);
+                        //     { Term::from(cond) * (Term::from(b) - Term::from(a)) + Term::from(a)
+                        // }; let new_var =
+                        // self.add_variable_from_constraint(cnstr);
                         // Num::Var(new_var)
                     }
                 }
@@ -526,7 +526,8 @@ pub trait Circuit<F: PrimeField>: Sized {
                         }
                     }
                     Boolean::Is(cond) => {
-                        // new_var = flag * a + (1 - flag) * constant = flag * (if_true - constant) + constant
+                        // new_var = flag * a + (1 - flag) * constant = flag * (if_true - constant)
+                        // + constant
                         let mut cnstr: Constraint<F> = {
                             Term::from(cond) * (Term::from(a) - Term::from_field(constant))
                                 + Term::from_field(constant)
