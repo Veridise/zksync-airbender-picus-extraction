@@ -1,7 +1,7 @@
 //! Encodings of lookup tables into LLZK.
 
 use crate::builder::OpsBuilder;
-use crate::codegen::EmitLLZKInStruct as _;
+use crate::codegen::EmitLLZKInConstrain as _;
 use crate::codegen::StructVars;
 use crate::field::FieldInfo;
 use anyhow::Result;
@@ -114,7 +114,7 @@ pub fn add_disjunctive_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     let flags = relation
         .cases
         .iter()
-        .map(|case| case.flag.emit_llzk(builder, vars))
+        .map(|case| case.flag.emit_constrain(builder, vars))
         .collect::<Result<Vec<Value<'ctx, 'sco>>>>()?;
 
     for flag in &flags {
@@ -137,7 +137,7 @@ pub fn add_disjunctive_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
             row: case.row.clone(),
             table: LookupQueryTableType::Constant(table),
         };
-        let flag_expr = case.flag.emit_llzk(builder, vars)?;
+        let flag_expr = case.flag.emit_constrain(builder, vars)?;
 
         if table_supports_zero_row_multiply_in(table) {
             add_lookup_constraints_for_table(builder, vars, &query, table, Some(flag_expr), None)?;
@@ -184,17 +184,17 @@ fn add_jump_cleanup_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     let a = apply_row_multiplier::<F>(
         builder,
         row_multiplier,
-        query.row[0].emit_llzk(builder, vars)?,
+        query.row[0].emit_constrain(builder, vars)?,
     )?;
     let bit_1 = apply_row_multiplier::<F>(
         builder,
         row_multiplier,
-        query.row[1].emit_llzk(builder, vars)?,
+        query.row[1].emit_constrain(builder, vars)?,
     )?;
     let cleaned = apply_row_multiplier::<F>(
         builder,
         row_multiplier,
-        query.row[2].emit_llzk(builder, vars)?,
+        query.row[2].emit_constrain(builder, vars)?,
     )?;
 
     let bit_0 = builder.new_nondet_felt()?;
@@ -259,17 +259,17 @@ fn add_conditional_jmp_branch_slt_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     let a = apply_row_multiplier::<F>(
         builder,
         row_multiplier,
-        query.row[0].emit_llzk(builder, vars)?,
+        query.row[0].emit_constrain(builder, vars)?,
     )?;
     let f3 = apply_row_multiplier::<F>(
         builder,
         row_multiplier,
-        query.row[1].emit_llzk(builder, vars)?,
+        query.row[1].emit_constrain(builder, vars)?,
     )?;
     let flag = apply_row_multiplier::<F>(
         builder,
         row_multiplier,
-        query.row[2].emit_llzk(builder, vars)?,
+        query.row[2].emit_constrain(builder, vars)?,
     )?;
 
     let uf = builder.new_nondet_felt()?;
@@ -410,17 +410,17 @@ fn add_memory_get_offset_and_mask_with_trap_lookup_constraints<'ctx, 'sco, F: Fi
     let input = apply_row_multiplier::<F>(
         builder,
         row_multiplier,
-        query.row[0].emit_llzk(builder, vars)?,
+        query.row[0].emit_constrain(builder, vars)?,
     )?;
     let offset = apply_row_multiplier::<F>(
         builder,
         row_multiplier,
-        query.row[1].emit_llzk(builder, vars)?,
+        query.row[1].emit_constrain(builder, vars)?,
     )?;
     let bitmask = apply_row_multiplier::<F>(
         builder,
         row_multiplier,
-        query.row[2].emit_llzk(builder, vars)?,
+        query.row[2].emit_constrain(builder, vars)?,
     )?;
 
     builder.append_conditional_range_constraint(conditional, input, 21)?;
@@ -458,17 +458,17 @@ fn add_rom_address_space_separator_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     let address_high = apply_row_multiplier::<F>(
         builder,
         row_multiplier,
-        query.row[0].emit_llzk(builder, vars)?,
+        query.row[0].emit_constrain(builder, vars)?,
     )?;
     let is_ram_range = apply_row_multiplier::<F>(
         builder,
         row_multiplier,
-        query.row[1].emit_llzk(builder, vars)?,
+        query.row[1].emit_constrain(builder, vars)?,
     )?;
     let rom_chunk = apply_row_multiplier::<F>(
         builder,
         row_multiplier,
-        query.row[2].emit_llzk(builder, vars)?,
+        query.row[2].emit_constrain(builder, vars)?,
     )?;
 
     let rom_bound = 1u64 << common_constants::ROM_SECOND_WORD_BITS;
@@ -549,17 +549,17 @@ fn add_memory_load_halfword_or_byte_lookup_constraints<'ctx, 'sco, F: FieldInfo>
     let input = apply_row_multiplier::<F>(
         builder,
         row_multiplier,
-        query.row[0].emit_llzk(builder, vars)?,
+        query.row[0].emit_constrain(builder, vars)?,
     )?;
     let out_low = apply_row_multiplier::<F>(
         builder,
         row_multiplier,
-        query.row[1].emit_llzk(builder, vars)?,
+        query.row[1].emit_constrain(builder, vars)?,
     )?;
     let out_high = apply_row_multiplier::<F>(
         builder,
         row_multiplier,
-        query.row[2].emit_llzk(builder, vars)?,
+        query.row[2].emit_constrain(builder, vars)?,
     )?;
 
     builder.append_conditional_range_constraint(conditional, input, 16 + 2 + 3)?;
@@ -596,17 +596,17 @@ fn add_mem_store_clear_original_ram_value_limb_lookup_constraints<'ctx, 'sco, F:
     let input = apply_row_multiplier::<F>(
         builder,
         row_multiplier,
-        query.row[0].emit_llzk(builder, vars)?,
+        query.row[0].emit_constrain(builder, vars)?,
     )?;
     let cleaned = apply_row_multiplier::<F>(
         builder,
         row_multiplier,
-        query.row[1].emit_llzk(builder, vars)?,
+        query.row[1].emit_constrain(builder, vars)?,
     )?;
     let unused = apply_row_multiplier::<F>(
         builder,
         row_multiplier,
-        query.row[2].emit_llzk(builder, vars)?,
+        query.row[2].emit_constrain(builder, vars)?,
     )?;
 
     builder.append_conditional_range_constraint(conditional, input, 16 + 2 + 3)?;
@@ -644,17 +644,17 @@ fn add_mem_store_clear_written_value_limb_lookup_constraints<'ctx, 'sco, F: Fiel
     let input = apply_row_multiplier::<F>(
         builder,
         row_multiplier,
-        query.row[0].emit_llzk(builder, vars)?,
+        query.row[0].emit_constrain(builder, vars)?,
     )?;
     let cleaned = apply_row_multiplier::<F>(
         builder,
         row_multiplier,
-        query.row[1].emit_llzk(builder, vars)?,
+        query.row[1].emit_constrain(builder, vars)?,
     )?;
     let unused = apply_row_multiplier::<F>(
         builder,
         row_multiplier,
-        query.row[2].emit_llzk(builder, vars)?,
+        query.row[2].emit_constrain(builder, vars)?,
     )?;
 
     builder.append_conditional_range_constraint(conditional, input, 16 + 2 + 3)?;
@@ -692,17 +692,17 @@ fn add_aligned_rom_read_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     let word_index = apply_row_multiplier::<F>(
         builder,
         row_multiplier,
-        query.row[0].emit_llzk(builder, vars)?,
+        query.row[0].emit_constrain(builder, vars)?,
     )?;
     let low = apply_row_multiplier::<F>(
         builder,
         row_multiplier,
-        query.row[1].emit_llzk(builder, vars)?,
+        query.row[1].emit_constrain(builder, vars)?,
     )?;
     let high = apply_row_multiplier::<F>(
         builder,
         row_multiplier,
-        query.row[2].emit_llzk(builder, vars)?,
+        query.row[2].emit_constrain(builder, vars)?,
     )?;
 
     // Aligned ROM table is keyed by word index in [0, 2^(16 + ROM_SECOND_WORD_BITS - 2)).

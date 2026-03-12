@@ -185,7 +185,7 @@ fn generate_circuit_command(
     println!("Compiled:\n{:#?}", _compiled);
 
     // Add the circuit output to it.
-    let named_circuit_output = NamedCircuitOutput::new(circuit_output, name).with_witness(witness);
+    let named_circuit_output = NamedCircuitOutput::new(circuit_output, name, Some(witness));
     named_circuit_output.emit_llzk(&builder)?;
 
     // Verify the module
