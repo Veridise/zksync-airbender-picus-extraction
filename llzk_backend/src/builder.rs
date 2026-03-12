@@ -434,6 +434,12 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
         Ok(self.scope.argument(arg_no)?.into())
     }
 
+    /// Return the struct instance created at the start of a `@compute` body.
+    pub fn get_compute_self_value(&self) -> Result<Value<'ctx, 'sco>> {
+        // LLZK exposes this directly on the function op, conveniently
+        Ok(self.scope.self_value_of_compute()?)
+    }
+
     /// Append a struct member read operation in the current function scope.
     pub fn append_member_read(
         &self,
@@ -452,6 +458,18 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
         self.append_op_with_result(op)
     }
 
+    /// Append a struct member write operation in the current function scope.
+    pub fn append_member_write(
+        &self,
+        location: Location<'ctx>,
+        component: Value<'ctx, 'sco>,
+        member_name: &str,
+        value: Value<'ctx, 'sco>,
+    ) -> Result<()> {
+        let op = r#struct::writem(location, component, member_name, value)?;
+        self.append_op_with_no_results(op)
+    }
+
     /// Append an array read operation and return the read value.
     pub fn append_array_read(
         &self,
@@ -466,6 +484,17 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
             arr_ref,
             indices,
         ))
+    }
+
+    /// Append an array write operation in the current function scope.
+    pub fn append_array_write(
+        &self,
+        location: Location<'ctx>,
+        arr_ref: Value<'ctx, 'sco>,
+        indices: &[Value<'ctx, 'sco>],
+        rvalue: Value<'ctx, 'sco>,
+    ) -> Result<()> {
+        self.append_op_with_no_results(array::write(location, arr_ref, indices, rvalue))
     }
 
     /// Lookup a previously generated constant in the function scope or

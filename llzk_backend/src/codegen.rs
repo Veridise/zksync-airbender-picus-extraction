@@ -25,6 +25,7 @@ use crate::builder::*;
 use crate::field::FieldInfo;
 use crate::lookups::add_disjunctive_lookup_constraints;
 use crate::lookups::add_lookup_constraints_for_table;
+use crate::witness::WitnessComputation;
 
 /// Trait implemented by types that can emit LLZK IR within the module scope.
 pub(crate) trait EmitLLZKInModule<'ctx, F: FieldInfo> {
@@ -81,6 +82,32 @@ pub trait AddConstraints<'ctx: 'op, 'op, F: FieldInfo>: StructDefOpLike<'ctx, 'o
 }
 
 impl<'ctx: 'op, 'op, F: FieldInfo, T: StructDefOpMutLike<'ctx, 'op>> AddConstraints<'ctx, 'op, F>
+    for T
+{
+}
+
+/// Extension trait for [`StructDefOpLike`] that adds a method for filling the `@compute`
+/// function.
+pub trait AddCompute<'ctx: 'op, 'op, F: FieldInfo>: StructDefOpLike<'ctx, 'op> {
+    /// Invokes the callback scoped in `@compute`. The `struct.new` and `function.return %self`
+    /// operations are added automatically and do not need to be inserted by the provided callback.
+    fn add_compute(
+        &'op self,
+        builder: &'ctx ModuleBuilder<'ctx, F>,
+        f: impl FnOnce(&mut OpsBuilder<'ctx, 'op, F>) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        let compute_fn = self.get_compute_func().ok_or_else(|| {
+            anyhow!(
+                "struct {} is missing its @compute function",
+                StructDefOpLike::name(self)
+            )
+        })?;
+        let mut ops_builder = OpsBuilder::new(builder, compute_fn);
+        f(&mut ops_builder)
+    }
+}
+
+impl<'ctx: 'op, 'op, F: FieldInfo, T: StructDefOpMutLike<'ctx, 'op>> AddCompute<'ctx, 'op, F>
     for T
 {
 }
@@ -239,28 +266,46 @@ fn num_vars(vars: impl IntoIterator<Item = ExtractedVariable>) -> usize {
 }
 
 /// Associates a struct name with a CircuitOutput
-pub struct NamedCircuitOutput<F: FieldInfo>(CircuitOutput<F>, String);
+pub struct NamedCircuitOutput<F: PrimeField + FieldInfo> {
+    circuit_output: CircuitOutput<F>,
+    name: String,
+    witness: Option<WitnessComputation<F>>,
+}
 
-impl<F: FieldInfo> NamedCircuitOutput<F> {
+impl<F: PrimeField + FieldInfo> NamedCircuitOutput<F> {
     pub fn new(co: CircuitOutput<F>, name: &str) -> Self {
-        Self(co, name.to_string())
+        Self {
+            circuit_output: co,
+            name: name.to_string(),
+            witness: None,
+        }
+    }
+
+    /// Attach witness SSA and layout metadata used to populate the LLZK `@compute` function.
+    ///
+    /// Constraint lowering only needs the finalized [`CircuitOutput`], while witness lowering also
+    /// needs the compiler's variable-to-column mapping and the SSA evaluation order extracted from
+    /// the witness placer.
+    pub fn with_witness(mut self, witness: WitnessComputation<F>) -> Self {
+        self.witness = Some(witness);
+        self
     }
 
     /// Return a reference to the circuit's name.
     pub fn name(&self) -> &str {
-        &self.1
+        &self.name
     }
 }
 
-impl<F: FieldInfo> Deref for NamedCircuitOutput<F> {
+impl<F: PrimeField + FieldInfo> Deref for NamedCircuitOutput<F> {
     type Target = CircuitOutput<F>;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.circuit_output
     }
 }
 
-impl<'ctx, F: FieldInfo> EmitLLZKInModule<'ctx, F> for NamedCircuitOutput<F> {
+impl<'ctx, F: PrimeField + FieldInfo> EmitLLZKInModule<'ctx, F> for NamedCircuitOutput<F> {
     type Output = ();
 
     fn emit_llzk(&self, builder: &ModuleBuilder<'ctx, F>) -> Result<Self::Output> {
@@ -279,6 +324,12 @@ impl<'ctx, F: FieldInfo> EmitLLZKInModule<'ctx, F> for NamedCircuitOutput<F> {
 
         let vars = StructVars::new(self, &mut struct_builder, builder)?;
         let struct_op = struct_builder.build_in_module(builder.module())?;
+
+        if let Some(witness) = &self.witness {
+            struct_op.add_compute(builder, |builder: &mut OpsBuilder<'_, '_, F>| {
+                witness.emit_compute(builder, &vars)
+            })?;
+        }
 
         struct_op.add_constraints(
             builder,
@@ -509,10 +560,11 @@ pub struct StructVars {
     /// an array type). All members are assumed to be either felts or "registers", which are
     /// flat, two-element felt arrays.
     member_map: HashMap<Variable, (String, Option<u64>)>,
-    /// Maps input Variables to a tuple (arg number, optional index if the member is an array
-    /// type). Argument numbers start at 1 since the 0th argument is the `self` argument to the
-    /// LLZK @constrain function. All members are assumed to be either felts or "registers",
-    /// which are flat, two-element felt arrays.
+    /// Maps input variables to a tuple `(input ordinal, optional limb index)`.
+    ///
+    /// The stored ordinal is zero-based with respect to the logical circuit inputs. Constraint
+    /// lowering adds one when reading from `@constrain` because argument 0 is the struct `self`
+    /// value, while witness lowering uses the ordinal directly in `@compute`.
     arg_map: HashMap<Variable, (usize, Option<u64>)>,
 }
 
@@ -526,15 +578,14 @@ impl StructVars {
         // maps Variable to (input argument, optional index if array)
         let mut arg_map: HashMap<Variable, (usize, Option<u64>)> = HashMap::new();
         for (input_num, input) in co.get_inputs()?.iter().enumerate() {
-            let arg_no = input_num + 1; // because of the self arg
             match input {
                 ExtractedVariable::Register { low, high } => {
-                    arg_map.insert(*low, (arg_no, Some(0)));
-                    arg_map.insert(*high, (arg_no, Some(1)));
+                    arg_map.insert(*low, (input_num, Some(0)));
+                    arg_map.insert(*high, (input_num, Some(1)));
                     struct_builder.with_input(llzk_builder.register_type());
                 }
                 ExtractedVariable::Scalar(variable) => {
-                    arg_map.insert(*variable, (arg_no, None));
+                    arg_map.insert(*variable, (input_num, None));
                     struct_builder.with_input(llzk_builder.felt_type());
                 }
             };
@@ -581,12 +632,16 @@ impl StructVars {
         })
     }
 
+    /// Read a variable from the `@constrain` view of the struct.
+    ///
+    /// This is the legacy accessor used by constraint lowering, where argument 0 is always the
+    /// struct `self` and the public inputs start at argument 1.
     pub fn get_val<'ctx, 'sco, F: FieldInfo>(
         &self,
         builder: &OpsBuilder<'ctx, 'sco, F>,
         var: &Variable,
     ) -> Result<Value<'ctx, 'sco>> {
-        if let Some(val) = self.get_input_val(builder, var)? {
+        if let Some(val) = self.get_input_val(builder, 1, var)? {
             Ok(val)
         } else if let Some(val) = self.get_member_val(builder, var)? {
             Ok(val)
@@ -597,15 +652,77 @@ impl StructVars {
         }
     }
 
+    /// Try to read a variable from the `@compute` view of the struct.
+    ///
+    /// Compute lowering uses this accessor because `@compute` does not receive a `self` argument;
+    /// its public inputs begin at argument 0 and the partially constructed witness struct is the
+    /// result of the leading `struct.new`.
+    pub fn try_get_compute_val<'ctx, 'sco, F: FieldInfo>(
+        &self,
+        builder: &OpsBuilder<'ctx, 'sco, F>,
+        self_value: Value<'ctx, 'sco>,
+        var: &Variable,
+    ) -> Result<Option<Value<'ctx, 'sco>>> {
+        if let Some(val) = self.get_input_val(builder, 0, var)? {
+            Ok(Some(val))
+        } else {
+            self.get_member_val_from(builder, self_value, var)
+        }
+    }
+
+    /// Read a variable from the `@compute` view of the struct and error if it is unavailable.
+    pub fn get_compute_val<'ctx, 'sco, F: FieldInfo>(
+        &self,
+        builder: &OpsBuilder<'ctx, 'sco, F>,
+        self_value: Value<'ctx, 'sco>,
+        var: &Variable,
+    ) -> Result<Value<'ctx, 'sco>> {
+        self.try_get_compute_val(builder, self_value, var)?
+            .ok_or_else(|| anyhow!("Could not find {var:?} in compute inputs or members"))
+    }
+
+    /// Write a felt-encoded column back into the struct instance being assembled in `@compute`.
+    ///
+    /// The function handles both scalar members and register-valued members, where a single
+    /// logical variable corresponds to one limb of a two-element array.
+    pub fn assign_compute_member<'ctx, 'sco, F: FieldInfo>(
+        &self,
+        builder: &OpsBuilder<'ctx, 'sco, F>,
+        self_value: Value<'ctx, 'sco>,
+        var: &Variable,
+        value: Value<'ctx, 'sco>,
+    ) -> Result<()> {
+        let (member_name, index) = self
+            .member_map
+            .get(var)
+            .ok_or_else(|| anyhow!("Variable {var:?} is not stored as a struct member"))?;
+        let location = builder.unknown_location();
+        match index {
+            None => builder.append_member_write(location, self_value, member_name, value),
+            Some(index) => {
+                let register = builder.append_member_read(
+                    location,
+                    self_value,
+                    builder.register_type(),
+                    member_name,
+                )?;
+                let indices = &[builder.get_constant_from_start(builder.index_type(), *index)?];
+                builder.append_array_write(location, register, indices, value)?;
+                builder.append_member_write(location, self_value, member_name, register)
+            }
+        }
+    }
+
     fn get_input_val<'ctx, 'sco, F: FieldInfo>(
         &self,
         builder: &OpsBuilder<'ctx, 'sco, F>,
+        arg_offset: usize,
         var: &Variable,
     ) -> Result<Option<Value<'ctx, 'sco>>> {
         match self.arg_map.get(var) {
             None => Ok(None),
             Some((arg_no, index)) => {
-                let arg_val = builder.get_arg_value(*arg_no)?;
+                let arg_val = builder.get_arg_value(*arg_no + arg_offset)?;
                 let val = match index {
                     None => arg_val,
                     Some(index) => {
@@ -624,10 +741,19 @@ impl StructVars {
         builder: &OpsBuilder<'ctx, 'sco, F>,
         var: &Variable,
     ) -> Result<Option<Value<'ctx, 'sco>>> {
+        let self_val = builder.get_arg_value(0)?;
+        self.get_member_val_from(builder, self_val, var)
+    }
+
+    fn get_member_val_from<'ctx, 'sco, F: FieldInfo>(
+        &self,
+        builder: &OpsBuilder<'ctx, 'sco, F>,
+        self_val: Value<'ctx, 'sco>,
+        var: &Variable,
+    ) -> Result<Option<Value<'ctx, 'sco>>> {
         match self.member_map.get(var) {
             None => Ok(None),
             Some((member_name, index)) => {
-                let self_val = builder.get_arg_value(0)?;
                 let location = builder.unknown_location();
                 match index {
                     None => {
