@@ -94,6 +94,8 @@ fn run_vm_impl(data: &[u8]) -> Option<GuestResult> {
         &mut non_determinism,
     );
 
+    ram.dump_beyond(15);
+
     is_program_finished.then(|| {
         std::array::from_fn(|idx| {
             // We want registers A0-7, which are aliases to registers X10-17

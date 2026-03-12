@@ -69,6 +69,7 @@ impl QuasiUARTSourceState {
                         remaining_len_in_bytes: None,
                         buffer: Vec::new(),
                     };
+                    eprintln!("UART ready");
                 }
             }
             QuasiUARTSourceState::Buffering {
@@ -79,6 +80,7 @@ impl QuasiUARTSourceState {
                 if remaining_words.is_none() {
                     *remaining_words = Some(value as usize);
                     buffer.clear();
+                    eprintln!("UART Step 1 (value = {value})");
                     return;
                 }
                 if remaining_len_in_bytes.is_none() {
@@ -86,7 +88,7 @@ impl QuasiUARTSourceState {
                     *remaining_words.as_mut().unwrap() -= 1;
                     *remaining_len_in_bytes = Some(value as usize);
                     buffer.reserve(value as usize);
-
+                    eprintln!("UART Step 2 (value = {value})");
                     return;
                 }
                 // It is also possible that someone wrote 0 bytes.
@@ -102,11 +104,13 @@ impl QuasiUARTSourceState {
                         buffer.extend_from_slice(&bytes[..remaining_len]);
                         *remaining_len_in_bytes.as_mut().unwrap() = 0;
                     }
+                    eprintln!("UART Step 3 (value = {value})");
                 }
                 if remaining_words.unwrap() == 0 {
                     let buffer = std::mem::replace(buffer, Vec::new());
                     println!("UART: `{}`", String::from_utf8_lossy(&buffer));
                     *self = QuasiUARTSourceState::Ready;
+                    eprintln!("UART Done")
                 }
             }
         }

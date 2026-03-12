@@ -1,9 +1,12 @@
 use crate::ir::DelegationType;
 use crate::ir::Instruction;
 use crate::ir::InstructionName;
-use crate::jit::{MachineState, MAX_NUM_COUNTERS};
+use crate::jit::MachineState;
+use crate::jit::MAX_NUM_COUNTERS;
 use common_constants::circuit_families::*;
-use common_constants::{TimestampScalar, INITIAL_TIMESTAMP, TIMESTAMP_STEP};
+use common_constants::TimestampScalar;
+use common_constants::INITIAL_TIMESTAMP;
+use common_constants::TIMESTAMP_STEP;
 use std::fmt::Debug;
 
 mod instructions;
@@ -403,7 +406,8 @@ impl<C: Counters> VM<C> {
 
 #[cfg(test)]
 pub(crate) mod test {
-    use crate::ir::{preprocess_bytecode, FullUnsignedMachineDecoderConfig};
+    use crate::ir::preprocess_bytecode;
+    use crate::ir::FullUnsignedMachineDecoderConfig;
 
     use super::*;
     use std::path::Path;

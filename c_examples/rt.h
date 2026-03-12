@@ -10,4 +10,8 @@ Result main();
 Result success(unsigned int, unsigned int, unsigned int, unsigned int,
                unsigned int, unsigned int, unsigned int, unsigned int);
 
+void write_csr_word(unsigned int word);
+
+unsigned strlen(const char *);
+
 #endif

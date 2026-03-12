@@ -31,6 +31,11 @@ void _start_c() {
   __builtin_unreachable();
 }
 
+void write_csr_word(unsigned int word) {
+  // csrrw x0, 0x7c0, {rd}
+  asm("csrrw x0, 0x7c0, %0" : : "r"(word) : "x0");
+}
+
 void *memset(void *b, int c, unsigned int len) {
   for (int i = 0; i < len; i++) {
     *(((unsigned char *)b) + i) = (unsigned char)c;
@@ -42,4 +47,12 @@ Result success(unsigned int d0, unsigned int d1, unsigned int d2,
                unsigned int d3, unsigned int d4, unsigned int d5,
                unsigned int d6, unsigned int d7) {
   return (Result){.data = {d0, d1, d2, d3, d4, d5, d6, d7}};
+}
+
+unsigned strlen(const char *s) {
+  unsigned i = 0;
+  for (; s[i] != '\0'; i++) {
+  }
+
+  return i;
 }
