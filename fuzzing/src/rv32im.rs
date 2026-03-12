@@ -1,11 +1,10 @@
 use clap::ValueEnum;
-use prover::risc_v_simulator::runner::run_simple_simulator;
-use risc_v_simulator::sim::BinarySource;
-use risc_v_simulator::sim::SimulatorConfig;
 
 use crate::rv32im::unicorn::run_on_unicorn;
 
+mod common;
 mod unicorn;
+mod vm;
 
 /// Available fuzzing modes
 #[derive(ValueEnum, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +21,10 @@ fn configure_singleton_test_mode() {
 }
 
 pub fn run(mode: Mode, test_one: bool) {
+    if cfg!(debug_assertions) {
+        let _ = ();
+        log::info!("Debug assertions are enabled!");
+    }
     if test_one {
         configure_singleton_test_mode();
     }
@@ -38,26 +41,23 @@ const ENTRYPOINT: u32 = 0;
 
 type GuestResult = [u32; 8];
 
-fn run_on_put(data: &[u8]) -> GuestResult {
-    run_simple_simulator(SimulatorConfig {
-        bin: BinarySource::Slice(data),
-        entry_point: ENTRYPOINT,
-        cycles: DEFAULT_CYCLES,
-        diagnostics: None,
-    })
+macro_rules! log_result {
+    ($enabled:expr, $fmt:expr $(,$args:expr)* $(,)?) => {
+        if $enabled {
+            log::info!($fmt, $( $args, )*);
+        }
+    };
 }
 
 fn dumb_fuzzer(print_result: bool) {
-    afl::fuzz!(|data| {
-        let result = run_on_put(data);
-        if print_result {
-            log::info!("result = {result:?}");
-        }
+    crate::afl::fuzz!(|data| {
+        let result = vm::run_vm(data);
+        log_result!(print_result, "result = {result:?}");
     })
 }
 
 fn oracle_fuzzer(print_result: bool) {
-    afl::fuzz!(|data| {
+    crate::afl::fuzz_nohook!(|data| {
         let oracle_result = match run_on_unicorn(data) {
             Ok(or) => or,
             Err(err) => {
@@ -69,20 +69,15 @@ fn oracle_fuzzer(print_result: bool) {
                 return;
             }
         };
+        log_result!(print_result, "Oracle: {oracle_result:?}");
+        let target_result = vm::run_vm(data);
+        log_result!(print_result, "Target: {target_result:?}");
 
-        if print_result {
-            log::info!("Oracle: {oracle_result:?}");
+        if oracle_result != target_result {
+            eprintln!("Oracle and result produced different register outputs!");
+            eprintln!("oracle: {oracle_result:?}");
+            eprintln!("target: {target_result:?}");
+            std::process::abort();
         }
-
-        let target_result = run_on_put(data);
-
-        if print_result {
-            log::info!("Target: {target_result:?}");
-        }
-
-        assert_eq!(
-            oracle_result, target_result,
-            "Oracle and result produced different register outputs!"
-        );
     })
 }

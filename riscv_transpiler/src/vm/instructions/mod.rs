@@ -78,5 +78,9 @@ pub(crate) fn illegal<C: Counters, S: Snapshotter<C>, R: RAM>(
     snapshotter: &mut S,
     instr: Instruction,
 ) {
-    panic!("Illegal instruction encounteted at PC = 0x{:08x}", state.pc);
+    panic!(
+        "Illegal instruction encounteted at PC = 0x{:08x} (instr data: {:?})",
+        state.pc,
+        instr.as_byte_slice()
+    );
 }

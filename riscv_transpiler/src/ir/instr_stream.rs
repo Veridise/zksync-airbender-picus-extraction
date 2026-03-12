@@ -78,7 +78,7 @@ pub struct Instruction {
 
 impl Instruction {
     #[inline(always)]
-    const fn as_byte_slice(&self) -> &[u8; 8] {
+    pub(crate) const fn as_byte_slice(&self) -> &[u8; 8] {
         unsafe { core::mem::transmute::<_, _>(self) }
     }
 

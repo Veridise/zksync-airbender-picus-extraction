@@ -1,3 +1,4 @@
+mod afl;
 pub mod rv32im;
 pub mod witgen;
 

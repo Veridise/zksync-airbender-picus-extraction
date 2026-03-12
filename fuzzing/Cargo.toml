@@ -29,5 +29,6 @@ rand = "0.10"
 
 # rv32im dependencies
 afl = "0.17"
-risc_v_simulator = { path = "../risc_v_simulator" }
+riscv_transpiler = { path = "../riscv_transpiler/" }
+# risc_v_simulator = { path = "../risc_v_simulator" }
 unicorn-engine = "2.1.5"

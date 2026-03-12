@@ -1,16 +1,21 @@
 use std::collections::HashMap;
 use std::hint::unreachable_unchecked;
 
-use super::{status_registers::*, MachineConfig};
+use super::status_registers::*;
+use super::MachineConfig;
 use crate::abstractions::csr_processor::CustomCSRProcessor;
-use crate::abstractions::memory::{AccessType, MemorySource, VectorMemoryImpl};
-use crate::abstractions::non_determinism::{
-    NonDeterminismCSRSource, QuasiUARTSource, QuasiUARTSourceState,
-};
+use crate::abstractions::mem_read;
+use crate::abstractions::mem_write;
+use crate::abstractions::memory::AccessType;
+use crate::abstractions::memory::MemorySource;
+use crate::abstractions::memory::VectorMemoryImpl;
+use crate::abstractions::non_determinism::NonDeterminismCSRSource;
+use crate::abstractions::non_determinism::QuasiUARTSource;
+use crate::abstractions::non_determinism::QuasiUARTSourceState;
 use crate::abstractions::tracer::Tracer;
-use crate::abstractions::{mem_read, mem_write};
 use crate::cycle::IMStandardIsaConfig;
-use crate::mmu::{MMUImplementation, NoMMU};
+use crate::mmu::MMUImplementation;
+use crate::mmu::NoMMU;
 use crate::sim::RiscV32Machine;
 use crate::utils::*;
 use common_constants::NON_DETERMINISM_CSR;
@@ -1541,6 +1546,7 @@ impl<Config: MachineConfig> RiscV32State<Config> {
                     }
                 },
                 0b00101111 => {
+                    println!("RV32A!!!!");
                     // RV32A, explicitly not supported
                     trap = TrapReason::IllegalInstruction;
                     break 'cycle_block;
@@ -1577,10 +1583,12 @@ impl<Config: MachineConfig> RiscV32State<Config> {
                     pc = pc.wrapping_add(4u32); // PC points to where the PC will return!
                 } else {
                     self.machine_mode_trap_data.handling.cause = trap;
-                    // TODO: here we have a freedom of what to put into tval. We place opcode value now, because PC will be placed into EPC below
+                    // TODO: here we have a freedom of what to put into tval. We place opcode value
+                    // now, because PC will be placed into EPC below
                     self.machine_mode_trap_data.handling.tval = instr;
                 }
-                // println!("Trapping at pc = 0x{:08x} into PC = 0x{:08x}. MECP is set to 0x{:08x}", pc, self.machine_mode_trap_data.setup.tvec, pc);
+                // println!("Trapping at pc = 0x{:08x} into PC = 0x{:08x}. MECP is set to 0x{:08x}",
+                // pc, self.machine_mode_trap_data.setup.tvec, pc);
                 // self.pretty_dump();
                 // self.stack_dump(memory, mmu);
 
@@ -1610,8 +1618,9 @@ impl<Config: MachineConfig> RiscV32State<Config> {
         self.count_new_cycle_for_markers();
         tracer.at_cycle_end(&*self);
 
-        //let trap = trap.as_register_value();
-        //println!("end of cycle: PC = 0x{:08x}, trap = 0x{:08x}, interrupt = {:?}", self.pc, trap, trap & INTERRUPT_MASK != 0);
+        // let trap = trap.as_register_value();
+        // println!("end of cycle: PC = 0x{:08x}, trap = 0x{:08x}, interrupt = {:?}", self.pc, trap,
+        // trap & INTERRUPT_MASK != 0);
     }
 
     pub fn pretty_dump(&self) {
