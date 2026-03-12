@@ -22,6 +22,7 @@ use llzk::dialect::bool;
 use llzk::dialect::felt;
 use llzk::prelude::melior_dialects::arith;
 use llzk::prelude::*;
+use prover::common_constants;
 use prover::cs::cs::witness_placer::graph_description::BoolNodeExpression;
 use prover::cs::cs::witness_placer::graph_description::Expression;
 use prover::cs::cs::witness_placer::graph_description::FieldNodeExpression;
@@ -977,38 +978,45 @@ impl<'a, 'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> ComputeLowering<'a, 'ctx, 
             .collect()
     }
 
-    /// Resolve the table id referenced by a lookup SSA node.
+    /// Read the felt-encoded table id currently referenced by a lookup SSA node.
+    ///
+    /// Some circuits feed table ids through ordinary witness expressions before issuing the
+    /// lookup, so the emitted `@compute` code needs access to the already-lowered SSA slot even
+    /// when the table cannot be identified purely from the original raw expression.
+    fn lookup_table_id_value(&self, table_id_subexpr_idx: usize) -> Result<Value<'ctx, 'sco>> {
+        self.slot_as_field(table_id_subexpr_idx)
+    }
+
+    /// Resolve the table id referenced by a lookup SSA node when it is statically identifiable.
     ///
     /// The witness placer currently materializes table ids as constant subexpressions. We inspect
-    /// the original block so lookup lowering can choose a deterministic implementation before any
-    /// MLIR values are emitted, and cross-check against the compiled lookup layout when the SSA
-    /// node also carries a `lookup_mapping_idx`.
+    /// the original block first, then fall back to the compiled lookup metadata when the SSA node
+    /// carries a `lookup_mapping_idx`. If neither source is constant we return `None`, and the
+    /// caller can emit a runtime dispatch across the supported deterministic table families.
     fn resolve_lookup_table(
         &self,
         table_id_subexpr_idx: usize,
         lookup_mapping_idx: Option<usize>,
-    ) -> Result<TableType> {
+    ) -> Result<Option<TableType>> {
         let table_expr = self
             .block
             .get(table_id_subexpr_idx)
             .ok_or_else(|| anyhow!("SSA slot {table_id_subexpr_idx} is out of bounds"))?;
-        let table_id = match table_expr {
+        let table = match table_expr {
             RawExpression::Integer(FixedWidthIntegerNodeExpression::ConstantU8(value)) => {
-                u32::from(*value)
+                Some(TableType::get_table_from_id(u32::from(*value)))
             }
             RawExpression::Integer(FixedWidthIntegerNodeExpression::ConstantU16(value)) => {
-                u32::from(*value)
+                Some(TableType::get_table_from_id(u32::from(*value)))
             }
-            RawExpression::Integer(FixedWidthIntegerNodeExpression::ConstantU32(value)) => *value,
-            RawExpression::Field(FieldNodeExpression::Constant(value)) => {
-                value.as_u64_reduced().try_into()?
+            RawExpression::Integer(FixedWidthIntegerNodeExpression::ConstantU32(value)) => {
+                Some(TableType::get_table_from_id(*value))
             }
-            _ => bail!(
-                "lookup table ids must lower from constant SSA expressions, found {:?}",
-                table_expr
+            RawExpression::Field(FieldNodeExpression::Constant(value)) => Some(
+                TableType::get_table_from_id(value.as_u64_reduced().try_into()?),
             ),
+            _ => None,
         };
-        let table = TableType::get_table_from_id(table_id);
 
         if let Some(lookup_mapping_idx) = lookup_mapping_idx {
             let expected = self
@@ -1017,26 +1025,104 @@ impl<'a, 'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> ComputeLowering<'a, 'ctx, 
                 .ok_or_else(|| anyhow!("lookup mapping {lookup_mapping_idx} is out of bounds"))?;
             match expected.table_index {
                 TableIndex::Constant(expected_table) => {
-                    if expected_table != table {
-                        bail!(
-                            "SSA lookup mapping {lookup_mapping_idx} expects table {:?}, found {:?}",
-                            expected_table,
-                            table
-                        );
+                    if let Some(table) = table {
+                        if expected_table != table {
+                            bail!(
+                                "SSA lookup mapping {lookup_mapping_idx} expects table {:?}, found {:?}",
+                                expected_table,
+                                table
+                            );
+                        }
                     }
+                    return Ok(Some(expected_table));
                 }
-                // TODO(LLZK compute): support dynamic table ids in witness SSA once a concrete
-                // circuit uses them.
                 TableIndex::Variable(column) => {
-                    bail!(
-                        "dynamic lookup table ids are not yet supported in @compute (column {:?})",
-                        column
-                    )
+                    // TODO(LLZK compute): specialize dynamic lookup columns once a circuit needs
+                    // table families that cannot be handled by the runtime dispatch below.
+                    let _ = column;
                 }
             }
         }
 
         Ok(table)
+    }
+
+    /// Lower one supported lookup table family into LLZK `@compute`.
+    ///
+    /// Keeping the table-to-helper dispatch in one place lets the static and dynamic resolution
+    /// paths share the same deterministic implementations.
+    fn compute_lookup_for_table(
+        &self,
+        table: TableType,
+        inputs: &[Value<'ctx, 'sco>],
+        num_outputs: usize,
+    ) -> Result<Vec<Value<'ctx, 'sco>>> {
+        match table {
+            TableType::ConditionalJmpBranchSlt => {
+                self.compute_conditional_jmp_branch_slt_lookup(inputs, num_outputs)
+            }
+            TableType::JumpCleanupOffset => {
+                self.compute_jump_cleanup_offset_lookup(inputs, num_outputs)
+            }
+            TableType::MemoryGetOffsetAndMaskWithTrap => {
+                self.compute_memory_get_offset_and_mask_with_trap_lookup(inputs, num_outputs)
+            }
+            TableType::RomAddressSpaceSeparator => {
+                self.compute_rom_address_space_separator_lookup(inputs, num_outputs)
+            }
+            TableType::MemoryLoadHalfwordOrByte => {
+                self.compute_memory_load_halfword_or_byte_lookup(inputs, num_outputs)
+            }
+            TableType::MemStoreClearOriginalRamValueLimb => {
+                self.compute_mem_store_clear_original_ram_value_limb_lookup(inputs, num_outputs)
+            }
+            TableType::MemStoreClearWrittenValueLimb => {
+                self.compute_mem_store_clear_written_value_limb_lookup(inputs, num_outputs)
+            }
+            _ => {
+                // TODO(LLZK compute): add deterministic lowering for the remaining lookup tables
+                // used by the supported circuits.
+                self.new_lookup_outputs(num_outputs)
+            }
+        }
+    }
+
+    /// Runtime-dispatch a lookup whose table id is chosen by witness expressions.
+    ///
+    /// `load_store_subword_only` builds several table ids by selecting among constant table
+    /// numbers inside SSA blocks. For those cases we compute the supported candidate tables up
+    /// front and select the matching output tuple by comparing the runtime table id.
+    fn compute_dynamic_lookup(
+        &self,
+        table_id: Value<'ctx, 'sco>,
+        inputs: &[Value<'ctx, 'sco>],
+        num_outputs: usize,
+    ) -> Result<Vec<Value<'ctx, 'sco>>> {
+        let supported_tables: &[TableType] = match inputs.len() {
+            1 => &[
+                TableType::JumpCleanupOffset,
+                TableType::MemoryGetOffsetAndMaskWithTrap,
+                TableType::RomAddressSpaceSeparator,
+                TableType::MemoryLoadHalfwordOrByte,
+                TableType::MemStoreClearOriginalRamValueLimb,
+                TableType::MemStoreClearWrittenValueLimb,
+            ],
+            2 => &[TableType::ConditionalJmpBranchSlt],
+            _ => &[],
+        };
+
+        let mut outputs = self.new_lookup_outputs(num_outputs)?;
+        for table in supported_tables.iter().copied() {
+            let candidate_outputs = self.compute_lookup_for_table(table, inputs, num_outputs)?;
+            let is_selected = self.field_eq_constant(table_id, u64::from(table.to_table_id()))?;
+            outputs = candidate_outputs
+                .into_iter()
+                .zip(outputs.into_iter())
+                .map(|(candidate, fallback)| self.select_value(is_selected, candidate, fallback))
+                .collect::<Result<Vec<_>>>()?;
+        }
+
+        Ok(outputs)
     }
 
     /// Materialize the all-zero lookup row used by `maybe_lookup` and by padded table outputs.
@@ -1081,6 +1167,51 @@ impl<'a, 'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> ComputeLowering<'a, 'ctx, 
         }
 
         Ok(outputs)
+    }
+
+    /// Build a boolean literal for control-flow within a lowered lookup.
+    fn bool_constant(&self, value: bool) -> Result<Value<'ctx, 'sco>> {
+        self.builder
+            .get_constant_from_start(self.builder.bool_type(), value as u64)
+    }
+
+    /// Compare a felt-encoded small integer against a literal used by a lookup decoder.
+    ///
+    /// The witness SSA records lookup inputs as field elements, so deterministic lowering needs a
+    /// compact way to recover table cases such as `funct3 == 0b101` without first reifying a wider
+    /// integer type.
+    fn field_eq_constant(
+        &self,
+        value: Value<'ctx, 'sco>,
+        constant: u64,
+    ) -> Result<Value<'ctx, 'sco>> {
+        self.builder.append_op_with_result(bool::eq(
+            self.builder.unknown_location(),
+            value,
+            self.builder.get_felt_constant_from_start(constant)?,
+        )?)
+    }
+
+    /// Extract a small bit-slice from a felt-encoded lookup input.
+    ///
+    /// Many witness tables pack several control fields into one felt key. This helper mirrors the
+    /// table-generation code by shifting right by a fixed amount and then reducing modulo `2^bits`.
+    fn shifted_low_bits(
+        &self,
+        value: Value<'ctx, 'sco>,
+        shift: u64,
+        bits: u32,
+    ) -> Result<Value<'ctx, 'sco>> {
+        let shifted = if shift == 0 {
+            value
+        } else {
+            self.builder.append_op_with_result(felt::shr(
+                self.builder.unknown_location(),
+                value,
+                self.builder.get_felt_constant_from_start(shift)?,
+            )?)?
+        };
+        self.lowest_bits_felt(shifted, bits)
     }
 
     /// Deterministically lower the branch/jump condition lookup used by `jump_branch_slt`.
@@ -1219,10 +1350,317 @@ impl<'a, 'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> ComputeLowering<'a, 'ctx, 
         self.finalize_lookup_outputs(vec![check_bit, cleaned], num_outputs)
     }
 
+    /// Deterministically lower the packed offset/mask lookup used by subword memory ops.
+    ///
+    /// This mirrors `create_memory_offset_mask_with_trap_table`: unpack the low address bits and
+    /// control flags from the composite key, derive the alignment trap condition, and then rebuild
+    /// the compact bitmask consumed by the later witness SSA writes.
+    fn compute_memory_get_offset_and_mask_with_trap_lookup(
+        &self,
+        inputs: &[Value<'ctx, 'sco>],
+        num_outputs: usize,
+    ) -> Result<Vec<Value<'ctx, 'sco>>> {
+        if inputs.len() != 1 {
+            bail!(
+                "MemoryGetOffsetAndMaskWithTrap expects 1 input, found {}",
+                inputs.len()
+            );
+        }
+
+        let input = inputs[0];
+        let offset = self.lowest_bits_felt(input, 2)?;
+        let funct3 = self.shifted_low_bits(input, 16, 3)?;
+        let is_store = self.field_is_nonzero(self.shifted_low_bits(input, 17, 1)?)?;
+        let rd_is_x0 = self.field_is_nonzero(self.shifted_low_bits(input, 18, 1)?)?;
+
+        let offset_is_nonzero = self.field_is_nonzero(offset)?;
+        let offset_is_odd = self.field_is_nonzero(self.lowest_bits_felt(offset, 1)?)?;
+        let false_bool = self.bool_constant(false)?;
+        let match_funct3 = |value| self.field_eq_constant(funct3, value);
+
+        let is_word = match_funct3(0b010)?;
+        let is_halfword = self.builder.append_op_with_result(bool::or(
+            self.builder.unknown_location(),
+            match_funct3(0b001)?,
+            match_funct3(0b101)?,
+        )?)?;
+        let is_byte = self.builder.append_op_with_result(bool::or(
+            self.builder.unknown_location(),
+            match_funct3(0b000)?,
+            match_funct3(0b100)?,
+        )?)?;
+
+        let less_than_word = self.builder.append_op_with_result(bool::or(
+            self.builder.unknown_location(),
+            is_halfword,
+            is_byte,
+        )?)?;
+        let base_trap = self.select_value(
+            is_word,
+            offset_is_nonzero,
+            self.select_value(
+                is_halfword,
+                offset_is_odd,
+                self.select_value(is_byte, false_bool, self.bool_constant(true)?)?,
+            )?,
+        )?;
+
+        let valid_funct3_for_load = self.builder.append_op_with_result(bool::or(
+            self.builder.unknown_location(),
+            is_word,
+            less_than_word,
+        )?)?;
+        let is_load = self
+            .builder
+            .append_op_with_result(bool::not(self.builder.unknown_location(), is_store)?)?;
+        let allow_x0_unaligned_load = self.builder.append_op_with_result(bool::and(
+            self.builder.unknown_location(),
+            valid_funct3_for_load,
+            self.builder.append_op_with_result(bool::and(
+                self.builder.unknown_location(),
+                is_load,
+                rd_is_x0,
+            )?)?,
+        )?)?;
+        let is_trap = self.select_value(allow_x0_unaligned_load, false_bool, base_trap)?;
+
+        let use_high_limb = self.builder.append_op_with_result(bool::ge(
+            self.builder.unknown_location(),
+            offset,
+            self.builder.get_felt_constant_from_start(2)?,
+        )?)?;
+        let bitmask = self.builder.append_op_with_result(felt::add(
+            self.builder.unknown_location(),
+            self.bool_to_field(less_than_word)?,
+            self.builder.append_op_with_result(felt::add(
+                self.builder.unknown_location(),
+                self.builder.append_op_with_result(felt::mul(
+                    self.builder.unknown_location(),
+                    self.bool_to_field(use_high_limb)?,
+                    self.builder.get_felt_constant_from_start(2)?,
+                )?)?,
+                self.builder.append_op_with_result(felt::mul(
+                    self.builder.unknown_location(),
+                    self.bool_to_field(is_trap)?,
+                    self.builder.get_felt_constant_from_start(4)?,
+                )?)?,
+            )?)?,
+        )?)?;
+
+        self.finalize_lookup_outputs(vec![offset, bitmask], num_outputs)
+    }
+
+    /// Deterministically lower the ROM/RAM separator lookup used by subword loads.
+    ///
+    /// The generated table depends only on the fixed ROM boundary for the machine configuration,
+    /// so `@compute` can reconstruct the same `(is_ram_range, rom_chunk)` tuple directly from the
+    /// address high limb without consulting the materialized lookup table.
+    fn compute_rom_address_space_separator_lookup(
+        &self,
+        inputs: &[Value<'ctx, 'sco>],
+        num_outputs: usize,
+    ) -> Result<Vec<Value<'ctx, 'sco>>> {
+        if inputs.len() != 1 {
+            bail!(
+                "RomAddressSpaceSeparator expects 1 input, found {}",
+                inputs.len()
+            );
+        }
+
+        let input = inputs[0];
+        let rom_bound = 1u64 << common_constants::ROM_SECOND_WORD_BITS;
+        let is_ram_range = self.builder.append_op_with_result(bool::ge(
+            self.builder.unknown_location(),
+            input,
+            self.builder.get_felt_constant_from_start(rom_bound)?,
+        )?)?;
+        let rom_chunk =
+            self.lowest_bits_felt(input, common_constants::ROM_SECOND_WORD_BITS as u32)?;
+
+        self.finalize_lookup_outputs(
+            vec![self.bool_to_field(is_ram_range)?, rom_chunk],
+            num_outputs,
+        )
+    }
+
+    /// Deterministically lower the byte/halfword load extension table used by subword loads.
+    ///
+    /// This follows `create_memory_load_halfword_or_byte_table`: decode the selected 16-bit limb,
+    /// the byte offset inside that limb, and the `funct3` mode, then rebuild the two 16-bit output
+    /// limbs that represent the loaded 32-bit value.
+    fn compute_memory_load_halfword_or_byte_lookup(
+        &self,
+        inputs: &[Value<'ctx, 'sco>],
+        num_outputs: usize,
+    ) -> Result<Vec<Value<'ctx, 'sco>>> {
+        if inputs.len() != 1 {
+            bail!(
+                "MemoryLoadHalfwordOrByte expects 1 input, found {}",
+                inputs.len()
+            );
+        }
+
+        let input = inputs[0];
+        let limb_value = self.lowest_bits_felt(input, 16)?;
+        let offset = self.shifted_low_bits(input, 16, 2)?;
+        let funct3 = self.shifted_low_bits(input, 18, 3)?;
+        let offset_is_odd = self.field_is_nonzero(self.lowest_bits_felt(offset, 1)?)?;
+        let use_low_byte = self
+            .builder
+            .append_op_with_result(bool::not(self.builder.unknown_location(), offset_is_odd)?)?;
+        let low_byte = self.lowest_bits_felt(limb_value, 8)?;
+        let high_byte = self.shifted_low_bits(limb_value, 8, 8)?;
+        let selected_byte = self.select_value(use_low_byte, low_byte, high_byte)?;
+        let byte_sign = self.field_is_nonzero(self.shifted_low_bits(selected_byte, 7, 1)?)?;
+        let limb_sign = self.field_is_nonzero(self.shifted_low_bits(limb_value, 15, 1)?)?;
+        let zero = self.builder.get_felt_constant_from_start(0)?;
+        let byte_signed_low = self.select_value(
+            byte_sign,
+            self.builder.append_op_with_result(felt::add(
+                self.builder.unknown_location(),
+                selected_byte,
+                self.builder.get_felt_constant_from_start(0xff00)?,
+            )?)?,
+            selected_byte,
+        )?;
+        let byte_signed_high = self.select_value(
+            byte_sign,
+            self.builder.get_felt_constant_from_start(0xffff)?,
+            zero,
+        )?;
+        let halfword_signed_high = self.select_value(
+            limb_sign,
+            self.builder.get_felt_constant_from_start(0xffff)?,
+            zero,
+        )?;
+        let halfword_low = self.select_value(offset_is_odd, zero, limb_value)?;
+        let halfword_signed_high = self.select_value(offset_is_odd, zero, halfword_signed_high)?;
+
+        let match_funct3 = |value| self.field_eq_constant(funct3, value);
+        let low = self.select_value(
+            match_funct3(0b010)?,
+            zero,
+            self.select_value(
+                match_funct3(0b001)?,
+                halfword_low,
+                self.select_value(
+                    match_funct3(0b101)?,
+                    halfword_low,
+                    self.select_value(
+                        match_funct3(0b000)?,
+                        byte_signed_low,
+                        self.select_value(match_funct3(0b100)?, selected_byte, zero)?,
+                    )?,
+                )?,
+            )?,
+        )?;
+        let high = self.select_value(
+            match_funct3(0b010)?,
+            zero,
+            self.select_value(
+                match_funct3(0b001)?,
+                halfword_signed_high,
+                self.select_value(
+                    match_funct3(0b101)?,
+                    zero,
+                    self.select_value(match_funct3(0b000)?, byte_signed_high, zero)?,
+                )?,
+            )?,
+        )?;
+
+        self.finalize_lookup_outputs(vec![low, high], num_outputs)
+    }
+
+    /// Deterministically lower the table that clears bytes from the original RAM limb on stores.
+    ///
+    /// This mirrors `create_memory_store_halfword_or_byte_clear_source_limb_table`, which keeps
+    /// only the untouched bytes of the original RAM limb before the cleaned write contribution is
+    /// added back in.
+    fn compute_mem_store_clear_original_ram_value_limb_lookup(
+        &self,
+        inputs: &[Value<'ctx, 'sco>],
+        num_outputs: usize,
+    ) -> Result<Vec<Value<'ctx, 'sco>>> {
+        if inputs.len() != 1 {
+            bail!(
+                "MemStoreClearOriginalRamValueLimb expects 1 input, found {}",
+                inputs.len()
+            );
+        }
+
+        let input = inputs[0];
+        let limb_value = self.lowest_bits_felt(input, 16)?;
+        let offset = self.shifted_low_bits(input, 16, 2)?;
+        let funct3 = self.shifted_low_bits(input, 18, 3)?;
+        let offset_is_odd = self.field_is_nonzero(self.lowest_bits_felt(offset, 1)?)?;
+        let cleaned_byte = self.select_value(
+            offset_is_odd,
+            self.lowest_bits_felt(limb_value, 8)?,
+            self.builder.append_op_with_result(felt::bit_and(
+                self.builder.unknown_location(),
+                limb_value,
+                self.builder.get_felt_constant_from_start(0xff00)?,
+            )?)?,
+        )?;
+        let cleaned = self.select_value(
+            self.field_eq_constant(funct3, 0b000)?,
+            cleaned_byte,
+            self.builder.get_felt_constant_from_start(0)?,
+        )?;
+
+        self.finalize_lookup_outputs(vec![cleaned], num_outputs)
+    }
+
+    /// Deterministically lower the table that positions the written byte/halfword contribution.
+    ///
+    /// This matches `create_memory_store_halfword_or_byte_clear_written_limb_table`: depending on
+    /// the store width and byte offset, keep either the full halfword or the selected byte shifted
+    /// into its destination position.
+    fn compute_mem_store_clear_written_value_limb_lookup(
+        &self,
+        inputs: &[Value<'ctx, 'sco>],
+        num_outputs: usize,
+    ) -> Result<Vec<Value<'ctx, 'sco>>> {
+        if inputs.len() != 1 {
+            bail!(
+                "MemStoreClearWrittenValueLimb expects 1 input, found {}",
+                inputs.len()
+            );
+        }
+
+        let input = inputs[0];
+        let limb_value = self.lowest_bits_felt(input, 16)?;
+        let offset = self.shifted_low_bits(input, 16, 2)?;
+        let funct3 = self.shifted_low_bits(input, 18, 3)?;
+        let offset_is_odd = self.field_is_nonzero(self.lowest_bits_felt(offset, 1)?)?;
+        let value_to_store = self.lowest_bits_felt(limb_value, 8)?;
+        let shifted_byte = self.select_value(
+            offset_is_odd,
+            self.builder.append_op_with_result(felt::shl(
+                self.builder.unknown_location(),
+                value_to_store,
+                self.builder.get_felt_constant_from_start(8)?,
+            )?)?,
+            value_to_store,
+        )?;
+        let cleaned = self.select_value(
+            self.field_eq_constant(funct3, 0b001)?,
+            limb_value,
+            self.select_value(
+                self.field_eq_constant(funct3, 0b000)?,
+                shifted_byte,
+                self.builder.get_felt_constant_from_start(0)?,
+            )?,
+        )?;
+
+        self.finalize_lookup_outputs(vec![cleaned], num_outputs)
+    }
+
     /// Allocate witness holes for lookup outputs that are not yet lowered deterministically.
     fn new_lookup_outputs(&self, num_outputs: usize) -> Result<Vec<Value<'ctx, 'sco>>> {
         // TODO(LLZK compute): replace these witness holes with deterministic lookup lowering once
-        // the remaining table families are modeled in `@compute`.
+        // the remaining table families are modeled in `@compute`, especially `AlignedRomRead`
+        // and the hard witness-only helpers that still depend on external oracle state.
         (0..num_outputs)
             .map(|_| self.builder.new_nondet_felt())
             .collect()
@@ -1340,22 +1778,17 @@ impl<'a, 'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZKInCompute<'a, 'ctx
         &self,
         lowering: &mut ComputeLowering<'a, 'ctx, 'sco, F>,
     ) -> Result<Self::Output> {
-        let table = lowering
-            .resolve_lookup_table(self.table_id_subexpr_idx(), self.lookup_mapping_idx())?;
         let inputs = lowering.lookup_inputs_as_fields(self.input_subexpr_idxes())?;
-
-        let outputs = match table {
-            TableType::ConditionalJmpBranchSlt => {
-                lowering.compute_conditional_jmp_branch_slt_lookup(&inputs, self.num_outputs())?
-            }
-            TableType::JumpCleanupOffset => {
-                lowering.compute_jump_cleanup_offset_lookup(&inputs, self.num_outputs())?
-            }
-            _ => {
-                // TODO(LLZK compute): add deterministic lowering for the remaining lookup tables
-                // used by the supported circuits.
-                lowering.new_lookup_outputs(self.num_outputs())?
-            }
+        let outputs = if let Some(table) =
+            lowering.resolve_lookup_table(self.table_id_subexpr_idx(), self.lookup_mapping_idx())?
+        {
+            lowering.compute_lookup_for_table(table, &inputs, self.num_outputs())?
+        } else {
+            lowering.compute_dynamic_lookup(
+                lowering.lookup_table_id_value(self.table_id_subexpr_idx())?,
+                &inputs,
+                self.num_outputs(),
+            )?
         };
 
         if let Some(mask_id_subexpr_idx) = self.mask_id_subexpr_idx() {
@@ -1743,6 +2176,286 @@ impl<'a, 'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZKInCompute<'a, 'ctx
                     "integer operation {:?} is not yet supported in @compute",
                     self
                 )
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use prover::cs::tables::TableDriver;
+    use prover::field::Mersenne31Field;
+
+    fn field(value: u64) -> Mersenne31Field {
+        Mersenne31Field::from_u64_unchecked(value)
+    }
+
+    fn lookup_values<const N: usize>(
+        table_driver: &TableDriver<Mersenne31Field>,
+        table: TableType,
+        inputs: &[u64],
+    ) -> [u64; N] {
+        let keys: Vec<_> = inputs.iter().copied().map(field).collect();
+        table_driver
+            .lookup_values::<N>(&keys, table.to_table_id())
+            .map(|value| value.as_u64_reduced())
+    }
+
+    fn jump_branch_lookup_outputs(input_bits: u64, funct3: u64) -> [u64; 1] {
+        let uf = input_bits & 1;
+        let out_is_zero = (input_bits >> 1) & 1;
+        let sign1 = (input_bits >> 2) & 1;
+        let sign2 = (input_bits >> 3) & 1;
+
+        let eq = out_is_zero != 0;
+        let unsigned_lt = uf != 0;
+        let signed_lt = if sign1 ^ sign2 == 1 {
+            sign1 != 0
+        } else {
+            unsigned_lt
+        };
+
+        let flag = match funct3 {
+            0b000 => eq,
+            0b001 => !eq,
+            0b010 | 0b100 => signed_lt,
+            0b011 | 0b110 => unsigned_lt,
+            0b101 => !signed_lt,
+            0b111 => !unsigned_lt,
+            _ => unreachable!(),
+        };
+
+        [flag as u64]
+    }
+
+    fn jump_cleanup_offset_outputs(input: u64) -> [u64; 2] {
+        [(input >> 1) & 1, input & !0x3]
+    }
+
+    fn memory_get_offset_and_mask_with_trap_outputs(input: u64) -> [u64; 2] {
+        let mem_address_low = input & 0xffff;
+        let funct3 = (input >> 16) & 0b111;
+        let is_store = ((input >> 17) & 1) != 0;
+        let rd_is_x0 = ((input >> 18) & 1) != 0;
+
+        let offset = mem_address_low & 0b11;
+        let mut less_than_word = false;
+        let mut is_trap = match (funct3, offset) {
+            (0b010, offset) => offset != 0,
+            (0b001, offset) | (0b101, offset) => {
+                less_than_word = true;
+                offset & 1 != 0
+            }
+            (0b000, _) | (0b100, _) => {
+                less_than_word = true;
+                false
+            }
+            _ => true,
+        };
+        let valid_funct3_for_load = matches!(funct3, 0b000 | 0b001 | 0b010 | 0b100 | 0b101);
+
+        if valid_funct3_for_load && !is_store && rd_is_x0 {
+            is_trap = false;
+        }
+
+        let use_high_limb = offset > 1;
+        let mut bitmask = less_than_word as u64;
+        bitmask |= (use_high_limb as u64) << 1;
+        bitmask |= (is_trap as u64) << 2;
+
+        [offset, bitmask]
+    }
+
+    fn rom_address_space_separator_outputs(input: u64) -> [u64; 2] {
+        let bound = 1u64 << common_constants::ROM_SECOND_WORD_BITS;
+        [(input >= bound) as u64, input % bound]
+    }
+
+    fn memory_load_halfword_or_byte_outputs(input: u64) -> [u64; 2] {
+        let limb_value = input & 0xffff;
+        let offset = (input >> 16) & 0b11;
+        let funct3 = (input >> 18) & 0b111;
+        let use_low_byte = offset & 1 == 0;
+
+        match (funct3, offset) {
+            (0b010, _) => [0, 0],
+            (0b001, offset) => {
+                if offset & 1 != 0 {
+                    [0, 0]
+                } else if (limb_value >> 15) != 0 {
+                    [limb_value, 0xffff]
+                } else {
+                    [limb_value, 0]
+                }
+            }
+            (0b101, offset) => {
+                if offset & 1 != 0 {
+                    [0, 0]
+                } else {
+                    [limb_value, 0]
+                }
+            }
+            (0b000, _) => {
+                let source = if use_low_byte {
+                    limb_value & 0xff
+                } else {
+                    limb_value >> 8
+                };
+                if (source >> 7) != 0 {
+                    [source | 0xff00, 0xffff]
+                } else {
+                    [source, 0]
+                }
+            }
+            (0b100, _) => {
+                let source = if use_low_byte {
+                    limb_value & 0xff
+                } else {
+                    limb_value >> 8
+                };
+                [source, 0]
+            }
+            _ => [0, 0],
+        }
+    }
+
+    fn mem_store_clear_original_ram_value_limb_outputs(input: u64) -> [u64; 2] {
+        let limb_value = input & 0xffff;
+        let offset = (input >> 16) & 0b11;
+        let funct3 = (input >> 18) & 0b111;
+
+        let cleaned_value = match (funct3, offset) {
+            (0b010, _) | (0b001, _) => 0,
+            (0b000, offset) => {
+                let mask = if offset & 1 != 0 { 0x00ff } else { 0xff00 };
+                limb_value & mask
+            }
+            _ => 0,
+        };
+
+        [cleaned_value, 0]
+    }
+
+    fn mem_store_clear_written_value_limb_outputs(input: u64) -> [u64; 2] {
+        let limb_value = input & 0xffff;
+        let offset = (input >> 16) & 0b11;
+        let funct3 = (input >> 18) & 0b111;
+
+        let cleaned_value = match (funct3, offset) {
+            (0b010, _) => 0,
+            (0b001, _) => limb_value,
+            (0b000, offset) => {
+                let value_to_store = limb_value & 0xff;
+                if offset & 1 != 0 {
+                    value_to_store << 8
+                } else {
+                    value_to_store
+                }
+            }
+            _ => 0,
+        };
+
+        [cleaned_value, 0]
+    }
+
+    #[test]
+    fn jump_branch_lookup_semantics_match_table_driver() {
+        let bytecode_words = (1 << (16 + jump_branch_slt::ROM_ADDRESS_SPACE_SECOND_WORD_BITS)) / 4;
+        let table_driver = jump_branch_slt::get_table_driver(&vec![0u32; bytecode_words]);
+
+        for input_bits in 0..(1 << 4) {
+            for funct3 in 0..(1 << 3) {
+                assert_eq!(
+                    lookup_values::<1>(
+                        &table_driver,
+                        TableType::ConditionalJmpBranchSlt,
+                        &[input_bits, funct3],
+                    ),
+                    jump_branch_lookup_outputs(input_bits, funct3),
+                );
+            }
+        }
+
+        for input in 0..(1 << 16) {
+            assert_eq!(
+                lookup_values::<2>(&table_driver, TableType::JumpCleanupOffset, &[input]),
+                jump_cleanup_offset_outputs(input),
+            );
+        }
+    }
+
+    #[test]
+    fn subword_lookup_semantics_match_table_driver() {
+        let bytecode_words =
+            (1 << (16 + load_store_subword_only::ROM_ADDRESS_SPACE_SECOND_WORD_BITS)) / 4;
+        let table_driver = load_store_subword_only::get_table_driver(&vec![0u32; bytecode_words]);
+
+        for address_low in [0u64, 1, 2, 3, 0x1234, 0xffff] {
+            for funct3 in 0..8u64 {
+                for is_store in 0..=1u64 {
+                    for rd_is_x0 in 0..=1u64 {
+                        let input =
+                            address_low | (funct3 << 16) | (is_store << 17) | (rd_is_x0 << 18);
+                        assert_eq!(
+                            lookup_values::<2>(
+                                &table_driver,
+                                TableType::MemoryGetOffsetAndMaskWithTrap,
+                                &[input],
+                            ),
+                            memory_get_offset_and_mask_with_trap_outputs(input),
+                        );
+                    }
+                }
+            }
+        }
+
+        let rom_bound = 1u64 << common_constants::ROM_SECOND_WORD_BITS;
+        for input in [
+            0u64,
+            1,
+            rom_bound.saturating_sub(1),
+            rom_bound,
+            rom_bound + 1,
+            0xffff,
+        ] {
+            assert_eq!(
+                lookup_values::<2>(&table_driver, TableType::RomAddressSpaceSeparator, &[input]),
+                rom_address_space_separator_outputs(input),
+            );
+        }
+
+        let limb_values = [0u64, 1, 0x7f, 0x80, 0xff, 0x100, 0x7fff, 0x8000, 0xffff];
+        for limb_value in limb_values {
+            for offset in 0..4u64 {
+                for funct3 in 0..8u64 {
+                    let input = limb_value | (offset << 16) | (funct3 << 18);
+                    assert_eq!(
+                        lookup_values::<2>(
+                            &table_driver,
+                            TableType::MemoryLoadHalfwordOrByte,
+                            &[input],
+                        ),
+                        memory_load_halfword_or_byte_outputs(input),
+                    );
+                    assert_eq!(
+                        lookup_values::<2>(
+                            &table_driver,
+                            TableType::MemStoreClearOriginalRamValueLimb,
+                            &[input],
+                        ),
+                        mem_store_clear_original_ram_value_limb_outputs(input),
+                    );
+                    assert_eq!(
+                        lookup_values::<2>(
+                            &table_driver,
+                            TableType::MemStoreClearWrittenValueLimb,
+                            &[input],
+                        ),
+                        mem_store_clear_written_value_limb_outputs(input),
+                    );
+                }
             }
         }
     }
