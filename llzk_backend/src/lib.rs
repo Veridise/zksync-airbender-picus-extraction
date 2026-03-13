@@ -11,7 +11,7 @@ use std::fs::{self};
 use std::io::Write;
 use std::path::Path;
 
-use crate::builder::ModuleBuilder;
+use crate::builder::ModuleEnv;
 use crate::codegen::CircuitBundle;
 use crate::codegen::EmitLLZKInModule as _;
 use crate::output_format::OutputFormat;
@@ -24,6 +24,8 @@ mod codegen;
 mod constraints;
 mod field;
 mod lookups;
+#[cfg(test)]
+mod test_helpers;
 mod witness;
 // mod expr;
 pub mod output_format;
@@ -189,14 +191,14 @@ fn generate_circuit_command(
     // Generate an empty LLZK module
     let ctx = LlzkContext::new();
     let mut module = llzk_module(Location::unknown(&ctx));
-    let builder: ModuleBuilder<'_, Mersenne31Field> = ModuleBuilder::new(&ctx, &module);
+    let env: ModuleEnv<'_, Mersenne31Field> = ModuleEnv::new(&ctx, &module);
 
     println!("Circuit Output:\n{:#?}", circuit_output);
     println!("Compiled:\n{:#?}", _compiled);
 
     // Add the circuit output to it.
     let circuit_bundle = CircuitBundle::new(circuit_output, name, witness);
-    circuit_bundle.emit_llzk(&builder)?;
+    circuit_bundle.emit_llzk(&env)?;
 
     // Verify the module
     verify_operation_with_diags(&module.as_operation())?;

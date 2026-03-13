@@ -22,7 +22,7 @@ use crate::witness::WitnessComputation;
 pub(crate) trait EmitLLZKInModule<'ctx, F: FieldInfo> {
     type Output;
 
-    fn emit_llzk(&self, builder: &ModuleBuilder<'ctx, F>) -> Result<Self::Output>;
+    fn emit_llzk(&self, env: &ModuleEnv<'ctx, F>) -> Result<Self::Output>;
 }
 
 /// Extension trait for [`StructDefOpLike`] that adds a method for filling the `@compute`
@@ -32,7 +32,7 @@ pub trait AddCompute<'ctx: 'op, 'op, F: FieldInfo>: StructDefOpLike<'ctx, 'op> {
     /// operations are added automatically and do not need to be inserted by the provided callback.
     fn add_compute(
         &'op self,
-        builder: &'ctx ModuleBuilder<'ctx, F>,
+        env: &'ctx ModuleEnv<'ctx, F>,
         f: impl FnOnce(&mut OpsBuilder<'ctx, 'op, F>) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
         let compute_fn = self.get_compute_func().ok_or_else(|| {
@@ -41,7 +41,7 @@ pub trait AddCompute<'ctx: 'op, 'op, F: FieldInfo>: StructDefOpLike<'ctx, 'op> {
                 StructDefOpLike::name(self)
             )
         })?;
-        let mut ops_builder = OpsBuilder::new(builder, compute_fn);
+        let mut ops_builder = OpsBuilder::new(env, compute_fn);
         f(&mut ops_builder)
     }
 }
@@ -244,12 +244,12 @@ impl<F: FieldInfo> Deref for CircuitBundle<F> {
 impl<'ctx, F: FieldInfo> EmitLLZKInModule<'ctx, F> for CircuitBundle<F> {
     type Output = ();
 
-    fn emit_llzk(&self, builder: &ModuleBuilder<'ctx, F>) -> Result<Self::Output> {
+    fn emit_llzk(&self, env: &ModuleEnv<'ctx, F>) -> Result<Self::Output> {
         if !F::is_built_in() {
             panic!("non-built-in fields are not yet supported in LLZK module emission")
         }
 
-        let mut struct_builder = StructBuilder::new(builder.context(), self.name());
+        let mut struct_builder = StructBuilder::new(env, self.name());
 
         // Sanity check: all variables should be an input, output, or intermediate.
         let num_input_vars = num_vars(self.get_inputs()?);
@@ -258,36 +258,33 @@ impl<'ctx, F: FieldInfo> EmitLLZKInModule<'ctx, F> for CircuitBundle<F> {
         let extracted = num_input_vars + num_output_vars + num_intermediate_vars;
         assert_eq!(self.num_of_variables, extracted);
 
-        let vars = StructVars::new(self, &mut struct_builder, builder)?;
-        let struct_op = struct_builder.build_in_module(builder.module())?;
+        let vars = StructVars::new(self, &mut struct_builder)?;
+        let struct_op = struct_builder.build_in_module()?;
 
-        struct_op.add_compute(builder, |builder: &mut OpsBuilder<'_, '_, F>| {
+        struct_op.add_compute(env, |builder: &mut OpsBuilder<'_, '_, F>| {
             self.witness.emit_compute(builder, &vars)
         })?;
 
-        struct_op.add_constraints(
-            builder,
-            |builder: &mut OpsBuilder<'_, '_, F>| -> Result<()> {
-                // Add some constants to reuse at the beginning here.
-                builder.insert_constant_at_start(builder.index_type(), 1)?;
-                builder.insert_constant_at_start(builder.index_type(), 0)?;
-                builder.insert_constant_at_start(builder.felt_type(), 1)?;
-                builder.insert_constant_at_start(builder.felt_type(), 0)?;
-                // Add boolean constraints.
-                for bool_var in self.boolean_vars.iter() {
-                    let val = vars.get_constrain_val(builder, bool_var)?;
-                    let _ = builder.felt_type();
-                    builder.append_boolean_constraint(val)?;
-                }
-                // Add range constraints.
-                self.range_check_expressions
-                    .emit_constrain(builder, &vars)?;
-                // Add lookup constraints.
-                self.lookups.emit_constrain(builder, &vars)?;
-                // Add all other constraints.
-                self.constraints.emit_constrain(builder, &vars)
-            },
-        )
+        struct_op.add_constraints(env, |builder: &mut OpsBuilder<'_, '_, F>| -> Result<()> {
+            // Add some constants to reuse at the beginning here.
+            builder.insert_constant_at_start(builder.index_type(), 1)?;
+            builder.insert_constant_at_start(builder.index_type(), 0)?;
+            builder.insert_constant_at_start(builder.felt_type(), 1)?;
+            builder.insert_constant_at_start(builder.felt_type(), 0)?;
+            // Add boolean constraints.
+            for bool_var in self.boolean_vars.iter() {
+                let val = vars.get_constrain_val(builder, bool_var)?;
+                let _ = builder.felt_type();
+                builder.append_boolean_constraint(val)?;
+            }
+            // Add range constraints.
+            self.range_check_expressions
+                .emit_constrain(builder, &vars)?;
+            // Add lookup constraints.
+            self.lookups.emit_constrain(builder, &vars)?;
+            // Add all other constraints.
+            self.constraints.emit_constrain(builder, &vars)
+        })
     }
 }
 
@@ -316,8 +313,7 @@ impl<F: FieldInfo> StructVars<F> {
     /// - Adding new struct arguments and members based on the [`ExtractedVariable`]s
     fn new<'ctx>(
         co: &CircuitOutput<F>,
-        struct_builder: &mut StructBuilder<'ctx, '_>,
-        llzk_builder: &ModuleBuilder<'ctx, F>,
+        struct_builder: &mut StructBuilder<'ctx, '_, F>,
     ) -> Result<Self> {
         // Add inputs to struct.
         let mut arg_map: HashMap<Variable, (usize, Option<u64>)> = HashMap::new();
@@ -326,11 +322,13 @@ impl<F: FieldInfo> StructVars<F> {
                 ExtractedVariable::Register { low, high } => {
                     arg_map.insert(*low, (input_num, Some(0)));
                     arg_map.insert(*high, (input_num, Some(1)));
-                    struct_builder.with_input(llzk_builder.register_type());
+                    let register_type = struct_builder.register_type();
+                    struct_builder.with_input(register_type);
                 }
                 ExtractedVariable::Scalar(variable) => {
                     arg_map.insert(*variable, (input_num, None));
-                    struct_builder.with_input(llzk_builder.felt_type());
+                    let felt_type = struct_builder.felt_type();
+                    struct_builder.with_input(felt_type);
                 }
             };
         }
@@ -344,12 +342,14 @@ impl<F: FieldInfo> StructVars<F> {
                     let name = format!("out_reg_{}_{}", low.0, high.0);
                     member_map.insert(*low, (name.clone(), Some(0)));
                     member_map.insert(*high, (name.clone(), Some(1)));
-                    struct_builder.with_member(name, llzk_builder.register_type(), true);
+                    let register_type = struct_builder.register_type();
+                    struct_builder.with_member(name, register_type, true);
                 }
                 ExtractedVariable::Scalar(variable) => {
                     let name = format!("out_var_{}", variable.0);
                     member_map.insert(*variable, (name.clone(), None));
-                    struct_builder.with_member(name, llzk_builder.felt_type(), true);
+                    let felt_type = struct_builder.felt_type();
+                    struct_builder.with_member(name, felt_type, true);
                 }
             }
         }
@@ -361,12 +361,14 @@ impl<F: FieldInfo> StructVars<F> {
                     let name = format!("internal_reg_{}_{}", low.0, high.0);
                     member_map.insert(*low, (name.clone(), Some(0)));
                     member_map.insert(*high, (name.clone(), Some(1)));
-                    struct_builder.with_member(name, llzk_builder.register_type(), false);
+                    let register_type = struct_builder.register_type();
+                    struct_builder.with_member(name, register_type, false);
                 }
                 ExtractedVariable::Scalar(variable) => {
                     let name = format!("internal_var_{}", variable.0);
                     member_map.insert(*variable, (name.clone(), None));
-                    struct_builder.with_member(name, llzk_builder.felt_type(), false);
+                    let felt_type = struct_builder.felt_type();
+                    struct_builder.with_member(name, felt_type, false);
                 }
             }
         }

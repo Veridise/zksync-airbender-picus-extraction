@@ -55,7 +55,7 @@ pub(crate) trait AddConstraints<'ctx: 'op, 'op, F: FieldInfo>:
     /// All ops added with the [`OpsBuilder`] are automatically added to that function.
     fn add_constraints(
         &'op self,
-        builder: &'ctx ModuleBuilder<'ctx, F>,
+        env: &'ctx ModuleEnv<'ctx, F>,
         f: impl FnOnce(&mut OpsBuilder<'ctx, 'op, F>) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
         let constrain_fn = self.get_constrain_func().ok_or_else(|| {
@@ -64,7 +64,7 @@ pub(crate) trait AddConstraints<'ctx: 'op, 'op, F: FieldInfo>:
                 StructDefOpLike::name(self)
             )
         })?;
-        let mut ops_builder = OpsBuilder::new(builder, constrain_fn);
+        let mut ops_builder = OpsBuilder::new(env, constrain_fn);
         f(&mut ops_builder)
     }
 }
@@ -271,84 +271,22 @@ impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInConstrain<'ctx, 'sco, F> for Bool
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
-    use llzk::prelude::*;
     use prover::cs::definitions::Variable;
     use prover::field::Mersenne31Field;
     use prover::field::PrimeField;
 
     use super::*;
-    use crate::builder::StructBuilder;
-    use crate::codegen::AddCompute;
-    use crate::codegen::StructVars;
+    use crate::test_helpers::assert_full_ir_eq;
+    use crate::test_helpers::emit_test_constrain_ir;
 
     fn field(value: u64) -> Mersenne31Field {
         Mersenne31Field::from_u64_unchecked(value)
     }
 
-    /// Normalize the textual IR format by trimming trailing spaces at the end
-    /// of lines. Some of the operations emit trailing spaces in their IR format,
-    /// which makes it annoying to compare equality to our expected test result
-    /// IR strings, which often have trailing spaces removed by linting/editor tools.
-    fn normalize_ir(ir: &str) -> String {
-        ir.trim()
-            .lines()
-            .map(str::trim_end)
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    /// Assert that the `actual` and `expected` IR strings are equal after normalization.
-    fn assert_full_ir_eq(actual: &str, expected: &str) {
-        assert_eq!(normalize_ir(actual), normalize_ir(expected));
-    }
-
-    fn emit_constrain_ir(
-        input_vars: &[Variable],
-        member_vars: &[(Variable, &str)],
-        emit: impl FnOnce(
-            &OpsBuilder<'_, '_, Mersenne31Field>,
-            &StructVars<Mersenne31Field>,
-        ) -> Result<()>,
-    ) -> String {
-        let ctx = LlzkContext::new();
-        let module = llzk_module(Location::unknown(&ctx));
-        let builder = ModuleBuilder::<Mersenne31Field>::new(&ctx, &module);
-
-        let mut struct_builder = StructBuilder::new(builder.context(), "constraint_test");
-        for _ in input_vars {
-            struct_builder.with_input(builder.felt_type());
-        }
-        for (_, name) in member_vars {
-            struct_builder.with_member((*name).to_string(), builder.felt_type(), false);
-        }
-
-        let arg_map = input_vars
-            .iter()
-            .enumerate()
-            .map(|(idx, var)| (*var, (idx, None)))
-            .collect::<HashMap<_, _>>();
-        let member_map = member_vars
-            .iter()
-            .map(|(var, name)| (*var, ((*name).to_string(), None)))
-            .collect::<HashMap<_, _>>();
-        let vars = StructVars::from_test_maps(member_map, arg_map);
-
-        let struct_op = struct_builder.build_in_module(builder.module()).unwrap();
-        struct_op.add_compute(&builder, |_ops| Ok(())).unwrap();
-        struct_op
-            .add_constraints(&builder, |ops| emit(ops, &vars))
-            .unwrap();
-        verify_operation_with_diags(&module.as_operation()).unwrap();
-
-        format!("{}", module.as_operation())
-    }
-
     #[test]
     fn boolean_not_on_input_emits_sub_from_one() {
         let input = Variable(7);
-        let ir = emit_constrain_ir(&[input], &[], |ops, vars| {
+        let ir = emit_test_constrain_ir("constraint_test", &[input], &[], |ops, vars| {
             let _ = Boolean::Not(input).emit_constrain(ops, vars)?;
             Ok(())
         });
@@ -364,7 +302,7 @@ mod tests {
         let input = Variable(7);
         let neg_one = field(Mersenne31Field::CHARACTERISTICS - 1);
         let term = Term::from((neg_one, input));
-        let ir = emit_constrain_ir(&[input], &[], |ops, vars| {
+        let ir = emit_test_constrain_ir("constraint_test", &[input], &[], |ops, vars| {
             let _ = term.emit_constrain(ops, vars)?;
             Ok(())
         });
@@ -385,7 +323,7 @@ mod tests {
             linear_terms: vec![(field(3), lhs), (field(4), rhs)],
             constant_coeff: field(5),
         };
-        let ir = emit_constrain_ir(&[lhs, rhs], &[], |ops, vars| {
+        let ir = emit_test_constrain_ir("constraint_test", &[lhs, rhs], &[], |ops, vars| {
             let _ = input.emit_constrain(ops, vars)?;
             Ok(())
         });
@@ -399,10 +337,15 @@ mod tests {
     #[test]
     fn constrain_access_reads_member_when_variable_is_not_input() {
         let member = Variable(42);
-        let ir = emit_constrain_ir(&[], &[(member, "stored_member")], |ops, vars| {
-            let _ = Boolean::Is(member).emit_constrain(ops, vars)?;
-            Ok(())
-        });
+        let ir = emit_test_constrain_ir(
+            "constraint_test",
+            &[],
+            &[(member, "stored_member")],
+            |ops, vars| {
+                let _ = Boolean::Is(member).emit_constrain(ops, vars)?;
+                Ok(())
+            },
+        );
 
         assert_full_ir_eq(
             &ir,
@@ -416,7 +359,9 @@ mod tests {
     fn range_check_query_emits_compare_and_constraint() {
         let input = Variable(7);
         let query = RangeCheckQuery::new(input, 8);
-        let ir = emit_constrain_ir(&[input], &[], |ops, vars| query.emit_constrain(ops, vars));
+        let ir = emit_test_constrain_ir("constraint_test", &[input], &[], |ops, vars| {
+            query.emit_constrain(ops, vars)
+        });
 
         assert_full_ir_eq(
             &ir,

@@ -1,7 +1,7 @@
 //! Builder types for encapsulating common codegen tasks.
 //!
 //! Contains:
-//! - A generic builder with stateless factory methods.
+//! - A module-scoped helper with stateless factory methods.
 //! - An operations builder meant for creating ops inside a function.
 //! - A struct builder.
 
@@ -25,16 +25,16 @@ use prover::cs::definitions::REGISTER_SIZE;
 
 use crate::field::FieldInfo;
 
-/// Root builder with convenience factory methods and access to the root LLZK module.
-pub struct ModuleBuilder<'ctx, F: FieldInfo> {
+/// Module-scoped helper with convenience factory methods and access to the root LLZK module.
+pub struct ModuleEnv<'ctx, F: FieldInfo> {
     context: &'ctx Context,
     /// The root LLZK module.
     module: &'ctx Module<'ctx>,
     _field: core::marker::PhantomData<F>,
 }
 
-impl<'ctx, F: FieldInfo> ModuleBuilder<'ctx, F> {
-    /// Creates a new builder.
+impl<'ctx, F: FieldInfo> ModuleEnv<'ctx, F> {
+    /// Creates a new module helper.
     pub fn new(context: &'ctx Context, module: &'ctx Module<'ctx>) -> Self {
         Self {
             context,
@@ -49,7 +49,7 @@ impl<'ctx, F: FieldInfo> ModuleBuilder<'ctx, F> {
     }
 
     /// Returns a reference to the root module.
-    pub fn module(&self) -> &Module<'ctx> {
+    pub fn module(&self) -> &'ctx Module<'ctx> {
         self.module
     }
 
@@ -140,7 +140,7 @@ impl<'ctx> PartialOrd for ConstOpKey<'ctx> {
 
 /// Operations builder that handles insertion of operations in the target function.
 pub struct OpsBuilder<'ctx: 'sco, 'sco, F: FieldInfo> {
-    builder: &'ctx ModuleBuilder<'ctx, F>,
+    env: &'ctx ModuleEnv<'ctx, F>,
     scope: FuncDefOpRef<'ctx, 'sco>,
     /// Cache of constant op values of specified type at the beginning of the
     /// function scope. Using a BTreeMap since [Type] is not hashable.
@@ -149,10 +149,10 @@ pub struct OpsBuilder<'ctx: 'sco, 'sco, F: FieldInfo> {
 
 impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
     /// Creates a new builder.
-    pub fn new(builder: &'ctx ModuleBuilder<'ctx, F>, scope: FuncDefOpRef<'ctx, 'sco>) -> Self {
+    pub fn new(env: &'ctx ModuleEnv<'ctx, F>, scope: FuncDefOpRef<'ctx, 'sco>) -> Self {
         Self {
             scope,
-            builder,
+            env,
             const_vals: BTreeMap::new().into(),
         }
     }
@@ -697,10 +697,10 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
 }
 
 impl<'ctx, 'sco, F: FieldInfo> Deref for OpsBuilder<'ctx, 'sco, F> {
-    type Target = ModuleBuilder<'ctx, F>;
+    type Target = ModuleEnv<'ctx, F>;
 
     fn deref(&self) -> &Self::Target {
-        self.builder
+        self.env
     }
 }
 
@@ -712,9 +712,9 @@ macro_rules! as_op {
 }
 
 /// Builder for creating structs.
-pub struct StructBuilder<'ctx, 'str> {
-    /// Reference to the context.
-    context: &'ctx Context,
+pub struct StructBuilder<'ctx, 'str, F: FieldInfo> {
+    /// Shared module-scoped helper used for type construction and module insertion.
+    env: &'ctx ModuleEnv<'ctx, F>,
     /// Location for the struct and its direct child ops.
     location: Option<Location<'ctx>>,
     /// Name of the struct.
@@ -725,11 +725,11 @@ pub struct StructBuilder<'ctx, 'str> {
     members: Vec<(String, Type<'ctx>, bool)>,
 }
 
-impl<'ctx, 'str> StructBuilder<'ctx, 'str> {
+impl<'ctx, 'str, F: FieldInfo> StructBuilder<'ctx, 'str, F> {
     /// Creates a new builder.
-    pub fn new(context: &'ctx Context, name: &'str str) -> Self {
+    pub fn new(env: &'ctx ModuleEnv<'ctx, F>, name: &'str str) -> Self {
         Self {
-            context,
+            env,
             location: None,
             name,
             inputs: vec![],
@@ -758,12 +758,12 @@ impl<'ctx, 'str> StructBuilder<'ctx, 'str> {
 
     /// Create the struct type for this struct builder.
     fn struct_type(&self) -> StructType<'ctx> {
-        StructType::from_str(self.context, self.name)
+        StructType::from_str(self.context(), self.name)
     }
 
     fn location(&self) -> Location<'ctx> {
         self.location
-            .unwrap_or_else(|| Location::unknown(self.context))
+            .unwrap_or_else(|| Location::unknown(self.context()))
     }
 
     /// Creates a struct using the build data.
@@ -806,12 +806,17 @@ impl<'ctx, 'str> StructBuilder<'ctx, 'str> {
     }
 
     /// Builds the struct, inserts it into the module, then returns a reference to it.
-    pub fn build_in_module<'m>(
-        &self,
-        module: &'m Module<'ctx>,
-    ) -> Result<StructDefOpRef<'ctx, 'm>, LlzkError> {
+    pub fn build_in_module(&self) -> Result<StructDefOpRef<'ctx, 'ctx>, LlzkError> {
         let op = self.build()?;
-        let op_ref = module.body().append_operation(op.into());
+        let op_ref = self.module().body().append_operation(op.into());
         op_ref.try_into()
+    }
+}
+
+impl<'ctx, 'str, F: FieldInfo> Deref for StructBuilder<'ctx, 'str, F> {
+    type Target = ModuleEnv<'ctx, F>;
+
+    fn deref(&self) -> &Self::Target {
+        self.env
     }
 }
