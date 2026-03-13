@@ -4,6 +4,7 @@ use llzk::prelude::*;
 use prover::common_constants;
 use prover::cs::cs::circuit::Circuit as _;
 use prover::cs::cs::cs_reference::BasicAssembly;
+use prover::cs::cs::witness_placer::graph_description::RawExpression;
 use prover::cs::one_row_compiler::OneRowCompiler;
 use prover::field::Mersenne31Field;
 use std::fs::File;
@@ -50,7 +51,6 @@ pub fn gen_add_sub_lui_auipc_mop(
     use prover::cs::machine::ops::unrolled::add_sub_lui_auipc_mop::add_sub_lui_auipc_mop_circuit_with_preprocessed_bytecode;
     use prover::cs::machine::ops::unrolled::add_sub_lui_auipc_mop::add_sub_lui_auipc_mop_table_addition_fn;
     let bytecode_size = (1 << (16 + ROM_ADDRESS_SPACE_SECOND_WORD_BITS)) / 4;
-    let bytecode = vec![0u32; bytecode_size];
 
     generate_circuit_command(
         "add_sub_lui_auipc_mop",
@@ -59,7 +59,6 @@ pub fn gen_add_sub_lui_auipc_mop(
         opt_level,
         bytecode_size,
         TRACE_LEN_LOG2 as usize,
-        bytecode,
         |cs| {
             add_sub_lui_auipc_mop_table_addition_fn(cs);
             add_sub_lui_auipc_mop_circuit_with_preprocessed_bytecode(cs);
@@ -77,7 +76,6 @@ pub fn gen_jump_branch_slt(output: &str, format: OutputFormat, opt_level: OptLev
     use prover::cs::machine::ops::unrolled::jump_branch_slt::jump_branch_slt_circuit_with_preprocessed_bytecode;
     use prover::cs::machine::ops::unrolled::jump_branch_slt::jump_branch_slt_table_addition_fn;
     let bytecode_size = (1 << (16 + ROM_ADDRESS_SPACE_SECOND_WORD_BITS)) / 4;
-    let bytecode = vec![0u32; bytecode_size];
 
     generate_circuit_command(
         "jump_branch_slt",
@@ -86,7 +84,6 @@ pub fn gen_jump_branch_slt(output: &str, format: OutputFormat, opt_level: OptLev
         opt_level,
         bytecode_size,
         TRACE_LEN_LOG2 as usize,
-        bytecode,
         |cs| {
             jump_branch_slt_table_addition_fn(cs);
             jump_branch_slt_circuit_with_preprocessed_bytecode::<_, _, true>(cs);
@@ -107,7 +104,6 @@ pub fn gen_load_store_subword_only(
     use prover::cs::machine::ops::unrolled::load_store_subword_only::subword_only_load_store_circuit_with_preprocessed_bytecode;
     use prover::cs::machine::ops::unrolled::load_store_subword_only::subword_only_load_store_table_addition_fn;
     let bytecode_size = (1 << (16 + ROM_ADDRESS_SPACE_SECOND_WORD_BITS)) / 4;
-    let bytecode = vec![0u32; bytecode_size];
 
     generate_circuit_command(
         "load_store_subword_only",
@@ -116,7 +112,6 @@ pub fn gen_load_store_subword_only(
         opt_level,
         bytecode_size,
         TRACE_LEN_LOG2 as usize,
-        bytecode,
         |cs| {
             subword_only_load_store_table_addition_fn(cs);
             subword_only_load_store_circuit_with_preprocessed_bytecode::<
@@ -156,6 +151,8 @@ impl<'ctx> GenCircuitResult<'ctx> {
     }
 }
 
+/// Build, lower, and serialize one LLZK circuit family from the given synthesis
+/// and witness SSA functions.
 fn generate_circuit_command(
     name: &str,
     output: &str,
@@ -163,38 +160,47 @@ fn generate_circuit_command(
     opt_level: OptLevel,
     bytecode_size: usize,
     trace_len_log2: usize,
-    bytecode: Vec<u32>,
     synthesis_fn: impl Fn(&mut BasicAssembly<Mersenne31Field>),
-    witness_ssa_fn: impl FnOnce(
-        &[u32],
-    ) -> Vec<
-        Vec<prover::cs::cs::witness_placer::graph_description::RawExpression<Mersenne31Field>>,
-    >,
+    witness_ssa_fn: impl FnOnce(&[u32]) -> Vec<Vec<RawExpression<Mersenne31Field>>>,
 ) -> Result<()> {
     let mut cs = BasicAssembly::<Mersenne31Field>::new();
+    // Placeholder ROM image used during LLZK extraction.
+    //
+    // The LLZK backend currently emits circuit-family IR rather than program-specific IR, so it
+    // does not receive a concrete bytecode image from the CLI. Some unrolled circuit helpers
+    // still require a fixed-size ROM slice during setup because they build bytecode-dependent
+    // lookup tables such as `AlignedRomRead`. We use an all-zeroes one because:
+    // - circuits that only care about ROM size use it only to satisfy their length checks; and
+    // - circuits with bytecode-backed lookup tables will call external functions as placeholders
+    //   for the real lookups, so they will still not use the all-zero image contents.
+    let bytecode = vec![0u32; bytecode_size];
 
     synthesis_fn(&mut cs);
 
     let (circuit_output, _maybe_wit_placer) = cs.finalize();
 
-    // taken from add_sub_lui_auipc_mop::get_circuit:
+    // From this point we intentionally build two different artifacts from the same circuit:
+    // - `compiled_artifact` is the column-layout view used by constraint lowering. It answers
+    //   questions like "which logical variable ended up in which trace column?".
+    // - `witness_ssa_fn(&bytecode)` is the witness-evaluation program used by `@compute`. It is a
+    //   sequence of typed `RawExpression` blocks that describes how to derive witness values and
+    //   write them back into logical variables.
+    //
+    // LLZK needs both: the compiled artifact tells us where writes land, while the SSA tells us
+    // how to compute the values that should be written there.
     let compiler = OneRowCompiler::<Mersenne31Field>::default();
-    // We don't want the compiled artifact as much as we want the constraints
-    // that the compilation process adds.
-    let _compiled = compiler.compile_executor_circuit_assuming_preprocessed_bytecode(
+    // The compilation process here also adds constraints.
+    let compiled_artifact = compiler.compile_executor_circuit_assuming_preprocessed_bytecode(
         circuit_output.clone(),
         bytecode_size,
         trace_len_log2,
     );
-    let witness = WitnessComputation::new(_compiled.clone(), witness_ssa_fn(&bytecode), bytecode);
+    let witness = WitnessComputation::new(compiled_artifact.clone(), witness_ssa_fn(&bytecode));
 
     // Generate an empty LLZK module
     let ctx = LlzkContext::new();
     let mut module = llzk_module(Location::unknown(&ctx));
     let env: ModuleEnv<'_, Mersenne31Field> = ModuleEnv::new(&ctx, &module);
-
-    println!("Circuit Output:\n{:#?}", circuit_output);
-    println!("Compiled:\n{:#?}", _compiled);
 
     // Add the circuit output to it.
     let circuit_bundle = CircuitBundle::new(circuit_output, name, witness);

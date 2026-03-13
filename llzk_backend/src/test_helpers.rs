@@ -10,14 +10,13 @@ use prover::field::Mersenne31Field;
 use crate::builder::ModuleEnv;
 use crate::builder::OpsBuilder;
 use crate::builder::StructBuilder;
-use crate::codegen::AddCompute;
 use crate::codegen::StructVars;
 use crate::constraints::AddConstraints;
 
 /// Normalize textual IR by trimming trailing whitespace at the end of each line.
 ///
-/// The printer currently emits a few trailing spaces, so tests compare normalized strings rather
-/// than relying on editor-specific whitespace handling.
+/// The textual IR printer currently emits a few trailing spaces, so tests
+/// compare normalized strings rather than relying on editor-specific whitespace handling.
 fn normalize_ir(ir: &str) -> String {
     ir.trim()
         .lines()
@@ -33,7 +32,7 @@ pub(crate) fn assert_full_ir_eq(actual: &str, expected: &str) {
 
 /// Emit a synthetic `@constrain` body for unit tests.
 ///
-/// The helper exposes each `input_var` as a plain felt input, each `member_var` as a plain felt
+/// The helper exposes each `input_var` as a felt input, each `member_var` as a felt
 /// struct member, and then runs `emit` inside the generated `@constrain` body.
 pub(crate) fn emit_test_constrain_ir(
     struct_name: &str,
@@ -65,7 +64,6 @@ pub(crate) fn emit_test_constrain_ir(
     let vars = StructVars::from_test_maps(member_map, arg_map);
 
     let struct_op = struct_builder.build_in_module().unwrap();
-    struct_op.add_compute(&env, |_ops| Ok(())).unwrap();
     struct_op
         .add_constraints(&env, |ops| emit(ops, &vars))
         .unwrap();
