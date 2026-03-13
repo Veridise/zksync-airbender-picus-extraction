@@ -342,17 +342,49 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
         match conditional {
             None => self.append_constrain_eq(location, lhs, rhs),
             Some(conditional) => {
-                let not_conditional = self.append_op_with_result(bool::eq(
+                let not_conditional = self.append_eq_predicate(
                     location,
                     self.get_felt_constant_from_start(0)?,
                     conditional,
-                )?)?;
-                let sides_eq = self.append_op_with_result(bool::eq(location, lhs, rhs)?)?;
+                )?;
+                let sides_eq = self.append_eq_predicate(location, lhs, rhs)?;
                 let implication =
                     self.append_op_with_result(bool::or(location, not_conditional, sides_eq)?)?;
                 let truth = self.get_constant_from_start(self.bool_type(), 1)?;
                 self.append_constrain_eq(location, implication, truth)
             }
+        }
+    }
+
+    /// Compare `lhs` and `rhs` and return an `i1` predicate.
+    ///
+    /// LLZK uses different equality ops for felts and plain integer types, so conditional
+    /// constraints need this helper instead of assuming every compared value is a felt.
+    fn append_eq_predicate(
+        &self,
+        location: Location<'ctx>,
+        lhs: Value<'ctx, 'sco>,
+        rhs: Value<'ctx, 'sco>,
+    ) -> Result<Value<'ctx, 'sco>> {
+        anyhow::ensure!(
+            lhs.r#type() == rhs.r#type(),
+            "cannot compare values with different types: {} vs {}",
+            lhs.r#type(),
+            rhs.r#type()
+        );
+
+        if lhs.r#type() == self.felt_type() {
+            self.append_op_with_result(bool::eq(location, lhs, rhs)?)
+        } else if lhs.r#type() == self.index_type() || lhs.r#type().isa::<IntegerType>() {
+            self.append_op_with_result(arith::cmpi(
+                self.context,
+                arith::CmpiPredicate::Eq,
+                lhs,
+                rhs,
+                location,
+            ))
+        } else {
+            anyhow::bail!("unsupported equality predicate type {}", lhs.r#type());
         }
     }
 

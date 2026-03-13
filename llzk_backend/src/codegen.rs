@@ -303,10 +303,17 @@ pub struct StructVars<F: FieldInfo> {
     /// lowering adds one when reading from `@constrain` because argument 0 is the struct `self`
     /// value, while witness lowering uses the ordinal directly in `@compute`.
     arg_map: HashMap<Variable, (usize, Option<u64>)>,
+    /// Ties [`StructVars`] to a specific field. This is prefered to having every member
+    /// take the [`FieldInfo`] struct as a parameter, because mixed-field operations are
+    /// currently not supported.
     _field: PhantomData<F>,
 }
 
 impl<F: FieldInfo> StructVars<F> {
+    /// Creates a new [`StructVars`] instance by:
+    /// - Extracting struct inputs/outputs/intermediate variables (into [`ExtractedVariable`]s) from
+    ///   the provided [`CircuitOutput`] instance,
+    /// - Adding new struct arguments and members based on the [`ExtractedVariable`]s
     fn new<'ctx>(
         co: &CircuitOutput<F>,
         struct_builder: &mut StructBuilder<'ctx, '_>,
@@ -535,6 +542,9 @@ impl<F: FieldInfo> StructVars<F> {
         }
     }
 
+    /// A test-only function that allows direct construction of [`StructVars`]
+    /// using synthetic struct members and arguments rather than parsing them
+    /// from the [`CircuitOutput`] object.
     #[cfg(test)]
     pub(crate) fn from_test_maps(
         member_map: HashMap<Variable, (String, Option<u64>)>,

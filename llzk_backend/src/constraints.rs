@@ -2,7 +2,6 @@
 
 use anyhow::anyhow;
 use anyhow::Result;
-use llzk::dialect::constrain;
 use llzk::dialect::felt;
 use llzk::prelude::*;
 use prover::cs::constraint::Constraint;
@@ -288,6 +287,23 @@ mod tests {
         Mersenne31Field::from_u64_unchecked(value)
     }
 
+    /// Normalize the textual IR format by trimming trailing spaces at the end
+    /// of lines. Some of the operations emit trailing spaces in their IR format,
+    /// which makes it annoying to compare equality to our expected test result
+    /// IR strings, which often have trailing spaces removed by linting/editor tools.
+    fn normalize_ir(ir: &str) -> String {
+        ir.trim()
+            .lines()
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Assert that the `actual` and `expected` IR strings are equal after normalization.
+    fn assert_full_ir_eq(actual: &str, expected: &str) {
+        assert_eq!(normalize_ir(actual), normalize_ir(expected));
+    }
+
     fn emit_constrain_ir(
         input_vars: &[Variable],
         member_vars: &[(Variable, &str)],
@@ -337,8 +353,10 @@ mod tests {
             Ok(())
         });
 
-        assert!(ir.contains("felt.sub"));
-        assert!(ir.contains("%arg1"));
+        assert_full_ir_eq(
+            &ir,
+            include_str!("../testdata/constraints/boolean_not_on_input_emits_sub_from_one.mlir"),
+        );
     }
 
     #[test]
@@ -351,7 +369,12 @@ mod tests {
             Ok(())
         });
 
-        assert!(ir.contains("felt.neg"));
+        assert_full_ir_eq(
+            &ir,
+            include_str!(
+                "../testdata/constraints/term_with_negative_unit_coefficient_emits_neg.mlir"
+            ),
+        );
     }
 
     #[test]
@@ -367,11 +390,10 @@ mod tests {
             Ok(())
         });
 
-        assert!(ir.matches("felt.mul").count() >= 2);
-        assert!(ir.matches("felt.add").count() >= 2);
-        assert!(ir.contains("felt.const  3"));
-        assert!(ir.contains("felt.const  4"));
-        assert!(ir.contains("felt.const  5"));
+        assert_full_ir_eq(
+            &ir,
+            include_str!("../testdata/constraints/lookup_expression_emits_mul_and_add_chain.mlir"),
+        );
     }
 
     #[test]
@@ -382,7 +404,12 @@ mod tests {
             Ok(())
         });
 
-        assert!(ir.contains("struct.readm %arg0[@stored_member]"));
+        assert_full_ir_eq(
+            &ir,
+            include_str!(
+                "../testdata/constraints/constrain_access_reads_member_when_variable_is_not_input.mlir"
+            ),
+        );
     }
 
     #[test]
@@ -391,7 +418,11 @@ mod tests {
         let query = RangeCheckQuery::new(input, 8);
         let ir = emit_constrain_ir(&[input], &[], |ops, vars| query.emit_constrain(ops, vars));
 
-        assert!(ir.contains("bool.cmp lt"));
-        assert!(ir.contains("constrain.eq"));
+        assert_full_ir_eq(
+            &ir,
+            include_str!(
+                "../testdata/constraints/range_check_query_emits_compare_and_constraint.mlir"
+            ),
+        );
     }
 }
