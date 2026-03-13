@@ -12,8 +12,8 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::builder::ModuleBuilder;
+use crate::codegen::CircuitBundle;
 use crate::codegen::EmitLLZKInModule as _;
-use crate::codegen::NamedCircuitOutput;
 use crate::output_format::OutputFormat;
 use crate::witness::WitnessComputation;
 
@@ -21,6 +21,7 @@ use llzk::targets::pcl::translate_module;
 
 mod builder;
 mod codegen;
+mod constraints;
 mod field;
 mod lookups;
 mod witness;
@@ -47,6 +48,7 @@ pub fn gen_add_sub_lui_auipc_mop(
     use prover::cs::machine::ops::unrolled::add_sub_lui_auipc_mop::add_sub_lui_auipc_mop_circuit_with_preprocessed_bytecode;
     use prover::cs::machine::ops::unrolled::add_sub_lui_auipc_mop::add_sub_lui_auipc_mop_table_addition_fn;
     let bytecode_size = (1 << (16 + ROM_ADDRESS_SPACE_SECOND_WORD_BITS)) / 4;
+    let bytecode = vec![0u32; bytecode_size];
 
     generate_circuit_command(
         "add_sub_lui_auipc_mop",
@@ -55,11 +57,12 @@ pub fn gen_add_sub_lui_auipc_mop(
         opt_level,
         bytecode_size,
         TRACE_LEN_LOG2 as usize,
+        bytecode,
         |cs| {
             add_sub_lui_auipc_mop_table_addition_fn(cs);
             add_sub_lui_auipc_mop_circuit_with_preprocessed_bytecode(cs);
         },
-        move || dump_ssa_form(&vec![0u32; bytecode_size]),
+        dump_ssa_form,
     )
 }
 
@@ -72,6 +75,7 @@ pub fn gen_jump_branch_slt(output: &str, format: OutputFormat, opt_level: OptLev
     use prover::cs::machine::ops::unrolled::jump_branch_slt::jump_branch_slt_circuit_with_preprocessed_bytecode;
     use prover::cs::machine::ops::unrolled::jump_branch_slt::jump_branch_slt_table_addition_fn;
     let bytecode_size = (1 << (16 + ROM_ADDRESS_SPACE_SECOND_WORD_BITS)) / 4;
+    let bytecode = vec![0u32; bytecode_size];
 
     generate_circuit_command(
         "jump_branch_slt",
@@ -80,11 +84,12 @@ pub fn gen_jump_branch_slt(output: &str, format: OutputFormat, opt_level: OptLev
         opt_level,
         bytecode_size,
         TRACE_LEN_LOG2 as usize,
+        bytecode,
         |cs| {
             jump_branch_slt_table_addition_fn(cs);
             jump_branch_slt_circuit_with_preprocessed_bytecode::<_, _, true>(cs);
         },
-        move || dump_ssa_form(&vec![0u32; bytecode_size]),
+        dump_ssa_form,
     )
 }
 
@@ -100,6 +105,7 @@ pub fn gen_load_store_subword_only(
     use prover::cs::machine::ops::unrolled::load_store_subword_only::subword_only_load_store_circuit_with_preprocessed_bytecode;
     use prover::cs::machine::ops::unrolled::load_store_subword_only::subword_only_load_store_table_addition_fn;
     let bytecode_size = (1 << (16 + ROM_ADDRESS_SPACE_SECOND_WORD_BITS)) / 4;
+    let bytecode = vec![0u32; bytecode_size];
 
     generate_circuit_command(
         "load_store_subword_only",
@@ -108,6 +114,7 @@ pub fn gen_load_store_subword_only(
         opt_level,
         bytecode_size,
         TRACE_LEN_LOG2 as usize,
+        bytecode,
         |cs| {
             subword_only_load_store_table_addition_fn(cs);
             subword_only_load_store_circuit_with_preprocessed_bytecode::<
@@ -116,7 +123,7 @@ pub fn gen_load_store_subword_only(
                 { common_constants::ROM_SECOND_WORD_BITS },
             >(cs);
         },
-        move || dump_ssa_form(&vec![0u32; bytecode_size]),
+        dump_ssa_form,
     )
 }
 
@@ -154,8 +161,11 @@ fn generate_circuit_command(
     opt_level: OptLevel,
     bytecode_size: usize,
     trace_len_log2: usize,
+    bytecode: Vec<u32>,
     synthesis_fn: impl Fn(&mut BasicAssembly<Mersenne31Field>),
-    witness_ssa_fn: impl FnOnce() -> Vec<
+    witness_ssa_fn: impl FnOnce(
+        &[u32],
+    ) -> Vec<
         Vec<prover::cs::cs::witness_placer::graph_description::RawExpression<Mersenne31Field>>,
     >,
 ) -> Result<()> {
@@ -174,7 +184,7 @@ fn generate_circuit_command(
         bytecode_size,
         trace_len_log2,
     );
-    let witness = WitnessComputation::new(_compiled.clone(), witness_ssa_fn());
+    let witness = WitnessComputation::new(_compiled.clone(), witness_ssa_fn(&bytecode), bytecode);
 
     // Generate an empty LLZK module
     let ctx = LlzkContext::new();
@@ -185,8 +195,8 @@ fn generate_circuit_command(
     println!("Compiled:\n{:#?}", _compiled);
 
     // Add the circuit output to it.
-    let named_circuit_output = NamedCircuitOutput::new(circuit_output, name, Some(witness));
-    named_circuit_output.emit_llzk(&builder)?;
+    let circuit_bundle = CircuitBundle::new(circuit_output, name, witness);
+    circuit_bundle.emit_llzk(&builder)?;
 
     // Verify the module
     verify_operation_with_diags(&module.as_operation())?;

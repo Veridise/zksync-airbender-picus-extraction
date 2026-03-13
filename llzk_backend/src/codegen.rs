@@ -1,30 +1,21 @@
-//! Traits and implementations for primary LLZK generation tasks.
+//! LLZK circuit emission coordination and variable extraction helpers.
 
 use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::ops::Deref;
 
 use anyhow::anyhow;
 use anyhow::Result;
-use llzk::dialect::constrain;
-use llzk::dialect::felt;
 use llzk::prelude::*;
-use prover::cs::constraint::Constraint;
-use prover::cs::constraint::Term;
 use prover::cs::cs::circuit::CircuitOutput;
-use prover::cs::cs::circuit::DisjunctiveLookup;
-use prover::cs::cs::circuit::LookupQuery;
-use prover::cs::cs::circuit::LookupQueryTableType;
-use prover::cs::cs::circuit::RangeCheckQuery;
-use prover::cs::definitions::LookupInput;
 use prover::cs::definitions::OpcodeFamilyCircuitState;
 use prover::cs::definitions::Variable;
-use prover::cs::types::Boolean;
 use prover::field::PrimeField;
 
 use crate::builder::*;
+use crate::constraints::AddConstraints;
+use crate::constraints::EmitLLZKInConstrain;
 use crate::field::FieldInfo;
-use crate::lookups::add_disjunctive_lookup_constraints;
-use crate::lookups::add_lookup_constraints_for_table;
 use crate::witness::WitnessComputation;
 
 /// Trait implemented by types that can emit LLZK IR within the module scope.
@@ -32,59 +23,6 @@ pub(crate) trait EmitLLZKInModule<'ctx, F: FieldInfo> {
     type Output;
 
     fn emit_llzk(&self, builder: &ModuleBuilder<'ctx, F>) -> Result<Self::Output>;
-}
-
-/// Trait implemented by types that can emit LLZK IR within a struct `@constrain` function.
-pub(crate) trait EmitLLZKInConstrain<'ctx: 'sco, 'sco, F: FieldInfo> {
-    type Output;
-
-    fn emit_constrain(
-        &self,
-        builder: &OpsBuilder<'ctx, 'sco, F>,
-        vars: &StructVars,
-    ) -> Result<Self::Output>;
-}
-
-impl<'ctx: 'sco, 'sco, F: FieldInfo, T: EmitLLZKInConstrain<'ctx, 'sco, F, Output = ()>>
-    EmitLLZKInConstrain<'ctx, 'sco, F> for Vec<T>
-{
-    type Output = ();
-
-    fn emit_constrain(
-        &self,
-        builder: &OpsBuilder<'ctx, 'sco, F>,
-        vars: &StructVars,
-    ) -> Result<Self::Output> {
-        self.iter()
-            .try_for_each(|t| t.emit_constrain(builder, vars))
-    }
-}
-
-/// Extension trait for [`StructDefOpLike`] that adds a method for filling the `@constrain`
-/// function.
-pub trait AddConstraints<'ctx: 'op, 'op, F: FieldInfo>: StructDefOpLike<'ctx, 'op> {
-    /// Invokes the callback scoped in `@constrain`.
-    ///
-    /// All ops added with the [`OpsBuilder`] are automatically added to that function.
-    fn add_constraints(
-        &'op self,
-        builder: &'ctx ModuleBuilder<'ctx, F>,
-        f: impl FnOnce(&mut OpsBuilder<'ctx, 'op, F>) -> anyhow::Result<()>,
-    ) -> anyhow::Result<()> {
-        let constrain_fn = self.get_constrain_func().ok_or_else(|| {
-            anyhow!(
-                "struct {} is missing its @constrain function",
-                StructDefOpLike::name(self)
-            )
-        })?;
-        let mut ops_builder = OpsBuilder::new(builder, constrain_fn);
-        f(&mut ops_builder)
-    }
-}
-
-impl<'ctx: 'op, 'op, F: FieldInfo, T: StructDefOpMutLike<'ctx, 'op>> AddConstraints<'ctx, 'op, F>
-    for T
-{
 }
 
 /// Extension trait for [`StructDefOpLike`] that adds a method for filling the `@compute`
@@ -113,35 +51,38 @@ impl<'ctx: 'op, 'op, F: FieldInfo, T: StructDefOpMutLike<'ctx, 'op>> AddCompute<
 {
 }
 
-/// This enum holds information about extracted variables
+/// This enum holds information about extracted variables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ExtractedVariable {
     /// A register value represented by a low and high limb.
     Register { low: Variable, high: Variable },
-    /// A scalar field element
+    /// A scalar field element.
     Scalar(Variable),
 }
 
 impl ExtractedVariable {
-    /// Create a new register
+    /// Create a new register.
     pub fn register(reg: [Variable; 2]) -> Self {
         Self::Register {
             low: reg[0],
             high: reg[1],
         }
     }
-    /// Create a new felt
+
+    /// Create a new felt.
     pub fn scalar(v: Variable) -> Self {
         Self::Scalar(v)
     }
-    /// Checks if the given `variable` is contained in the extraction
+
+    /// Checks if the given `variable` is contained in the extraction.
     pub fn contains(&self, v: &Variable) -> bool {
         match self {
             ExtractedVariable::Register { low, high } => v == low || v == high,
             ExtractedVariable::Scalar(variable) => v == variable,
         }
     }
-    /// Number of contained vars
+
+    /// Number of contained vars.
     pub fn num_vars(&self) -> usize {
         match self {
             ExtractedVariable::Register { .. } => 2,
@@ -150,8 +91,8 @@ impl ExtractedVariable {
     }
 }
 
-/// Trait for extracting inputs, outputs, and intermediate variables from the
-/// implementing circuit representation.
+/// Trait for extracting inputs, outputs, and intermediate variables from the implementing circuit
+/// representation.
 pub trait VariableExtractor {
     /// Extract all variables that need to be passed as inputs.
     fn get_inputs(&self) -> Result<Vec<ExtractedVariable>>;
@@ -266,17 +207,19 @@ fn num_vars(vars: impl IntoIterator<Item = ExtractedVariable>) -> usize {
     vars.into_iter().map(|v| v.num_vars()).sum()
 }
 
-/// Associates a struct name with a CircuitOutput
-pub struct NamedCircuitOutput<F: PrimeField + FieldInfo> {
+/// Holds the artifacts required to emit one LLZK circuit struct.
+///
+/// This bundles the original [`CircuitOutput`] used by `@constrain`, the witness computation plan
+/// used by `@compute`, and the emitted struct name.
+pub struct CircuitBundle<F: FieldInfo> {
     circuit_output: CircuitOutput<F>,
     name: String,
-    witness: Option<WitnessComputation<F>>,
+    witness: WitnessComputation<F>,
 }
 
-impl<F: PrimeField + FieldInfo> NamedCircuitOutput<F> {
-    /// Create a named circuit output together with any optional witness metadata needed to fill
-    /// the struct `@compute` function.
-    pub fn new(co: CircuitOutput<F>, name: &str, witness: Option<WitnessComputation<F>>) -> Self {
+impl<F: FieldInfo> CircuitBundle<F> {
+    /// Create a new emission bundle for a single circuit.
+    pub fn new(co: CircuitOutput<F>, name: &str, witness: WitnessComputation<F>) -> Self {
         Self {
             circuit_output: co,
             name: name.to_string(),
@@ -284,13 +227,13 @@ impl<F: PrimeField + FieldInfo> NamedCircuitOutput<F> {
         }
     }
 
-    /// Return a reference to the circuit's name.
+    /// Return a reference to the circuit's emitted struct name.
     pub fn name(&self) -> &str {
         &self.name
     }
 }
 
-impl<F: PrimeField + FieldInfo> Deref for NamedCircuitOutput<F> {
+impl<F: FieldInfo> Deref for CircuitBundle<F> {
     type Target = CircuitOutput<F>;
 
     fn deref(&self) -> &Self::Target {
@@ -298,17 +241,17 @@ impl<F: PrimeField + FieldInfo> Deref for NamedCircuitOutput<F> {
     }
 }
 
-impl<'ctx, F: PrimeField + FieldInfo> EmitLLZKInModule<'ctx, F> for NamedCircuitOutput<F> {
+impl<'ctx, F: FieldInfo> EmitLLZKInModule<'ctx, F> for CircuitBundle<F> {
     type Output = ();
 
     fn emit_llzk(&self, builder: &ModuleBuilder<'ctx, F>) -> Result<Self::Output> {
         if !F::is_built_in() {
-            todo!("expose FieldSpecAttr and add the attribute to the module")
+            panic!("non-built-in fields are not yet supported in LLZK module emission")
         }
 
         let mut struct_builder = StructBuilder::new(builder.context(), self.name());
 
-        // Sanity check: all variables should be an input, output, or intermediate
+        // Sanity check: all variables should be an input, output, or intermediate.
         let num_input_vars = num_vars(self.get_inputs()?);
         let num_output_vars = num_vars(self.get_outputs()?);
         let num_intermediate_vars = num_vars(self.get_intermediates()?);
@@ -318,11 +261,9 @@ impl<'ctx, F: PrimeField + FieldInfo> EmitLLZKInModule<'ctx, F> for NamedCircuit
         let vars = StructVars::new(self, &mut struct_builder, builder)?;
         let struct_op = struct_builder.build_in_module(builder.module())?;
 
-        if let Some(witness) = &self.witness {
-            struct_op.add_compute(builder, |builder: &mut OpsBuilder<'_, '_, F>| {
-                witness.emit_compute(builder, &vars)
-            })?;
-        }
+        struct_op.add_compute(builder, |builder: &mut OpsBuilder<'_, '_, F>| {
+            self.witness.emit_compute(builder, &vars)
+        })?;
 
         struct_op.add_constraints(
             builder,
@@ -332,226 +273,28 @@ impl<'ctx, F: PrimeField + FieldInfo> EmitLLZKInModule<'ctx, F> for NamedCircuit
                 builder.insert_constant_at_start(builder.index_type(), 0)?;
                 builder.insert_constant_at_start(builder.felt_type(), 1)?;
                 builder.insert_constant_at_start(builder.felt_type(), 0)?;
-                // Add boolean constraints
+                // Add boolean constraints.
                 for bool_var in self.boolean_vars.iter() {
                     let val = vars.get_constrain_val(builder, bool_var)?;
                     let _ = builder.felt_type();
                     builder.append_boolean_constraint(val)?;
                 }
-                // Add range constraints
+                // Add range constraints.
                 self.range_check_expressions
                     .emit_constrain(builder, &vars)?;
-                // Add lookup constraints
+                // Add lookup constraints.
                 self.lookups.emit_constrain(builder, &vars)?;
-                // Add all other constraints
+                // Add all other constraints.
                 self.constraints.emit_constrain(builder, &vars)
             },
         )
     }
 }
 
-impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInConstrain<'ctx, 'sco, F> for RangeCheckQuery<F> {
-    type Output = ();
-
-    fn emit_constrain(
-        &self,
-        builder: &OpsBuilder<'ctx, 'sco, F>,
-        vars: &StructVars,
-    ) -> Result<Self::Output> {
-        match &self.input {
-            LookupInput::Variable(variable) => {
-                let val = vars.get_constrain_val(builder, variable)?;
-                builder.append_range_constraint(val, self.width)?;
-            }
-            LookupInput::Expression { .. } => todo!("expression range check"),
-        }
-        Ok(())
-    }
-}
-
-impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInConstrain<'ctx, 'sco, F> for (Constraint<F>, bool) {
-    type Output = ();
-
-    fn emit_constrain(
-        &self,
-        builder: &OpsBuilder<'ctx, 'sco, F>,
-        vars: &StructVars,
-    ) -> Result<Self::Output> {
-        let (constraint, _prevent_optimization) = self;
-
-        let zero = builder.get_constant_from_start(builder.felt_type(), 0)?;
-        let sum = constraint
-            .terms
-            .iter()
-            .map(|term| term.emit_constrain(builder, vars))
-            .try_fold(zero, |sum, term_val| {
-                builder.append_op_with_result(felt::add(
-                    builder.unknown_location(),
-                    sum,
-                    term_val?,
-                )?)
-            })?;
-        builder.append_op_with_no_results(constrain::eq(builder.unknown_location(), sum, zero))
-    }
-}
-
-impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInConstrain<'ctx, 'sco, F> for Term<F> {
-    type Output = Value<'ctx, 'sco>;
-
-    fn emit_constrain(
-        &self,
-        builder: &OpsBuilder<'ctx, 'sco, F>,
-        vars: &StructVars,
-    ) -> Result<Self::Output> {
-        match self {
-            Term::Constant(c) => {
-                let coeff = c.as_u64_reduced();
-                let coeff_opp = F::CHARACTERISTICS - coeff;
-                let coeff_val = builder.get_constant_from_start(builder.felt_type(), coeff)?;
-                Ok(if coeff < coeff_opp {
-                    coeff_val
-                } else {
-                    builder
-                        .append_op_with_result(felt::neg(builder.unknown_location(), coeff_val)?)?
-                })
-            }
-            Term::Expression {
-                coeff,
-                inner,
-                degree,
-            } => {
-                let coeff = coeff.as_u64_reduced();
-
-                let coeff_opp = F::CHARACTERISTICS - coeff;
-                let mut monomial = builder.get_constant_from_start(builder.felt_type(), 1)?;
-                for var in inner.iter().take(*degree) {
-                    let var_val = vars.get_constrain_val(builder, var)?;
-                    let mul = felt::mul(builder.unknown_location(), monomial, var_val)?;
-                    monomial = builder.append_op_with_result(mul)?;
-                }
-
-                Ok(if coeff < coeff_opp {
-                    if coeff == 1 {
-                        monomial
-                    } else {
-                        let coeff_val =
-                            builder.get_constant_from_start(builder.felt_type(), coeff)?;
-                        let mul = felt::mul(builder.unknown_location(), coeff_val, monomial)?;
-                        builder.append_op_with_result(mul)?
-                    }
-                } else if coeff_opp == 1 {
-                    builder
-                        .append_op_with_result(felt::neg(builder.unknown_location(), monomial)?)?
-                } else {
-                    let coeff_opp_val =
-                        builder.get_constant_from_start(builder.felt_type(), coeff_opp)?;
-                    let mul = builder.append_op_with_result(felt::mul(
-                        builder.unknown_location(),
-                        coeff_opp_val,
-                        monomial,
-                    )?)?;
-                    builder.append_op_with_result(felt::neg(builder.unknown_location(), mul)?)?
-                })
-            }
-        }
-    }
-}
-
-impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInConstrain<'ctx, 'sco, F> for LookupInput<F> {
-    type Output = Value<'ctx, 'sco>;
-
-    fn emit_constrain(
-        &self,
-        builder: &OpsBuilder<'ctx, 'sco, F>,
-        vars: &StructVars,
-    ) -> Result<Self::Output> {
-        match self {
-            LookupInput::Variable(var) => vars.get_constrain_val(builder, var),
-            LookupInput::Expression {
-                linear_terms,
-                constant_coeff,
-            } => {
-                let init = builder.get_constant_from_start(
-                    builder.felt_type(),
-                    constant_coeff.as_u64_reduced(),
-                )?;
-                linear_terms
-                    .iter()
-                    .map(|(coeff, var)| {
-                        let coeff_val = builder
-                            .get_constant_from_start(builder.felt_type(), coeff.as_u64_reduced())?;
-                        builder.append_op_with_result(felt::mul(
-                            builder.unknown_location(),
-                            coeff_val,
-                            vars.get_constrain_val(builder, var)?,
-                        )?)
-                    })
-                    .try_fold(init, |sum, term_val| {
-                        builder.append_op_with_result(felt::add(
-                            builder.unknown_location(),
-                            sum,
-                            term_val?,
-                        )?)
-                    })
-            }
-        }
-    }
-}
-
-impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInConstrain<'ctx, 'sco, F> for LookupQuery<F> {
-    type Output = ();
-
-    fn emit_constrain(
-        &self,
-        builder: &OpsBuilder<'ctx, 'sco, F>,
-        vars: &StructVars,
-    ) -> Result<Self::Output> {
-        match self.table {
-            // TODO: Currently unsupported, skipped here and in PCL version
-            LookupQueryTableType::Variable(_variable) => Ok(()),
-            LookupQueryTableType::Constant(table_type) => {
-                add_lookup_constraints_for_table(builder, vars, self, table_type, None, None)
-            }
-        }
-    }
-}
-
-impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInConstrain<'ctx, 'sco, F> for DisjunctiveLookup<F> {
-    type Output = ();
-
-    fn emit_constrain(
-        &self,
-        builder: &OpsBuilder<'ctx, 'sco, F>,
-        vars: &StructVars,
-    ) -> Result<Self::Output> {
-        add_disjunctive_lookup_constraints(builder, vars, self)
-    }
-}
-
-impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInConstrain<'ctx, 'sco, F> for Boolean {
-    type Output = Value<'ctx, 'sco>;
-
-    fn emit_constrain(
-        &self,
-        builder: &OpsBuilder<'ctx, 'sco, F>,
-        vars: &StructVars,
-    ) -> Result<Self::Output> {
-        match self {
-            Boolean::Is(variable) => vars.get_constrain_val(builder, variable),
-            Boolean::Not(variable) => builder.append_op_with_result(felt::sub(
-                builder.unknown_location(),
-                builder.get_felt_constant_from_start(1)?,
-                vars.get_constrain_val(builder, variable)?,
-            )?),
-            Boolean::Constant(c) => builder.get_felt_constant_from_start(*c as u64),
-        }
-    }
-}
-
 /// Holds the information about the variables and their representation in the LLZK struct.
-pub struct StructVars {
-    /// Maps internal and output Variables to a tuple (member name, optional index if the member is
-    /// an array type). All members are assumed to be either felts or "registers", which are
+pub struct StructVars<F: FieldInfo> {
+    /// Maps internal and output Variables to a tuple `(member name, optional index if the member
+    /// is an array type)`. All members are assumed to be either felts or "registers", which are
     /// flat, two-element felt arrays.
     member_map: HashMap<Variable, (String, Option<u64>)>,
     /// Maps input variables to a tuple `(input ordinal, optional limb index)`.
@@ -560,16 +303,16 @@ pub struct StructVars {
     /// lowering adds one when reading from `@constrain` because argument 0 is the struct `self`
     /// value, while witness lowering uses the ordinal directly in `@compute`.
     arg_map: HashMap<Variable, (usize, Option<u64>)>,
+    _field: PhantomData<F>,
 }
 
-impl StructVars {
-    fn new<'ctx, F: FieldInfo>(
+impl<F: FieldInfo> StructVars<F> {
+    fn new<'ctx>(
         co: &CircuitOutput<F>,
         struct_builder: &mut StructBuilder<'ctx, '_>,
         llzk_builder: &ModuleBuilder<'ctx, F>,
     ) -> Result<Self> {
-        // Add inputs to struct
-        // maps Variable to (input argument, optional index if array)
+        // Add inputs to struct.
         let mut arg_map: HashMap<Variable, (usize, Option<u64>)> = HashMap::new();
         for (input_num, input) in co.get_inputs()?.iter().enumerate() {
             match input {
@@ -584,12 +327,12 @@ impl StructVars {
                 }
             };
         }
-        // Add outputs to struct
-        // Maps CircuitOutput variable to (field name, index)
+
+        // Add outputs to struct.
         let mut member_map: HashMap<Variable, (String, Option<u64>)> = HashMap::new();
         for output in co.get_outputs()?.iter() {
             // TODO: better naming scheme
-            match &output {
+            match output {
                 ExtractedVariable::Register { low, high } => {
                     let name = format!("out_reg_{}_{}", low.0, high.0);
                     member_map.insert(*low, (name.clone(), Some(0)));
@@ -603,9 +346,10 @@ impl StructVars {
                 }
             }
         }
-        // Add intermediates to struct
+
+        // Add intermediates to struct.
         for output in co.get_intermediates()?.iter() {
-            match &output {
+            match output {
                 ExtractedVariable::Register { low, high } => {
                     let name = format!("internal_reg_{}_{}", low.0, high.0);
                     member_map.insert(*low, (name.clone(), Some(0)));
@@ -623,35 +367,41 @@ impl StructVars {
         Ok(Self {
             member_map,
             arg_map,
+            _field: PhantomData,
         })
     }
 
-    /// Read a variable from the `@constrain` view of the struct.
+    /// Try to read a variable from the `@constrain` view of the struct.
     ///
-    /// `@constrain` always receives the struct instance as argument 0, so public inputs begin at
+    /// `@constrain` receives the struct instance as argument 0, so public inputs begin at
     /// argument 1.
-    pub fn get_constrain_val<'ctx, 'sco, F: FieldInfo>(
+    pub fn try_get_constrain_val<'ctx, 'sco>(
+        &self,
+        builder: &OpsBuilder<'ctx, 'sco, F>,
+        var: &Variable,
+    ) -> Result<Option<Value<'ctx, 'sco>>> {
+        if let Some(val) = self.get_input_val_at_offset(builder, 1, var)? {
+            Ok(Some(val))
+        } else {
+            self.get_constrain_member_val(builder, var)
+        }
+    }
+
+    /// Read a variable from the `@constrain` view of the struct and error if it is unavailable.
+    pub fn get_constrain_val<'ctx, 'sco>(
         &self,
         builder: &OpsBuilder<'ctx, 'sco, F>,
         var: &Variable,
     ) -> Result<Value<'ctx, 'sco>> {
-        if let Some(val) = self.get_input_val_at_offset(builder, 1, var)? {
-            Ok(val)
-        } else if let Some(val) = self.get_constrain_member_val(builder, var)? {
-            Ok(val)
-        } else {
-            Err(anyhow!(
-                "Could not find {var:?} in args or member definitions"
-            ))
-        }
+        self.try_get_constrain_val(builder, var)?
+            .ok_or_else(|| anyhow!("Could not find {var:?} in constrain inputs or members"))
     }
 
     /// Try to read a variable from the `@compute` view of the struct.
     ///
-    /// Compute lowering uses this accessor because `@compute` does not receive a `self` argument;
-    /// its public inputs begin at argument 0 and the partially constructed witness struct is the
-    /// result of the leading `struct.new`.
-    pub fn try_get_compute_val<'ctx, 'sco, F: FieldInfo>(
+    /// `@compute` does not receive a `self` argument. Its public inputs begin at argument 0 and
+    /// the partially constructed witness struct is the result of the leading `struct.new`.
+    pub fn try_get_compute_val<'ctx, 'sco>(
         &self,
         builder: &OpsBuilder<'ctx, 'sco, F>,
         self_value: Value<'ctx, 'sco>,
@@ -665,7 +415,7 @@ impl StructVars {
     }
 
     /// Read a variable from the `@compute` view of the struct and error if it is unavailable.
-    pub fn get_compute_val<'ctx, 'sco, F: FieldInfo>(
+    pub fn get_compute_val<'ctx, 'sco>(
         &self,
         builder: &OpsBuilder<'ctx, 'sco, F>,
         self_value: Value<'ctx, 'sco>,
@@ -675,11 +425,12 @@ impl StructVars {
             .ok_or_else(|| anyhow!("Could not find {var:?} in compute inputs or members"))
     }
 
-    /// Write a felt-encoded column back into the struct instance being assembled in `@compute`.
+    /// Update `var` with `value` by creating a `struct.writem` operation in `@compute` targeting
+    /// the struct member that corresponds to `var`.
     ///
     /// The function handles both scalar members and register-valued members, where a single
     /// logical variable corresponds to one limb of a two-element array.
-    pub fn assign_compute_member<'ctx, 'sco, F: FieldInfo>(
+    pub fn assign_compute_member<'ctx, 'sco>(
         &self,
         builder: &OpsBuilder<'ctx, 'sco, F>,
         self_value: Value<'ctx, 'sco>,
@@ -707,7 +458,7 @@ impl StructVars {
         }
     }
 
-    fn get_input_val_at_offset<'ctx, 'sco, F: FieldInfo>(
+    fn get_input_val_at_offset<'ctx, 'sco>(
         &self,
         builder: &OpsBuilder<'ctx, 'sco, F>,
         arg_offset: usize,
@@ -730,7 +481,7 @@ impl StructVars {
         }
     }
 
-    fn get_constrain_member_val<'ctx, 'sco, F: FieldInfo>(
+    fn get_constrain_member_val<'ctx, 'sco>(
         &self,
         builder: &OpsBuilder<'ctx, 'sco, F>,
         var: &Variable,
@@ -739,7 +490,9 @@ impl StructVars {
         self.get_member_val_from(builder, self_val, var)
     }
 
-    fn get_member_val_from<'ctx, 'sco, F: FieldInfo>(
+    /// Get the value from the struct member corresponding to `var` from the struct instance
+    /// represented by `self_val`.
+    fn get_member_val_from<'ctx, 'sco>(
         &self,
         builder: &OpsBuilder<'ctx, 'sco, F>,
         self_val: Value<'ctx, 'sco>,
@@ -779,6 +532,18 @@ impl StructVars {
                     }
                 }
             }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_maps(
+        member_map: HashMap<Variable, (String, Option<u64>)>,
+        arg_map: HashMap<Variable, (usize, Option<u64>)>,
+    ) -> Self {
+        Self {
+            member_map,
+            arg_map,
+            _field: PhantomData,
         }
     }
 }

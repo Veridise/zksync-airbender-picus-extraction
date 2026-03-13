@@ -44,19 +44,76 @@ use crate::field::FieldInfo;
 const U8_MODULUS: u64 = 1 << 8;
 const U16_MODULUS: u64 = 1 << 16;
 
+/// Compact description of the aligned ROM table contents used by `AlignedRomRead`.
+///
+/// The current LLZK `@compute` lowering cannot materialize an external ROM table directly, so we
+/// summarize the bytecode image as the most common opcode plus sparse per-index overrides. This
+/// keeps the generated IR small for the padded bytecode images used by the existing extraction
+/// flow while still preserving exact lookup results.
+#[derive(Clone)]
+struct AlignedRomImage {
+    default_opcode: u32,
+    overrides: Vec<(usize, u32)>,
+}
+
+impl AlignedRomImage {
+    /// Summarize the ROM image into a default opcode and the indices that differ from it.
+    fn from_words(words: &[u32]) -> Self {
+        let mut counts = BTreeMap::new();
+        for &opcode in words {
+            *counts.entry(opcode).or_insert(0usize) += 1;
+        }
+
+        let default_opcode = counts
+            .into_iter()
+            .max_by_key(|(_, count)| *count)
+            .map(|(opcode, _)| opcode)
+            .unwrap_or(prover::cs::machine::UNIMP_OPCODE);
+
+        let overrides = words
+            .iter()
+            .copied()
+            .enumerate()
+            .filter_map(|(index, opcode)| (opcode != default_opcode).then_some((index, opcode)))
+            .collect();
+
+        Self {
+            default_opcode,
+            overrides,
+        }
+    }
+}
+
+/// Split a 32-bit opcode into the low/high 16-bit limbs used by the aligned ROM table.
+fn opcode_limbs(opcode: u32) -> (u16, u16) {
+    (opcode as u16, (opcode >> 16) as u16)
+}
+
 /// Bundles the metadata required to lower witness generation into LLZK `@compute`.
 ///
 /// The compiled artifact tells us where every logical variable lives in the witness layout, while
 /// the SSA blocks preserve the witness placer's evaluation order and conditional write structure.
-pub(crate) struct WitnessComputation<F: PrimeField + FieldInfo> {
+pub(crate) struct WitnessComputation<F: FieldInfo> {
     compiled: CompiledCircuitArtifact<F>,
     ssa: Vec<Vec<RawExpression<F>>>,
+    aligned_rom_image: AlignedRomImage,
 }
 
-impl<F: PrimeField + FieldInfo> WitnessComputation<F> {
+impl<F: FieldInfo> WitnessComputation<F> {
     /// Create a new witness computation plan from the one-row compiler output and witness SSA.
-    pub fn new(compiled: CompiledCircuitArtifact<F>, ssa: Vec<Vec<RawExpression<F>>>) -> Self {
-        Self { compiled, ssa }
+    ///
+    /// The bytecode image is captured here as well so `AlignedRomRead` can be lowered into
+    /// deterministic LLZK without depending on an external runtime table.
+    pub fn new(
+        compiled: CompiledCircuitArtifact<F>,
+        ssa: Vec<Vec<RawExpression<F>>>,
+        bytecode: Vec<u32>,
+    ) -> Self {
+        Self {
+            compiled,
+            ssa,
+            aligned_rom_image: AlignedRomImage::from_words(&bytecode),
+        }
     }
 
     /// Emit LLZK operations that reconstruct witness columns inside a struct `@compute` function.
@@ -67,7 +124,7 @@ impl<F: PrimeField + FieldInfo> WitnessComputation<F> {
     pub fn emit_compute<'ctx, 'sco>(
         &self,
         builder: &OpsBuilder<'ctx, 'sco, F>,
-        vars: &StructVars,
+        vars: &StructVars<F>,
     ) -> Result<()> {
         let self_value = builder.get_compute_self_value()?;
         for block in &self.ssa {
@@ -81,6 +138,7 @@ impl<F: PrimeField + FieldInfo> WitnessComputation<F> {
                 self_value,
                 &self.compiled.variable_mapping,
                 &self.compiled.witness_layout.width_3_lookups,
+                &self.aligned_rom_image,
                 block,
             );
             block.emit_compute(&mut lowering)?;
@@ -161,7 +219,7 @@ enum SsaSlot<'ctx, 'sco> {
 
 /// Trait implemented by SSA witness nodes that can emit LLZK IR inside a struct `@compute`
 /// function.
-trait EmitLLZKInCompute<'a, 'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> {
+trait EmitLLZKInCompute<'a, 'ctx: 'sco, 'sco, F: FieldInfo> {
     type Output;
 
     fn emit_compute(
@@ -172,7 +230,7 @@ trait EmitLLZKInCompute<'a, 'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> {
 
 impl<'a, 'ctx: 'sco, 'sco, F, T> EmitLLZKInCompute<'a, 'ctx, 'sco, F> for Vec<T>
 where
-    F: PrimeField + FieldInfo,
+    F: FieldInfo,
     T: EmitLLZKInCompute<'a, 'ctx, 'sco, F, Output = ()>,
 {
     type Output = ();
@@ -292,24 +350,26 @@ impl LookupInvocation {
 ///
 /// This mirrors the existing Rust witness generator's "one raw expression, one SSA slot" model so
 /// that indices coming from `SubExpression(..)` nodes continue to line up exactly.
-struct ComputeLowering<'a, 'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> {
+struct ComputeLowering<'a, 'ctx: 'sco, 'sco, F: FieldInfo> {
     builder: &'a OpsBuilder<'ctx, 'sco, F>,
-    vars: &'a StructVars,
+    vars: &'a StructVars<F>,
     self_value: Value<'ctx, 'sco>,
     variable_mapping: &'a BTreeMap<Variable, ColumnAddress>,
     lookup_sets: &'a [LookupSetDescription<F, COMMON_TABLE_WIDTH>],
+    aligned_rom_image: &'a AlignedRomImage,
     block: &'a [RawExpression<F>],
     slots: Vec<SsaSlot<'ctx, 'sco>>,
 }
 
-impl<'a, 'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
+impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
     /// Create a fresh lowering state for one SSA block.
     fn new(
         builder: &'a OpsBuilder<'ctx, 'sco, F>,
-        vars: &'a StructVars,
+        vars: &'a StructVars<F>,
         self_value: Value<'ctx, 'sco>,
         variable_mapping: &'a BTreeMap<Variable, ColumnAddress>,
         lookup_sets: &'a [LookupSetDescription<F, COMMON_TABLE_WIDTH>],
+        aligned_rom_image: &'a AlignedRomImage,
         block: &'a [RawExpression<F>],
     ) -> Self {
         Self {
@@ -318,6 +378,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> ComputeLowering<'a, 'ctx, 
             self_value,
             variable_mapping,
             lookup_sets,
+            aligned_rom_image,
             block,
             slots: Vec::new(),
         }
@@ -1079,6 +1140,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> ComputeLowering<'a, 'ctx, 
             TableType::MemStoreClearWrittenValueLimb => {
                 self.compute_mem_store_clear_written_value_limb_lookup(inputs, num_outputs)
             }
+            TableType::AlignedRomRead => self.compute_aligned_rom_read_lookup(inputs, num_outputs),
             _ => {
                 // TODO(LLZK compute): add deterministic lowering for the remaining lookup tables
                 // used by the supported circuits.
@@ -1178,7 +1240,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> ComputeLowering<'a, 'ctx, 
     /// Compare a felt-encoded small integer against a literal used by a lookup decoder.
     ///
     /// The witness SSA records lookup inputs as field elements, so deterministic lowering needs a
-    /// compact way to recover table cases such as `funct3 == 0b101` without first reifying a wider
+    /// compact way to recover table cases such as `funct3 == 0b101` without first building a wider
     /// integer type.
     fn field_eq_constant(
         &self,
@@ -1656,11 +1718,54 @@ impl<'a, 'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> ComputeLowering<'a, 'ctx, 
         self.finalize_lookup_outputs(vec![cleaned], num_outputs)
     }
 
+    /// Deterministically lower the ROM word lookup used by subword ROM loads.
+    ///
+    /// The aligned ROM table is keyed by word index and returns the 32-bit opcode split into two
+    /// 16-bit limbs. We lower it by starting from the most common opcode in the captured bytecode
+    /// image and then patching the indices whose opcode differs via index-equality selects.
+    fn compute_aligned_rom_read_lookup(
+        &self,
+        inputs: &[Value<'ctx, 'sco>],
+        num_outputs: usize,
+    ) -> Result<Vec<Value<'ctx, 'sco>>> {
+        if inputs.len() != 1 {
+            bail!("AlignedRomRead expects 1 input, found {}", inputs.len());
+        }
+
+        let word_index = inputs[0];
+        let (default_low, default_high) = opcode_limbs(self.aligned_rom_image.default_opcode);
+        let mut low = self
+            .builder
+            .get_felt_constant_from_start(u64::from(default_low))?;
+        let mut high = self
+            .builder
+            .get_felt_constant_from_start(u64::from(default_high))?;
+
+        for &(index, opcode) in &self.aligned_rom_image.overrides {
+            let is_selected = self.field_eq_constant(word_index, index as u64)?;
+            let (opcode_low, opcode_high) = opcode_limbs(opcode);
+            low = self.select_value(
+                is_selected,
+                self.builder
+                    .get_felt_constant_from_start(u64::from(opcode_low))?,
+                low,
+            )?;
+            high = self.select_value(
+                is_selected,
+                self.builder
+                    .get_felt_constant_from_start(u64::from(opcode_high))?,
+                high,
+            )?;
+        }
+
+        self.finalize_lookup_outputs(vec![low, high], num_outputs)
+    }
+
     /// Allocate witness holes for lookup outputs that are not yet lowered deterministically.
     fn new_lookup_outputs(&self, num_outputs: usize) -> Result<Vec<Value<'ctx, 'sco>>> {
         // TODO(LLZK compute): replace these witness holes with deterministic lookup lowering once
-        // the remaining table families are modeled in `@compute`, especially `AlignedRomRead`
-        // and the hard witness-only helpers that still depend on external oracle state.
+        // the remaining table families and hard witness-only helpers are modeled in `@compute`
+        // without depending on external oracle state.
         (0..num_outputs)
             .map(|_| self.builder.new_nondet_felt())
             .collect()
@@ -1718,9 +1823,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> ComputeLowering<'a, 'ctx, 
     }
 }
 
-impl<'a, 'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZKInCompute<'a, 'ctx, 'sco, F>
-    for RawExpression<F>
-{
+impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInCompute<'a, 'ctx, 'sco, F> for RawExpression<F> {
     type Output = ();
 
     fn emit_compute(
@@ -1769,9 +1872,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZKInCompute<'a, 'ctx
     }
 }
 
-impl<'a, 'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZKInCompute<'a, 'ctx, 'sco, F>
-    for LookupInvocation
-{
+impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInCompute<'a, 'ctx, 'sco, F> for LookupInvocation {
     type Output = Vec<Value<'ctx, 'sco>>;
 
     fn emit_compute(
@@ -1800,9 +1901,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZKInCompute<'a, 'ctx
     }
 }
 
-impl<'a, 'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZKInCompute<'a, 'ctx, 'sco, F>
-    for Expression<F>
-{
+impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInCompute<'a, 'ctx, 'sco, F> for Expression<F> {
     type Output = ComputedValue<'ctx, 'sco>;
 
     fn emit_compute(
@@ -1819,7 +1918,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZKInCompute<'a, 'ctx
     }
 }
 
-impl<'a, 'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZKInCompute<'a, 'ctx, 'sco, F>
+impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInCompute<'a, 'ctx, 'sco, F>
     for FieldNodeExpression<F>
 {
     type Output = Value<'ctx, 'sco>;
@@ -1920,7 +2019,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZKInCompute<'a, 'ctx
     }
 }
 
-impl<'a, 'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZKInCompute<'a, 'ctx, 'sco, F>
+impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInCompute<'a, 'ctx, 'sco, F>
     for BoolNodeExpression<F>
 {
     type Output = Value<'ctx, 'sco>;
@@ -2012,7 +2111,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZKInCompute<'a, 'ctx
     }
 }
 
-impl<'a, 'ctx: 'sco, 'sco, F: PrimeField + FieldInfo> EmitLLZKInCompute<'a, 'ctx, 'sco, F>
+impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInCompute<'a, 'ctx, 'sco, F>
     for FixedWidthIntegerNodeExpression<F>
 {
     type Output = IntegerValue<'ctx, 'sco>;
@@ -2360,6 +2459,16 @@ mod tests {
         [cleaned_value, 0]
     }
 
+    fn aligned_rom_read_outputs(bytecode: &[u32], word_index: usize) -> [u64; 2] {
+        let (low, high) = opcode_limbs(
+            bytecode
+                .get(word_index)
+                .copied()
+                .unwrap_or(prover::cs::machine::UNIMP_OPCODE),
+        );
+        [u64::from(low), u64::from(high)]
+    }
+
     #[test]
     fn jump_branch_lookup_semantics_match_table_driver() {
         let bytecode_words = (1 << (16 + jump_branch_slt::ROM_ADDRESS_SPACE_SECOND_WORD_BITS)) / 4;
@@ -2457,6 +2566,30 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn aligned_rom_lookup_semantics_match_table_driver() {
+        let bytecode_words =
+            (1 << (16 + load_store_subword_only::ROM_ADDRESS_SPACE_SECOND_WORD_BITS)) / 4;
+        let mut bytecode = vec![0u32; bytecode_words];
+        bytecode[0] = 0x0000_0013;
+        bytecode[1] = 0x0010_8093;
+        bytecode[0x1234] = 0xfeed_beef;
+        bytecode[bytecode_words - 1] = 0xc000_1073;
+
+        let table_driver = load_store_subword_only::get_table_driver(&bytecode);
+
+        for word_index in [0usize, 1, 2, 0x1234, 0x4321, bytecode_words - 1] {
+            assert_eq!(
+                lookup_values::<2>(
+                    &table_driver,
+                    TableType::AlignedRomRead,
+                    &[word_index as u64]
+                ),
+                aligned_rom_read_outputs(&bytecode, word_index),
+            );
         }
     }
 }

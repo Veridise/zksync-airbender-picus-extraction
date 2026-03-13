@@ -1,8 +1,8 @@
 //! Encodings of lookup tables into LLZK.
 
 use crate::builder::OpsBuilder;
-use crate::codegen::EmitLLZKInConstrain as _;
 use crate::codegen::StructVars;
+use crate::constraints::EmitLLZKInConstrain as _;
 use crate::field::FieldInfo;
 use anyhow::Result;
 use llzk::dialect::felt;
@@ -19,7 +19,7 @@ use prover::cs::types::Num;
 /// based on `conditional`.
 pub fn add_lookup_constraints_for_table<'ctx, 'sco, F: FieldInfo>(
     builder: &OpsBuilder<'ctx, 'sco, F>,
-    vars: &StructVars,
+    vars: &StructVars<F>,
     query: &LookupQuery<F>,
     table: TableType,
     row_multiplier: Option<Value<'ctx, 'sco>>,
@@ -84,7 +84,7 @@ pub fn add_lookup_constraints_for_table<'ctx, 'sco, F: FieldInfo>(
             row_multiplier,
             conditional,
         ),
-        _ => todo!("Unsupported lookup table {table:#?}"),
+        _ => panic!("unsupported lookup table in LLZK lookup lowering: {table:#?}"),
     }
 }
 
@@ -108,7 +108,7 @@ fn table_supports_zero_row_multiply_in(table: TableType) -> bool {
 ///   `(flag = 1) => ...`.
 pub fn add_disjunctive_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     builder: &OpsBuilder<'ctx, 'sco, F>,
-    vars: &StructVars,
+    vars: &StructVars<F>,
     relation: &DisjunctiveLookup<F>,
 ) -> Result<()> {
     let flags = relation
@@ -127,7 +127,7 @@ pub fn add_disjunctive_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     for case in &relation.cases {
         let table_id = match case.table {
             Num::Var(_variable) => {
-                todo!("support variable table ids in disjunctive lookup queries")
+                panic!("variable table ids in disjunctive lookup queries are not yet supported")
             }
             Num::Constant(table_id) => table_id,
         };
@@ -176,7 +176,7 @@ fn apply_row_multiplier<'ctx, 'sco, F: FieldInfo>(
 /// and alignment relation (`cleaned = 4*k`) with appropriate bit/range guards.
 fn add_jump_cleanup_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     builder: &OpsBuilder<'ctx, 'sco, F>,
-    vars: &StructVars,
+    vars: &StructVars<F>,
     query: &LookupQuery<F>,
     row_multiplier: Option<Value<'ctx, 'sco>>,
     conditional: Option<Value<'ctx, 'sco>>,
@@ -251,7 +251,7 @@ fn add_jump_cleanup_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
 /// determinism summary.
 fn add_conditional_jmp_branch_slt_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     builder: &OpsBuilder<'ctx, 'sco, F>,
-    vars: &StructVars,
+    vars: &StructVars<F>,
     query: &LookupQuery<F>,
     row_multiplier: Option<Value<'ctx, 'sco>>,
     conditional: Option<Value<'ctx, 'sco>>,
@@ -402,7 +402,7 @@ fn add_conditional_jmp_branch_slt_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
 /// determinism axiom `det(input) => (det(offset) && det(bitmask))`.
 fn add_memory_get_offset_and_mask_with_trap_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     builder: &OpsBuilder<'ctx, 'sco, F>,
-    vars: &StructVars,
+    vars: &StructVars<F>,
     query: &LookupQuery<F>,
     row_multiplier: Option<Value<'ctx, 'sco>>,
     conditional: Option<Value<'ctx, 'sco>>,
@@ -450,7 +450,7 @@ fn add_memory_get_offset_and_mask_with_trap_lookup_constraints<'ctx, 'sco, F: Fi
 /// `address_high`, `rom_chunk`, and `is_ram_range`.
 fn add_rom_address_space_separator_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     builder: &OpsBuilder<'ctx, 'sco, F>,
-    vars: &StructVars,
+    vars: &StructVars<F>,
     query: &LookupQuery<F>,
     row_multiplier: Option<Value<'ctx, 'sco>>,
     conditional: Option<Value<'ctx, 'sco>>,
@@ -541,7 +541,7 @@ fn add_rom_address_space_separator_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
 /// `det(input) => (det(out_low) && det(out_high))`.
 fn add_memory_load_halfword_or_byte_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     builder: &OpsBuilder<'ctx, 'sco, F>,
-    vars: &StructVars,
+    vars: &StructVars<F>,
     query: &LookupQuery<F>,
     row_multiplier: Option<Value<'ctx, 'sco>>,
     conditional: Option<Value<'ctx, 'sco>>,
@@ -588,7 +588,7 @@ fn add_memory_load_halfword_or_byte_lookup_constraints<'ctx, 'sco, F: FieldInfo>
 /// `det(input) => (det(cleaned) && det(unused))`.
 fn add_mem_store_clear_original_ram_value_limb_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     builder: &OpsBuilder<'ctx, 'sco, F>,
-    vars: &StructVars,
+    vars: &StructVars<F>,
     query: &LookupQuery<F>,
     row_multiplier: Option<Value<'ctx, 'sco>>,
     conditional: Option<Value<'ctx, 'sco>>,
@@ -636,7 +636,7 @@ fn add_mem_store_clear_original_ram_value_limb_lookup_constraints<'ctx, 'sco, F:
 /// `det(input) => (det(cleaned) && det(unused))`.
 fn add_mem_store_clear_written_value_limb_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     builder: &OpsBuilder<'ctx, 'sco, F>,
-    vars: &StructVars,
+    vars: &StructVars<F>,
     query: &LookupQuery<F>,
     row_multiplier: Option<Value<'ctx, 'sco>>,
     conditional: Option<Value<'ctx, 'sco>>,
@@ -684,7 +684,7 @@ fn add_mem_store_clear_written_value_limb_lookup_constraints<'ctx, 'sco, F: Fiel
 /// `det(word_index) => (det(low) && det(high))`.
 fn add_aligned_rom_read_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     builder: &OpsBuilder<'ctx, 'sco, F>,
-    vars: &StructVars,
+    vars: &StructVars<F>,
     query: &LookupQuery<F>,
     row_multiplier: Option<Value<'ctx, 'sco>>,
     conditional: Option<Value<'ctx, 'sco>>,
