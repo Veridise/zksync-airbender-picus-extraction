@@ -276,98 +276,141 @@ mod tests {
     use prover::field::PrimeField;
 
     use super::*;
+    use crate::builder::OpsBuilder;
+    use crate::codegen::StructVars;
     use crate::test_helpers::assert_full_ir_eq;
     use crate::test_helpers::emit_test_constrain_ir;
 
+    /// Convert `value` to a field element in [`Mersenne31Field`].
     fn field(value: u64) -> Mersenne31Field {
         Mersenne31Field::from_u64_unchecked(value)
     }
 
+    /// Emit a synthetic `@constrain` body with `num_inputs` felt inputs and `num_members` felt
+    /// members, then compare the resulting IR against an exact fixture.
+    ///
+    /// The generated member names are deterministic and follow the pattern `member_<idx>`. The
+    /// `emit` closure receives the synthetic input and member variables as slices so each test can
+    /// assert the expected layout explicitly before building the expression under test.
+    fn assert_constrain_fixture(
+        num_inputs: usize,
+        num_members: usize,
+        expected: &str,
+        emit: impl FnOnce(
+            &OpsBuilder<'_, '_, Mersenne31Field>,
+            &StructVars<Mersenne31Field>,
+            &[Variable],
+            &[Variable],
+        ) -> Result<()>,
+    ) {
+        let inputs = (0..num_inputs)
+            .map(|offset| Variable(u64::try_from(offset).expect("input count overflowed u64")))
+            .collect::<Vec<_>>();
+        let members = (0..num_members)
+            .map(|offset| {
+                Variable(u64::try_from(num_inputs + offset).expect("member count overflowed u64"))
+            })
+            .collect::<Vec<_>>();
+        let member_names = members
+            .iter()
+            .enumerate()
+            .map(|(idx, member)| (*member, format!("member_{idx}")))
+            .collect::<Vec<_>>();
+        let member_refs = member_names
+            .iter()
+            .map(|(member, name)| (*member, name.as_str()))
+            .collect::<Vec<_>>();
+
+        let ir = emit_test_constrain_ir("constraint_test", &inputs, &member_refs, |ops, vars| {
+            emit(ops, vars, &inputs, &members)
+        });
+        assert_full_ir_eq(&ir, expected);
+    }
+
     #[test]
     fn boolean_not_on_input_emits_sub_from_one() {
-        let input = Variable(7);
-        let ir = emit_test_constrain_ir("constraint_test", &[input], &[], |ops, vars| {
-            let _ = Boolean::Not(input).emit_constrain(ops, vars)?;
-            Ok(())
-        });
-
-        assert_full_ir_eq(
-            &ir,
+        assert_constrain_fixture(
+            1,
+            0,
             include_str!("../testdata/constraints/boolean_not_on_input_emits_sub_from_one.mlir"),
+            |ops, vars, inputs, members| {
+                assert_eq!(inputs.len(), 1);
+                assert!(members.is_empty());
+                let _ = Boolean::Not(inputs[0]).emit_constrain(ops, vars)?;
+                Ok(())
+            },
         );
     }
 
     #[test]
     fn term_with_negative_unit_coefficient_emits_neg() {
-        let input = Variable(7);
         let neg_one = field(Mersenne31Field::CHARACTERISTICS - 1);
-        let term = Term::from((neg_one, input));
-        let ir = emit_test_constrain_ir("constraint_test", &[input], &[], |ops, vars| {
-            let _ = term.emit_constrain(ops, vars)?;
-            Ok(())
-        });
-
-        assert_full_ir_eq(
-            &ir,
+        assert_constrain_fixture(
+            1,
+            0,
             include_str!(
                 "../testdata/constraints/term_with_negative_unit_coefficient_emits_neg.mlir"
             ),
+            |ops, vars, inputs, members| {
+                assert_eq!(inputs.len(), 1);
+                assert!(members.is_empty());
+                let term = Term::from((neg_one, inputs[0]));
+                let _ = term.emit_constrain(ops, vars)?;
+                Ok(())
+            },
         );
     }
 
     #[test]
     fn lookup_expression_emits_mul_and_add_chain() {
-        let lhs = Variable(7);
-        let rhs = Variable(8);
-        let input = LookupInput::Expression {
-            linear_terms: vec![(field(3), lhs), (field(4), rhs)],
-            constant_coeff: field(5),
-        };
-        let ir = emit_test_constrain_ir("constraint_test", &[lhs, rhs], &[], |ops, vars| {
-            let _ = input.emit_constrain(ops, vars)?;
-            Ok(())
-        });
-
-        assert_full_ir_eq(
-            &ir,
+        assert_constrain_fixture(
+            2,
+            0,
             include_str!("../testdata/constraints/lookup_expression_emits_mul_and_add_chain.mlir"),
+            |ops, vars, inputs, members| {
+                assert_eq!(inputs.len(), 2);
+                assert!(members.is_empty());
+                let input = LookupInput::Expression {
+                    linear_terms: vec![(field(3), inputs[0]), (field(4), inputs[1])],
+                    constant_coeff: field(5),
+                };
+                let _ = input.emit_constrain(ops, vars)?;
+                Ok(())
+            },
         );
     }
 
     #[test]
     fn constrain_access_reads_member_when_variable_is_not_input() {
-        let member = Variable(42);
-        let ir = emit_test_constrain_ir(
-            "constraint_test",
-            &[],
-            &[(member, "stored_member")],
-            |ops, vars| {
-                let _ = Boolean::Is(member).emit_constrain(ops, vars)?;
-                Ok(())
-            },
-        );
-
-        assert_full_ir_eq(
-            &ir,
+        assert_constrain_fixture(
+            0,
+            1,
             include_str!(
                 "../testdata/constraints/constrain_access_reads_member_when_variable_is_not_input.mlir"
             ),
+            |ops, vars, inputs, members| {
+                assert!(inputs.is_empty());
+                assert_eq!(members.len(), 1);
+                let _ = Boolean::Is(members[0]).emit_constrain(ops, vars)?;
+                Ok(())
+            },
         );
     }
 
     #[test]
     fn range_check_query_emits_compare_and_constraint() {
-        let input = Variable(7);
-        let query = RangeCheckQuery::new(input, 8);
-        let ir = emit_test_constrain_ir("constraint_test", &[input], &[], |ops, vars| {
-            query.emit_constrain(ops, vars)
-        });
-
-        assert_full_ir_eq(
-            &ir,
+        assert_constrain_fixture(
+            1,
+            0,
             include_str!(
                 "../testdata/constraints/range_check_query_emits_compare_and_constraint.mlir"
             ),
+            |ops, vars, inputs, members| {
+                assert_eq!(inputs.len(), 1);
+                assert!(members.is_empty());
+                let query = RangeCheckQuery::new(inputs[0], 8);
+                query.emit_constrain(ops, vars)
+            },
         );
     }
 }

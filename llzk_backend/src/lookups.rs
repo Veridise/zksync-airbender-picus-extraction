@@ -727,3 +727,125 @@ fn add_aligned_rom_read_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     // embedding the concrete ROM table contents.
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use prover::cs::cs::circuit::DisjunctiveLookupCase;
+    use prover::cs::cs::circuit::LookupQueryTableType;
+    use prover::cs::definitions::Variable;
+    use prover::cs::one_row_compiler::LookupInput;
+    use prover::cs::types::Boolean;
+    use prover::field::Mersenne31Field;
+
+    use super::*;
+    use crate::test_helpers::assert_full_ir_eq;
+    use crate::test_helpers::emit_test_constrain_ir;
+
+    /// Create a [`LookupQuery`] for the given `row` in the given `table`.
+    fn direct_lookup_query(table: TableType, row: [Variable; 3]) -> LookupQuery<Mersenne31Field> {
+        LookupQuery {
+            row: row.map(LookupInput::from),
+            table: LookupQueryTableType::Constant(table),
+        }
+    }
+
+    /// Generate an exact-fixture test for a direct constant-table lookup.
+    ///
+    /// Each generated test uses the standard three-column synthetic row and checks the emitted
+    /// `@constrain` IR against the provided fixture.
+    macro_rules! direct_lookup_fixture_test {
+        ($test_name:ident, $table:ident, $fixture:literal) => {
+            #[test]
+            fn $test_name() {
+                let row = [Variable(7), Variable(8), Variable(9)];
+                let table = TableType::$table;
+                let query = direct_lookup_query(table, row);
+                let ir = emit_test_constrain_ir("lookup_test", &row, &[], |ops, vars| {
+                    add_lookup_constraints_for_table(ops, vars, &query, table, None, None)
+                });
+                assert_full_ir_eq(&ir, include_str!($fixture));
+            }
+        };
+    }
+
+    /// Generate an exact-fixture test for a one-case disjunctive lookup relation.
+    ///
+    /// Each generated test uses one boolean guard plus a three-column row and verifies the full
+    /// guarded lookup encoding against the provided fixture.
+    macro_rules! disjunctive_lookup_fixture_test {
+        ($test_name:ident, $table:ident, $fixture:literal) => {
+            #[test]
+            fn $test_name() {
+                let flag = Variable(7);
+                let row = [Variable(8), Variable(9), Variable(10)];
+                let relation = DisjunctiveLookup {
+                    relation_index: 0,
+                    cases: vec![DisjunctiveLookupCase {
+                        flag: Boolean::Is(flag),
+                        row: row.map(LookupInput::from),
+                        table: TableType::$table.to_num(),
+                    }],
+                };
+                let ir = emit_test_constrain_ir(
+                    "lookup_test",
+                    &[flag, row[0], row[1], row[2]],
+                    &[],
+                    |ops, vars| add_disjunctive_lookup_constraints(ops, vars, &relation),
+                );
+                assert_full_ir_eq(&ir, include_str!($fixture));
+            }
+        };
+    }
+
+    direct_lookup_fixture_test!(
+        jump_cleanup_lookup_emits_alignment_constraints,
+        JumpCleanupOffset,
+        "../testdata/lookups/jump_cleanup_lookup_emits_alignment_constraints.mlir"
+    );
+    direct_lookup_fixture_test!(
+        conditional_jump_lookup_emits_one_hot_logic,
+        ConditionalJmpBranchSlt,
+        "../testdata/lookups/conditional_jump_lookup_emits_one_hot_logic.mlir"
+    );
+    direct_lookup_fixture_test!(
+        memory_get_offset_and_mask_lookup_is_range_only,
+        MemoryGetOffsetAndMaskWithTrap,
+        "../testdata/lookups/memory_get_offset_and_mask_lookup_is_range_only.mlir"
+    );
+    direct_lookup_fixture_test!(
+        rom_address_space_separator_lookup_emits_rom_bound_relation,
+        RomAddressSpaceSeparator,
+        "../testdata/lookups/rom_address_space_separator_lookup_emits_rom_bound_relation.mlir"
+    );
+    direct_lookup_fixture_test!(
+        memory_load_halfword_or_byte_lookup_is_range_only,
+        MemoryLoadHalfwordOrByte,
+        "../testdata/lookups/memory_load_halfword_or_byte_lookup_is_range_only.mlir"
+    );
+    direct_lookup_fixture_test!(
+        mem_store_clear_original_lookup_is_range_only,
+        MemStoreClearOriginalRamValueLimb,
+        "../testdata/lookups/mem_store_clear_original_lookup_is_range_only.mlir"
+    );
+    direct_lookup_fixture_test!(
+        mem_store_clear_written_lookup_is_range_only,
+        MemStoreClearWrittenValueLimb,
+        "../testdata/lookups/mem_store_clear_written_lookup_is_range_only.mlir"
+    );
+    direct_lookup_fixture_test!(
+        aligned_rom_read_lookup_is_range_only,
+        AlignedRomRead,
+        "../testdata/lookups/aligned_rom_read_lookup_is_range_only.mlir"
+    );
+
+    disjunctive_lookup_fixture_test!(
+        disjunctive_lookup_uses_row_multiplier_for_safe_tables,
+        MemoryLoadHalfwordOrByte,
+        "../testdata/lookups/disjunctive_lookup_uses_row_multiplier_for_safe_tables.mlir"
+    );
+    disjunctive_lookup_fixture_test!(
+        disjunctive_lookup_uses_conditional_constraints_for_unsafe_tables,
+        JumpCleanupOffset,
+        "../testdata/lookups/disjunctive_lookup_uses_conditional_constraints_for_unsafe_tables.mlir"
+    );
+}
