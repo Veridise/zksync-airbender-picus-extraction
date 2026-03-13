@@ -107,18 +107,13 @@ impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInConstrain<'ctx, 'sco, F> for (Con
         let (constraint, _prevent_optimization) = self;
 
         let zero = builder.get_constant_from_start(builder.felt_type(), 0)?;
-        let sum = constraint
+        let values = constraint
             .terms
             .iter()
             .map(|term| term.emit_constrain(builder, vars))
-            .try_fold(zero, |sum, term_val| {
-                builder.append_op_with_result(felt::add(
-                    builder.unknown_location(),
-                    sum,
-                    term_val?,
-                )?)
-            })?;
-        builder.append_op_with_no_results(constrain::eq(builder.unknown_location(), sum, zero))
+            .collect::<Result<Vec<Value<'_, '_>>>>()?;
+        let sum = builder.append_sum(builder.unknown_location(), &values)?;
+        builder.append_constrain_eq(builder.unknown_location(), sum, zero)
     }
 }
 
