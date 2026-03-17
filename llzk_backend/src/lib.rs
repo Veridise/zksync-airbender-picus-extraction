@@ -19,6 +19,7 @@ use std::path::Path;
 use crate::builder::ModuleEnv;
 use crate::codegen::CircuitBundle;
 use crate::codegen::EmitLLZKInModule as _;
+use crate::codegen::VariableExtractor;
 use crate::config::LlzkStructLayout;
 use crate::config::OptLevel;
 use crate::output_format::OutputFormat;
@@ -191,22 +192,16 @@ fn generate_circuit_command(
     let substitutions = merge_llzk_placeholder_aliases(&circuit_output);
 
     // From this point we intentionally build two different artifacts from the same circuit:
-    // - `compiled_artifact` is the column-layout view used by constraint lowering. It answers
-    //   questions like "which logical variable ended up in which trace column?".
+    // - `compiled_artifact` is the column-layout view with constraint expressions over logical
+    //   variables used to emit LLZK constraints (i.e., by `@constrain`).
     // - `witness_ssa_fn(&bytecode)` is the witness-evaluation program used by `@compute`. It is a
-    //   sequence of typed `RawExpression` blocks that describes how to derive witness values and
+    //   sequence of typed [`RawExpression`] blocks that describes how to derive witness values and
     //   write them back into logical variables.
     //
-    // LLZK needs both: the compiled artifact tells us where writes land, while the SSA tells us
-    // how to compute the values that should be written there.
-    //
-    // We also preserve the circuit's placeholder substitution map and enrich it with a small
-    // LLZK-only alias overlay. That overlay is intentionally local to this backend: several legacy
-    // shuffle-RAM witness placeholders are already represented by explicit LLZK inputs/outputs via
-    // `shuffle_ram_queries`, but the core circuit code does not record them in `substitutions`.
-    // Rather than changing client workflows in the shared circuit library, LLZK synthesizes those
-    // obvious aliases here so `@compute` and `@constrain` agree on the source of shuffle query
-    // values.
+    // We also preserve the circuit's placeholder substitution map and augment it with additional
+    // aliases. Several shuffle-RAM witness placeholders are already represented by explicit LLZK
+    // inputs/outputs via `shuffle_ram_queries`, but the core circuit code does not record them
+    // in `substitutions`.
     let compiler = OneRowCompiler::<Mersenne31Field>::default();
     // The compilation process here also adds constraints.
     let compiled_artifact = compiler.compile_executor_circuit_assuming_preprocessed_bytecode(
@@ -255,11 +250,11 @@ fn generate_circuit_command(
 /// Merge the core circuit substitutions with the extra placeholder aliases that LLZK can derive
 /// from the extracted shuffle-RAM queries.
 ///
-/// The shared circuit library already records substitutions for executor-state placeholders such as
-/// `PcInit`, but some legacy shuffle-RAM witness placeholders are only visible indirectly through
-/// `ShuffleRamMemQuery` values. LLZK treats those query values as part of the explicit function
-/// boundary, so it is safe to synthesize the matching placeholder aliases locally in this backend
-/// without changing the core witness-generation flow.
+/// The shared circuit library already records substitutions for executor-state placeholders (e.g.,
+/// mapping [`Placeholder::PcInit`] to a [`Variable`]), but some witness placeholders are only
+/// visible indirectly through [`ShuffleRamMemQuery`] values. LLZK treats those query values as
+/// struct inputs/outputs, so we need these aliases for witness generation so the `@compute` and
+/// `@constrain` logic target the same set of LLZK args/members.
 fn merge_llzk_placeholder_aliases<F: prover::field::PrimeField>(
     circuit_output: &CircuitOutput<F>,
 ) -> HashMap<(Placeholder, usize), Variable> {
@@ -272,14 +267,14 @@ fn merge_llzk_placeholder_aliases<F: prover::field::PrimeField>(
     substitutions
 }
 
-/// Derive backend-local aliases for the legacy shuffle-RAM placeholders that are already exposed
-/// as LLZK boundary variables.
+/// Derive aliases for shuffle-RAM placeholders that are already exposed to the [`CircuitOutput`].
 ///
-/// These aliases only cover read-side values. They are the cases where `CircuitOutput::get_inputs`
+/// These aliases only cover read values. They are the cases where [`VariableExtractor::get_inputs`]
 /// already exports the same query values as LLZK inputs, so mapping the placeholder back to that
 /// input keeps `@compute` and `@constrain` aligned without requiring any shared-library changes.
 ///
-/// The mapping intentionally mirrors the existing circuit construction helpers:
+/// The mapping intentionally mirrors the existing circuit construction helpers
+/// (e.g., optimized_decode_and_preallocate_mem_queries_for_bytecode_in_rom):
 /// - query 0 is the RS1 read slot (`FirstRegMem` / `ShuffleRamReadValue(0)`)
 /// - query 1 is the RS2 read slot (`SecondRegMem` / `ShuffleRamReadValue(1)`)
 /// - query 2 is the destination prior-value slot (`WriteRdReadSetWitness`,
@@ -330,6 +325,7 @@ fn insert_register_alias(
     }
 }
 
+/// Write `res` to the specified `output` destination.
 fn write_result<'ctx>(
     res: &GenCircuitResult<'ctx>,
     format: OutputFormat,
