@@ -13,6 +13,7 @@ use prover::cs::definitions::Variable;
 use prover::field::PrimeField;
 
 use crate::builder::*;
+use crate::config::LlzkStructLayout;
 use crate::constraints::AddConstraints;
 use crate::constraints::EmitLLZKInConstrain;
 use crate::field::FieldInfo;
@@ -104,6 +105,10 @@ pub trait VariableExtractor {
 
 impl<F: PrimeField> VariableExtractor for OpcodeFamilyCircuitState<F> {
     fn get_inputs(&self) -> Result<Vec<ExtractedVariable>> {
+        // These inputs are the canonical LLZK boundary view of executor machine state. The source
+        // circuit also tracks many of them through placeholder substitutions for the legacy
+        // witness/oracle path, and `@compute` lowers those placeholder reads back to these inputs
+        // so the same logical value is not derived from two unrelated sources downstream.
         let mut inputs = vec![
             ExtractedVariable::scalar(self.execute),
             ExtractedVariable::register(self.cycle_start_state.pc),
@@ -207,24 +212,42 @@ fn num_vars(vars: impl IntoIterator<Item = ExtractedVariable>) -> usize {
     vars.into_iter().map(|v| v.num_vars()).sum()
 }
 
-/// Holds the artifacts required to emit one LLZK circuit struct.
-///
-/// This bundles the original [`CircuitOutput`] used by `@constrain`, the witness computation plan
-/// used by `@compute`, and the emitted struct name.
+/// Holds the circuit artifacts required to emit one LLZK circuit struct.
 pub struct CircuitBundle<F: FieldInfo> {
-    circuit_output: CircuitOutput<F>,
+    /// Name to give the emitted LLZK struct.
     name: String,
-    witness: WitnessComputation<F>,
+    /// The option for how to generate the `@compute`/`@constraint` or `@product`
+    /// methods of the emitted LLZK struct.
+    layout: LlzkStructLayout,
+    /// The output of the airbender circuit, used for constraint and witness generation
+    circuit_output: CircuitOutput<F>,
+    /// The output of the witness SSA generation, used for generating witness computation in LLZK,
+    /// if needed
+    witness: Option<WitnessComputation<F>>,
 }
 
 impl<F: FieldInfo> CircuitBundle<F> {
     /// Create a new emission bundle for a single circuit.
-    pub fn new(co: CircuitOutput<F>, name: &str, witness: WitnessComputation<F>) -> Self {
-        Self {
-            circuit_output: co,
-            name: name.to_string(),
-            witness,
+    ///
+    /// The `witness` is optional since not all layouts require it, but the generation of `witness`
+    /// requires `circuit_output`, so `circuit_output` is always required.
+    /// Will return an error if the witness is omitted for any layout other than
+    /// [`LlzkStructLayout::ComputeOnly`]
+    pub fn new(
+        name: &str,
+        layout: LlzkStructLayout,
+        circuit_output: CircuitOutput<F>,
+        witness: Option<WitnessComputation<F>>,
+    ) -> Result<Self> {
+        if matches!((layout, &witness), (LlzkStructLayout::ComputeOnly, None)) {
+            anyhow::bail!("must provide witness for {}", layout);
         }
+        Ok(Self {
+            name: name.to_string(),
+            layout,
+            circuit_output,
+            witness,
+        })
     }
 
     /// Return a reference to the circuit's emitted struct name.
@@ -249,6 +272,11 @@ impl<'ctx, F: FieldInfo> EmitLLZKInModule<'ctx, F> for CircuitBundle<F> {
             panic!("non-built-in fields are not yet supported in LLZK module emission")
         }
 
+        // TODO: Support product program
+        if matches!(self.layout, LlzkStructLayout::Product) {
+            anyhow::bail!("@product program generation is currently unsupported");
+        }
+
         let mut struct_builder = StructBuilder::new(env, self.name());
 
         // Sanity check: all variables should be an input, output, or intermediate.
@@ -261,30 +289,44 @@ impl<'ctx, F: FieldInfo> EmitLLZKInModule<'ctx, F> for CircuitBundle<F> {
         let vars = StructVars::new(self, &mut struct_builder)?;
         let struct_op = struct_builder.build_in_module()?;
 
-        struct_op.add_compute(env, |builder: &mut OpsBuilder<'_, '_, F>| {
-            self.witness.emit_compute(builder, &vars)
-        })?;
+        if !matches!(&self.layout, LlzkStructLayout::ComputeOnly) {
+            struct_op.add_constraints(
+                env,
+                |builder: &mut OpsBuilder<'_, '_, F>| -> Result<()> {
+                    // Add some constants to reuse at the beginning here.
+                    builder.insert_constant_at_start(builder.index_type(), 1)?;
+                    builder.insert_constant_at_start(builder.index_type(), 0)?;
+                    builder.insert_constant_at_start(builder.felt_type(), 1)?;
+                    builder.insert_constant_at_start(builder.felt_type(), 0)?;
+                    // Add boolean constraints.
+                    for bool_var in self.boolean_vars.iter() {
+                        let val = vars.get_constrain_val(builder, bool_var)?;
+                        let _ = builder.felt_type();
+                        builder.append_boolean_constraint(val)?;
+                    }
+                    // Add range constraints.
+                    self.range_check_expressions
+                        .emit_constrain(builder, &vars)?;
+                    // Add lookup constraints.
+                    self.lookups.emit_constrain(builder, &vars)?;
+                    // Add all other constraints.
+                    self.constraints.emit_constrain(builder, &vars)
+                },
+            )?;
+        }
 
-        struct_op.add_constraints(env, |builder: &mut OpsBuilder<'_, '_, F>| -> Result<()> {
-            // Add some constants to reuse at the beginning here.
-            builder.insert_constant_at_start(builder.index_type(), 1)?;
-            builder.insert_constant_at_start(builder.index_type(), 0)?;
-            builder.insert_constant_at_start(builder.felt_type(), 1)?;
-            builder.insert_constant_at_start(builder.felt_type(), 0)?;
-            // Add boolean constraints.
-            for bool_var in self.boolean_vars.iter() {
-                let val = vars.get_constrain_val(builder, bool_var)?;
-                let _ = builder.felt_type();
-                builder.append_boolean_constraint(val)?;
-            }
-            // Add range constraints.
-            self.range_check_expressions
-                .emit_constrain(builder, &vars)?;
-            // Add lookup constraints.
-            self.lookups.emit_constrain(builder, &vars)?;
-            // Add all other constraints.
-            self.constraints.emit_constrain(builder, &vars)
-        })
+        if !matches!(&self.layout, LlzkStructLayout::ConstrainOnly) {
+            let wit = self
+                .witness
+                .as_ref()
+                .ok_or_else(|| anyhow!("must have witness specified"))?;
+            struct_op.add_compute(env, |builder: &mut OpsBuilder<'_, '_, F>| {
+                wit.emit_compute(builder, &vars)
+            })?;
+
+            wit.declare_runtime_externs(env)?;
+        }
+        Ok(())
     }
 }
 
@@ -410,13 +452,29 @@ impl<F: FieldInfo> StructVars<F> {
     ///
     /// `@compute` does not receive a `self` argument. Its public inputs begin at argument 0 and
     /// the partially constructed witness struct is the result of the leading `struct.new`.
+    ///
+    /// This is the canonical path for circuit boundary values. Witness lowering prefers these
+    /// inputs over runtime oracle hooks whenever an SSA placeholder is just another name for an
+    /// already-exposed `@compute` argument.
+    pub fn try_get_compute_input_val<'ctx, 'sco>(
+        &self,
+        builder: &OpsBuilder<'ctx, 'sco, F>,
+        var: &Variable,
+    ) -> Result<Option<Value<'ctx, 'sco>>> {
+        self.get_input_val_at_offset(builder, 0, var)
+    }
+
+    /// Try to read a variable from the full `@compute` view of the struct.
+    ///
+    /// This checks the explicit function arguments first and then falls back to the partially
+    /// constructed struct members.
     pub fn try_get_compute_val<'ctx, 'sco>(
         &self,
         builder: &OpsBuilder<'ctx, 'sco, F>,
         self_value: Value<'ctx, 'sco>,
         var: &Variable,
     ) -> Result<Option<Value<'ctx, 'sco>>> {
-        if let Some(val) = self.get_input_val_at_offset(builder, 0, var)? {
+        if let Some(val) = self.try_get_compute_input_val(builder, var)? {
             Ok(Some(val))
         } else {
             self.get_member_val_from(builder, self_value, var)
@@ -432,6 +490,27 @@ impl<F: FieldInfo> StructVars<F> {
     ) -> Result<Value<'ctx, 'sco>> {
         self.try_get_compute_val(builder, self_value, var)?
             .ok_or_else(|| anyhow!("Could not find {var:?} in compute inputs or members"))
+    }
+
+    /// Return `true` when `var` is one of the explicit `@compute` inputs.
+    pub fn has_compute_input(&self, var: &Variable) -> bool {
+        self.arg_map.contains_key(var)
+    }
+
+    /// Return `true` when `var` is stored as a struct member in the LLZK boundary.
+    ///
+    /// This is the key distinction for witness lowering when the one-row compiler maps a logical
+    /// variable into the `MemorySubtree`: if the same variable is also exposed as an LLZK output or
+    /// intermediate member, `@compute` should update the struct member rather than routing that
+    /// write through the generic memory runtime hook.
+    pub fn has_compute_member(&self, var: &Variable) -> bool {
+        self.member_map.contains_key(var)
+    }
+
+    /// Return `true` when `var` is visible through either the `@compute` inputs or the returned
+    /// struct.
+    pub fn is_compute_exposed(&self, var: &Variable) -> bool {
+        self.has_compute_input(var) || self.has_compute_member(var)
     }
 
     /// Update `var` with `value` by creating a `struct.writem` operation in `@compute` targeting

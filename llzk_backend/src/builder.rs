@@ -16,11 +16,13 @@ use llzk::builder::OpBuilder;
 use llzk::dialect::bool;
 use llzk::dialect::constrain;
 use llzk::dialect::felt;
+use llzk::operation::WalkOperationMutLike;
 use llzk::prelude::dialect::array;
 use llzk::prelude::dialect::r#struct;
 use llzk::prelude::melior_dialects::arith;
 use llzk::prelude::*;
 use llzk::utils::IsA;
+use melior::ir::Identifier;
 use prover::cs::definitions::REGISTER_SIZE;
 
 use crate::field::FieldInfo;
@@ -106,6 +108,95 @@ impl<'ctx, F: FieldInfo> ModuleEnv<'ctx, F> {
             )],
         )
         .into()
+    }
+
+    /// Declare a private module-level external function if it is not already present.
+    ///
+    /// The LLZK backend uses this for runtime hooks such as ROM and memory accesses. These are
+    /// emitted as `function.def private` declarations so `@compute` can call them while leaving
+    /// their implementation to the downstream LLZK user.
+    pub fn declare_private_extern_function(
+        &self,
+        name: &str,
+        inputs: &[Type<'ctx>],
+        results: &[Type<'ctx>],
+    ) -> Result<()> {
+        if self.module_contains_top_level_function(name)? {
+            return Ok(());
+        }
+
+        let visibility = [(
+            Identifier::new(self.context, "sym_visibility"),
+            StringAttribute::new(self.context, "private").into(),
+        )];
+        let func = dialect::function::def(
+            self.unknown_location(),
+            name,
+            FunctionType::new(self.context, inputs, results),
+            &visibility,
+            None,
+        )?;
+        self.module.body().append_operation(func.into());
+        Ok(())
+    }
+
+    /// Query the module for the given named free function.
+    fn module_contains_top_level_function(&self, name: &str) -> Result<bool> {
+        let module_op = self.module.as_operation();
+        let module_raw = module_op.to_raw();
+        let mut found = false;
+        let mut module_op_mut = unsafe { OperationRefMut::from_raw(module_raw) };
+        module_op_mut.walk_mut(WalkOrder::PreOrder, |op| {
+            if op.to_raw().ptr == module_raw.ptr {
+                return WalkResult::Advance;
+            }
+
+            if op
+                .parent_operation()
+                .map(|parent| parent.to_raw().ptr == module_raw.ptr)
+                .unwrap_or(false)
+            {
+                if dialect::function::is_func_def(&op)
+                    && op
+                        .attribute("sym_name")
+                        .and_then(StringAttribute::try_from)
+                        .map(|attr| attr.value() == name)
+                        .unwrap_or(false)
+                {
+                    found = true;
+                    WalkResult::Interrupt
+                } else {
+                    // This query only cares about free functions directly under the module.
+                    WalkResult::Skip
+                }
+            } else {
+                WalkResult::Advance
+            }
+        });
+
+        Ok(found)
+    }
+
+    /// Return `true` if any operation nested in the module references `callee` through a
+    /// `function.call`-style symbol attribute.
+    pub fn module_contains_call_to(&self, callee: &str) -> Result<bool> {
+        let callee_attr = format!("@{callee}");
+        let mut found = false;
+        let mut module_op =
+            unsafe { OperationRefMut::from_raw(self.module.as_operation().to_raw()) };
+        module_op.walk_mut(WalkOrder::PreOrder, |op| {
+            if op
+                .attribute("callee")
+                .map(|attr| attr.to_string().contains(&callee_attr))
+                .unwrap_or(false)
+            {
+                found = true;
+                WalkResult::Interrupt
+            } else {
+                WalkResult::Advance
+            }
+        });
+        Ok(found)
     }
 }
 
@@ -527,6 +618,55 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
         rvalue: Value<'ctx, 'sco>,
     ) -> Result<()> {
         self.append_op_with_no_results(array::write(location, arr_ref, indices, rvalue))
+    }
+
+    /// Append a `function.call` and return all results.
+    pub fn append_call<const N: usize>(
+        &self,
+        location: Location<'ctx>,
+        callee: &str,
+        args: &[Value<'ctx, 'sco>],
+        result_types: &[Type<'ctx>],
+    ) -> Result<[Value<'ctx, 'sco>; N]> {
+        let op = dialect::function::call(
+            &OpBuilder::new(self.context),
+            location,
+            FlatSymbolRefAttribute::new(self.context, callee),
+            args,
+            result_types,
+        )?;
+        self.append_op_with_results::<N>(op.into())
+    }
+
+    /// Append a `function.call` with a single result.
+    #[inline]
+    pub fn append_call_with_result(
+        &self,
+        location: Location<'ctx>,
+        callee: &str,
+        args: &[Value<'ctx, 'sco>],
+        result_type: Type<'ctx>,
+    ) -> Result<Value<'ctx, 'sco>> {
+        self.append_call::<1>(location, callee, args, &[result_type])
+            .map(|results| results[0])
+    }
+
+    /// Append a `function.call` that returns no results.
+    #[inline]
+    pub fn append_call_no_results(
+        &self,
+        location: Location<'ctx>,
+        callee: &str,
+        args: &[Value<'ctx, 'sco>],
+    ) -> Result<()> {
+        let op = dialect::function::call(
+            &OpBuilder::new(self.context),
+            location,
+            FlatSymbolRefAttribute::new(self.context, callee),
+            args,
+            &[] as &[Type<'ctx>],
+        )?;
+        self.append_op_with_no_results(op.into())
     }
 
     /// Lookup a previously generated constant in the function scope or

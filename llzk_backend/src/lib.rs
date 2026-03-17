@@ -1,12 +1,16 @@
 use anyhow::Result;
-use clap::ValueEnum;
 use llzk::prelude::*;
 use prover::common_constants;
 use prover::cs::cs::circuit::Circuit as _;
+use prover::cs::cs::circuit::CircuitOutput;
+use prover::cs::cs::circuit::ShuffleRamMemQuery;
 use prover::cs::cs::cs_reference::BasicAssembly;
+use prover::cs::cs::placeholder::Placeholder;
 use prover::cs::cs::witness_placer::graph_description::RawExpression;
+use prover::cs::definitions::Variable;
 use prover::cs::one_row_compiler::OneRowCompiler;
 use prover::field::Mersenne31Field;
+use std::collections::HashMap;
 use std::fs::File;
 use std::fs::{self};
 use std::io::Write;
@@ -15,6 +19,8 @@ use std::path::Path;
 use crate::builder::ModuleEnv;
 use crate::codegen::CircuitBundle;
 use crate::codegen::EmitLLZKInModule as _;
+use crate::config::LlzkStructLayout;
+use crate::config::OptLevel;
 use crate::output_format::OutputFormat;
 use crate::witness::WitnessComputation;
 
@@ -22,6 +28,7 @@ use llzk::targets::pcl::translate_module;
 
 mod builder;
 mod codegen;
+pub mod config;
 mod constraints;
 mod field;
 mod lookups;
@@ -31,19 +38,12 @@ mod witness;
 // mod expr;
 pub mod output_format;
 
-pub fn setup_logging() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .format_timestamp_millis()
-        .format_module_path(false)
-        .format_target(false)
-        .init();
-}
-
 /// Generate the `add_sub_lui_auipc_mop` circuit.
 pub fn gen_add_sub_lui_auipc_mop(
     output: &str,
     format: OutputFormat,
     opt_level: OptLevel,
+    layout: LlzkStructLayout,
 ) -> Result<()> {
     use add_sub_lui_auipc_mop::dump_ssa_form;
     use add_sub_lui_auipc_mop::ROM_ADDRESS_SPACE_SECOND_WORD_BITS;
@@ -57,6 +57,7 @@ pub fn gen_add_sub_lui_auipc_mop(
         output,
         format,
         opt_level,
+        layout,
         bytecode_size,
         TRACE_LEN_LOG2 as usize,
         |cs| {
@@ -69,7 +70,12 @@ pub fn gen_add_sub_lui_auipc_mop(
 
 /// Generate the `jump_branch_slt` circuit with `SUPPORT_SIGNED=true`
 /// (all invocations appear use this configuration).
-pub fn gen_jump_branch_slt(output: &str, format: OutputFormat, opt_level: OptLevel) -> Result<()> {
+pub fn gen_jump_branch_slt(
+    output: &str,
+    format: OutputFormat,
+    opt_level: OptLevel,
+    layout: LlzkStructLayout,
+) -> Result<()> {
     use jump_branch_slt::dump_ssa_form;
     use jump_branch_slt::ROM_ADDRESS_SPACE_SECOND_WORD_BITS;
     use jump_branch_slt::TRACE_LEN_LOG2;
@@ -82,6 +88,7 @@ pub fn gen_jump_branch_slt(output: &str, format: OutputFormat, opt_level: OptLev
         output,
         format,
         opt_level,
+        layout,
         bytecode_size,
         TRACE_LEN_LOG2 as usize,
         |cs| {
@@ -97,6 +104,7 @@ pub fn gen_load_store_subword_only(
     output: &str,
     format: OutputFormat,
     opt_level: OptLevel,
+    layout: LlzkStructLayout,
 ) -> Result<()> {
     use load_store_subword_only::dump_ssa_form;
     use load_store_subword_only::ROM_ADDRESS_SPACE_SECOND_WORD_BITS;
@@ -110,6 +118,7 @@ pub fn gen_load_store_subword_only(
         output,
         format,
         opt_level,
+        layout,
         bytecode_size,
         TRACE_LEN_LOG2 as usize,
         |cs| {
@@ -158,6 +167,7 @@ fn generate_circuit_command(
     output: &str,
     format: OutputFormat,
     opt_level: OptLevel,
+    layout: LlzkStructLayout,
     bytecode_size: usize,
     trace_len_log2: usize,
     synthesis_fn: impl Fn(&mut BasicAssembly<Mersenne31Field>),
@@ -178,6 +188,7 @@ fn generate_circuit_command(
     synthesis_fn(&mut cs);
 
     let (circuit_output, _maybe_wit_placer) = cs.finalize();
+    let substitutions = merge_llzk_placeholder_aliases(&circuit_output);
 
     // From this point we intentionally build two different artifacts from the same circuit:
     // - `compiled_artifact` is the column-layout view used by constraint lowering. It answers
@@ -188,6 +199,14 @@ fn generate_circuit_command(
     //
     // LLZK needs both: the compiled artifact tells us where writes land, while the SSA tells us
     // how to compute the values that should be written there.
+    //
+    // We also preserve the circuit's placeholder substitution map and enrich it with a small
+    // LLZK-only alias overlay. That overlay is intentionally local to this backend: several legacy
+    // shuffle-RAM witness placeholders are already represented by explicit LLZK inputs/outputs via
+    // `shuffle_ram_queries`, but the core circuit code does not record them in `substitutions`.
+    // Rather than changing client workflows in the shared circuit library, LLZK synthesizes those
+    // obvious aliases here so `@compute` and `@constrain` agree on the source of shuffle query
+    // values.
     let compiler = OneRowCompiler::<Mersenne31Field>::default();
     // The compilation process here also adds constraints.
     let compiled_artifact = compiler.compile_executor_circuit_assuming_preprocessed_bytecode(
@@ -195,7 +214,16 @@ fn generate_circuit_command(
         bytecode_size,
         trace_len_log2,
     );
-    let witness = WitnessComputation::new(compiled_artifact.clone(), witness_ssa_fn(&bytecode));
+    let witness = match layout {
+        LlzkStructLayout::ComputeConstrain
+        | LlzkStructLayout::Product
+        | LlzkStructLayout::ComputeOnly => Some(WitnessComputation::new(
+            compiled_artifact.clone(),
+            witness_ssa_fn(&bytecode),
+            substitutions,
+        )),
+        LlzkStructLayout::ConstrainOnly => None,
+    };
 
     // Generate an empty LLZK module
     let ctx = LlzkContext::new();
@@ -203,7 +231,7 @@ fn generate_circuit_command(
     let env: ModuleEnv<'_, Mersenne31Field> = ModuleEnv::new(&ctx, &module);
 
     // Add the circuit output to it.
-    let circuit_bundle = CircuitBundle::new(circuit_output, name, witness);
+    let circuit_bundle = CircuitBundle::new(name, layout, circuit_output, witness)?;
     circuit_bundle.emit_llzk(&env)?;
 
     // Verify the module
@@ -222,6 +250,84 @@ fn generate_circuit_command(
     write_result(&res, format, output, name)?;
 
     Ok(())
+}
+
+/// Merge the core circuit substitutions with the extra placeholder aliases that LLZK can derive
+/// from the extracted shuffle-RAM queries.
+///
+/// The shared circuit library already records substitutions for executor-state placeholders such as
+/// `PcInit`, but some legacy shuffle-RAM witness placeholders are only visible indirectly through
+/// `ShuffleRamMemQuery` values. LLZK treats those query values as part of the explicit function
+/// boundary, so it is safe to synthesize the matching placeholder aliases locally in this backend
+/// without changing the core witness-generation flow.
+fn merge_llzk_placeholder_aliases<F: prover::field::PrimeField>(
+    circuit_output: &CircuitOutput<F>,
+) -> HashMap<(Placeholder, usize), Variable> {
+    let mut substitutions = circuit_output.substitutions.clone();
+    for (key, variable) in
+        derive_shuffle_ram_placeholder_aliases(&circuit_output.shuffle_ram_queries)
+    {
+        substitutions.entry(key).or_insert(variable);
+    }
+    substitutions
+}
+
+/// Derive backend-local aliases for the legacy shuffle-RAM placeholders that are already exposed
+/// as LLZK boundary variables.
+///
+/// These aliases only cover read-side values. They are the cases where `CircuitOutput::get_inputs`
+/// already exports the same query values as LLZK inputs, so mapping the placeholder back to that
+/// input keeps `@compute` and `@constrain` aligned without requiring any shared-library changes.
+///
+/// The mapping intentionally mirrors the existing circuit construction helpers:
+/// - query 0 is the RS1 read slot (`FirstRegMem` / `ShuffleRamReadValue(0)`)
+/// - query 1 is the RS2 read slot (`SecondRegMem` / `ShuffleRamReadValue(1)`)
+/// - query 2 is the destination prior-value slot (`WriteRdReadSetWitness`,
+///   `WriteRegMemReadWitness`, and `ShuffleRamReadValue(2)`)
+fn derive_shuffle_ram_placeholder_aliases(
+    queries: &[ShuffleRamMemQuery],
+) -> HashMap<(Placeholder, usize), Variable> {
+    let mut aliases = HashMap::new();
+
+    for (query_index, query) in queries.iter().enumerate() {
+        insert_register_alias(
+            &mut aliases,
+            Placeholder::ShuffleRamReadValue(query_index),
+            query.read_value,
+        );
+    }
+
+    if let Some(query) = queries.first() {
+        insert_register_alias(&mut aliases, Placeholder::FirstRegMem, query.read_value);
+    }
+    if let Some(query) = queries.get(1) {
+        insert_register_alias(&mut aliases, Placeholder::SecondRegMem, query.read_value);
+    }
+    if let Some(query) = queries.get(2) {
+        insert_register_alias(
+            &mut aliases,
+            Placeholder::WriteRdReadSetWitness,
+            query.read_value,
+        );
+        insert_register_alias(
+            &mut aliases,
+            Placeholder::WriteRegMemReadWitness,
+            query.read_value,
+        );
+    }
+
+    aliases
+}
+
+/// Insert both limbs of a register-valued placeholder alias.
+fn insert_register_alias(
+    aliases: &mut HashMap<(Placeholder, usize), Variable>,
+    placeholder: Placeholder,
+    register: [Variable; 2],
+) {
+    for (subindex, variable) in register.into_iter().enumerate() {
+        aliases.entry((placeholder, subindex)).or_insert(variable);
+    }
 }
 
 fn write_result<'ctx>(
@@ -265,30 +371,6 @@ fn write_result<'ctx>(
     Ok(())
 }
 
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum OptLevel {
-    /// No optimizations
-    #[value(name = "0")]
-    O0,
-    /// Basic MLIR optimizations
-    #[value(name = "1")]
-    O1,
-    /// MLIR and LLZK optimizations
-    #[value(name = "2")]
-    O2,
-}
-
-impl std::fmt::Display for OptLevel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(
-            self.to_possible_value()
-                .expect("ValueEnum variant should always have a PossibleValue")
-                .get_name(),
-        )
-    }
-}
-
 fn run_optimizer_pipeline(
     ctx: &Context,
     module: &mut Module,
@@ -322,4 +404,70 @@ fn run_optimizer_pipeline(
 
     pm.run(module)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prover::cs::cs::circuit::ShuffleRamQueryType;
+
+    fn register_query(local_timestamp_in_cycle: usize, read_value: [u64; 2]) -> ShuffleRamMemQuery {
+        ShuffleRamMemQuery {
+            query_type: ShuffleRamQueryType::RegisterOnly {
+                register_index: Variable(100 + local_timestamp_in_cycle as u64),
+            },
+            local_timestamp_in_cycle,
+            read_value: [Variable(read_value[0]), Variable(read_value[1])],
+            write_value: [Variable(read_value[0]), Variable(read_value[1])],
+        }
+    }
+
+    #[test]
+    fn shuffle_placeholder_aliases_cover_legacy_register_reads() {
+        let aliases = derive_shuffle_ram_placeholder_aliases(&[
+            register_query(0, [10, 11]),
+            register_query(1, [20, 21]),
+            register_query(2, [30, 31]),
+        ]);
+
+        assert_eq!(aliases[&(Placeholder::FirstRegMem, 0)], Variable(10));
+        assert_eq!(aliases[&(Placeholder::FirstRegMem, 1)], Variable(11));
+        assert_eq!(aliases[&(Placeholder::SecondRegMem, 0)], Variable(20));
+        assert_eq!(aliases[&(Placeholder::SecondRegMem, 1)], Variable(21));
+        assert_eq!(
+            aliases[&(Placeholder::WriteRdReadSetWitness, 0)],
+            Variable(30)
+        );
+        assert_eq!(
+            aliases[&(Placeholder::WriteRegMemReadWitness, 1)],
+            Variable(31)
+        );
+    }
+
+    #[test]
+    fn shuffle_placeholder_aliases_cover_generic_shuffle_reads() {
+        let aliases = derive_shuffle_ram_placeholder_aliases(&[
+            register_query(0, [10, 11]),
+            register_query(1, [20, 21]),
+            register_query(2, [30, 31]),
+            register_query(3, [40, 41]),
+        ]);
+
+        assert_eq!(
+            aliases[&(Placeholder::ShuffleRamReadValue(0), 0)],
+            Variable(10)
+        );
+        assert_eq!(
+            aliases[&(Placeholder::ShuffleRamReadValue(1), 1)],
+            Variable(21)
+        );
+        assert_eq!(
+            aliases[&(Placeholder::ShuffleRamReadValue(2), 0)],
+            Variable(30)
+        );
+        assert_eq!(
+            aliases[&(Placeholder::ShuffleRamReadValue(3), 1)],
+            Variable(41)
+        );
+    }
 }
