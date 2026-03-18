@@ -105,10 +105,11 @@ pub trait VariableExtractor {
 
 impl<F: PrimeField> VariableExtractor for OpcodeFamilyCircuitState<F> {
     fn get_inputs(&self) -> Result<Vec<ExtractedVariable>> {
-        // These inputs are the canonical LLZK boundary view of executor machine state. The source
-        // circuit also tracks many of them through placeholder substitutions for the legacy
-        // witness/oracle path, and `@compute` lowers those placeholder reads back to these inputs
-        // so the same logical value is not derived from two unrelated sources downstream.
+        // The source
+        // circuit also tracks many of these executor machine inputs through placeholder
+        // substitutions for the witness/oracle path, so `@compute` lowers those placeholder
+        // reads back to these inputs so the same logical value is not derived from two
+        // unrelated sources downstream.
         let mut inputs = vec![
             ExtractedVariable::scalar(self.execute),
             ExtractedVariable::register(self.cycle_start_state.pc),
@@ -269,12 +270,14 @@ impl<'ctx, F: FieldInfo> EmitLlzkInModule<'ctx, F> for CircuitBundle<F> {
 
     fn emit_llzk(&self, env: &ModuleEnv<'ctx, F>) -> Result<Self::Output> {
         if !F::is_built_in() {
-            panic!("non-built-in fields are not yet supported in LLZK module emission")
+            // To support this, we would need to add a FieldSpecAttr on the root module.
+            todo!("non-built-in fields are not yet supported")
         }
 
-        // TODO: Support product program
         if matches!(self.layout, LlzkStructLayout::Product) {
-            anyhow::bail!("@product program generation is currently unsupported");
+            // To do this, we would continue to emit `@compute` and `@constrain` as we
+            // currently do, but would then run the product program pass afterwards.
+            todo!("@product program generation is currently unsupported");
         }
 
         let mut struct_builder = StructBuilder::new(env, self.name());
