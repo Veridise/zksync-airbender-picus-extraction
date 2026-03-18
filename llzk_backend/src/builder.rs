@@ -696,6 +696,12 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
         self.get_constant_from_start(self.felt_type(), i)
     }
 
+    /// Get an `i1` constant from the function prologue.
+    #[inline]
+    pub fn get_bool_constant_from_start(&self, value: bool) -> Result<Value<'ctx, 'sco>> {
+        self.get_constant_from_start(self.bool_type(), value as u64)
+    }
+
     /// Perform the index constant insertion without producing a return value.
     pub fn insert_constant_at_start(&self, r#type: Type<'ctx>, i: u64) -> Result<()> {
         let _ = self.get_constant_from_start(r#type, i)?;
@@ -756,6 +762,88 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
         values: &[Value<'ctx, 'sco>],
     ) -> Result<Value<'ctx, 'sco>> {
         self.append_fold::<_>(location, felt::mul, values)
+    }
+
+    /// Emit a generic `arith.select`, which works for both LLZK felts and builtin integer types.
+    pub fn append_select_value(
+        &self,
+        condition: Value<'ctx, 'sco>,
+        if_true: Value<'ctx, 'sco>,
+        if_false: Value<'ctx, 'sco>,
+    ) -> Result<Value<'ctx, 'sco>> {
+        self.append_op_with_result(arith::select(
+            condition,
+            if_true,
+            if_false,
+            self.unknown_location(),
+        ))
+    }
+
+    /// Return an `i1` indicating whether the felt value is non-zero.
+    pub fn append_field_is_nonzero(&self, value: Value<'ctx, 'sco>) -> Result<Value<'ctx, 'sco>> {
+        self.append_op_with_result(bool::ne(
+            self.unknown_location(),
+            value,
+            self.get_felt_constant_from_start(0)?,
+        )?)
+    }
+
+    /// Convert an `i1` condition into the felt encoding used by witness columns.
+    pub fn append_bool_to_field(&self, value: Value<'ctx, 'sco>) -> Result<Value<'ctx, 'sco>> {
+        self.append_select_value(
+            value,
+            self.get_felt_constant_from_start(1)?,
+            self.get_felt_constant_from_start(0)?,
+        )
+    }
+
+    /// Reduce a felt value modulo `2^bits`.
+    pub fn append_lowest_bits_felt(
+        &self,
+        value: Value<'ctx, 'sco>,
+        bits: u32,
+    ) -> Result<Value<'ctx, 'sco>> {
+        if bits == 0 {
+            return self.get_felt_constant_from_start(0);
+        }
+        let modulus = 1u64 << bits;
+        self.append_op_with_result(felt::umod(
+            self.unknown_location(),
+            value,
+            self.get_felt_constant_from_start(modulus)?,
+        )?)
+    }
+
+    /// Compare a felt-encoded small integer against a literal.
+    pub fn append_field_eq_constant(
+        &self,
+        value: Value<'ctx, 'sco>,
+        constant: u64,
+    ) -> Result<Value<'ctx, 'sco>> {
+        self.append_op_with_result(bool::eq(
+            self.unknown_location(),
+            value,
+            self.get_felt_constant_from_start(constant)?,
+        )?)
+    }
+
+    /// Extract a small bit-slice from a felt-encoded value.
+    pub fn append_shifted_low_bits(
+        &self,
+        value: Value<'ctx, 'sco>,
+        shift: u64,
+        bits: u32,
+    ) -> Result<Value<'ctx, 'sco>> {
+        let shifted = if shift == 0 {
+            value
+        } else {
+            self.append_op_with_result(felt::shr(
+                self.unknown_location(),
+                value,
+                self.get_felt_constant_from_start(shift)?,
+            )?)?
+        };
+        self.append_lowest_bits_felt(shifted, bits)
     }
 
     /// Append a multiplication by the given constant felt value using `felt.mul`.

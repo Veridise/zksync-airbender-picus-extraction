@@ -16,13 +16,13 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::ops::Deref;
 
 use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Result;
 use llzk::dialect::bool;
 use llzk::dialect::felt;
-use llzk::prelude::melior_dialects::arith;
 use llzk::prelude::*;
 use prover::common_constants;
 use prover::cs::cs::placeholder::Placeholder;
@@ -48,6 +48,7 @@ use crate::field::FieldInfo;
 const U8_MODULUS: u64 = 1 << 8;
 const U16_MODULUS: u64 = 1 << 16;
 
+// Function names for oracle calls.
 const READ_FROM_ROM_EXTERN: &str = "read_from_rom";
 const READ_FROM_MEMORY_SUBTREE_EXTERN: &str = "read_from_memory_subtree";
 const WRITE_TO_MEMORY_SUBTREE_EXTERN: &str = "write_to_memory_subtree";
@@ -183,11 +184,37 @@ fn encode_oracle_placeholder(placeholder: Placeholder) -> EncodedOraclePlacehold
     EncodedOraclePlaceholder { kind, arg0, arg1 }
 }
 
+/// Trait implemented by SSA witness nodes that can emit LLZK IR inside a struct `@compute`
+/// function.
+trait EmitLlzkInCompute<'a, 'ctx: 'sco, 'sco, F: FieldInfo> {
+    type Output;
+
+    fn emit_compute(
+        &self,
+        lowering: &mut ComputeLowering<'a, 'ctx, 'sco, F>,
+    ) -> Result<Self::Output>;
+}
+
+impl<'a, 'ctx: 'sco, 'sco, F, T> EmitLlzkInCompute<'a, 'ctx, 'sco, F> for Vec<T>
+where
+    F: FieldInfo,
+    T: EmitLlzkInCompute<'a, 'ctx, 'sco, F, Output = ()>,
+{
+    type Output = ();
+
+    fn emit_compute(
+        &self,
+        lowering: &mut ComputeLowering<'a, 'ctx, 'sco, F>,
+    ) -> Result<Self::Output> {
+        self.iter().try_for_each(|expr| expr.emit_compute(lowering))
+    }
+}
+
 /// Bundles the metadata required to lower witness generation into LLZK `@compute`.
 ///
 /// The compiled artifact tells us where every logical variable lives in the witness layout, the
 /// SSA blocks preserve the witness placer's evaluation order and conditional write structure, and
-/// the placeholder substitution map lets us recognize when legacy oracle-style SSA inputs are
+/// the placeholder substitution map lets us recognize when oracle-style SSA inputs are
 /// actually aliases of explicit LLZK `@compute` arguments.
 pub(crate) struct WitnessComputation<F: FieldInfo> {
     compiled: CompiledCircuitArtifact<F>,
@@ -202,7 +229,7 @@ impl<F: FieldInfo> WitnessComputation<F> {
     /// The substitution map is what lets LLZK avoid deriving the same machine-state input from two
     /// different sources. When a placeholder such as `PcInit` already names an explicit
     /// `@compute` argument, witness lowering reads the argument and only falls back to an oracle
-    /// hook for placeholders that remain true runtime-only data.
+    /// hook for placeholders that remain true runtime-only data (like ROM reads).
     pub fn new(
         compiled: CompiledCircuitArtifact<F>,
         ssa: Vec<Vec<RawExpression<F>>>,
@@ -224,59 +251,45 @@ impl<F: FieldInfo> WitnessComputation<F> {
                 }
                 Ok(())
             };
+        let bool_type = env.bool_type();
+        let felt_type = env.felt_type();
+        let index_type = env.index_type();
 
-        maybe_declare(
-            READ_FROM_ROM_EXTERN,
-            &[env.felt_type()],
-            &[env.felt_type(), env.felt_type()],
-        )?;
-        maybe_declare(
-            READ_FROM_MEMORY_SUBTREE_EXTERN,
-            &[env.index_type()],
-            &[env.felt_type()],
-        )?;
+        maybe_declare(READ_FROM_ROM_EXTERN, &[felt_type], &[felt_type, felt_type])?;
+        maybe_declare(READ_FROM_MEMORY_SUBTREE_EXTERN, &[index_type], &[felt_type])?;
         maybe_declare(
             WRITE_TO_MEMORY_SUBTREE_EXTERN,
-            &[env.index_type(), env.felt_type()],
+            &[index_type, felt_type],
             &[],
         )?;
         maybe_declare(
             READ_ORACLE_FIELD_EXTERN,
-            &[
-                env.felt_type(),
-                env.felt_type(),
-                env.felt_type(),
-                env.felt_type(),
-            ],
-            &[env.felt_type()],
+            &[felt_type, felt_type, felt_type, felt_type],
+            &[felt_type],
         )?;
         maybe_declare(
             READ_ORACLE_BOOL_EXTERN,
-            &[env.felt_type(), env.felt_type(), env.felt_type()],
-            &[env.bool_type()],
+            &[felt_type, felt_type, felt_type],
+            &[bool_type],
         )?;
         maybe_declare(
             READ_ORACLE_U8_EXTERN,
-            &[env.felt_type(), env.felt_type(), env.felt_type()],
-            &[env.felt_type()],
+            &[felt_type, felt_type, felt_type],
+            &[felt_type],
         )?;
         maybe_declare(
             READ_ORACLE_U16_EXTERN,
-            &[env.felt_type(), env.felt_type(), env.felt_type()],
-            &[env.felt_type()],
+            &[felt_type, felt_type, felt_type],
+            &[felt_type],
         )?;
         maybe_declare(
             READ_ORACLE_U32_EXTERN,
-            &[env.felt_type(), env.felt_type(), env.felt_type()],
-            &[env.felt_type(), env.felt_type()],
+            &[felt_type, felt_type, felt_type],
+            &[felt_type, felt_type],
         )
     }
 
     /// Emit LLZK operations that reconstruct witness columns inside a struct `@compute` function.
-    ///
-    /// The lowering intentionally follows the SSA block structure produced by the witness placer so
-    /// that every new helper can be reviewed against the existing Rust witness evaluator one block
-    /// at a time.
     pub fn emit_compute<'ctx, 'sco>(
         &self,
         builder: &OpsBuilder<'ctx, 'sco, F>,
@@ -308,9 +321,10 @@ impl<F: FieldInfo> WitnessComputation<F> {
     /// The scan intentionally over-approximates. If it is unsure, it reports `true` and keeps the
     /// write.
     fn has_runtime_memory_reads(&self, vars: &StructVars<F>) -> bool {
-        self.ssa.iter().flatten().any(|expr| {
-            raw_expression_reads_runtime_memory(expr, &self.compiled.variable_mapping, vars)
-        })
+        self.ssa
+            .iter()
+            .flatten()
+            .any(|expr| expr.uses_runtime_memory(&self.compiled.variable_mapping, vars))
     }
 }
 
@@ -350,371 +364,249 @@ enum SsaSlot<'ctx, 'sco> {
     Unit,
 }
 
-/// Trait implemented by SSA witness nodes that can emit LLZK IR inside a struct `@compute`
-/// function.
-trait EmitLlzkInCompute<'a, 'ctx: 'sco, 'sco, F: FieldInfo> {
-    type Output;
-
-    fn emit_compute(
+/// Returns whether evaluating this SSA node would require reading runtime memory rather
+/// than consuming values already exposed as LLZK struct member or input argument.
+trait UsesRuntimeMemory<F: FieldInfo> {
+    fn uses_runtime_memory(
         &self,
-        lowering: &mut ComputeLowering<'a, 'ctx, 'sco, F>,
-    ) -> Result<Self::Output>;
+        variable_mapping: &BTreeMap<Variable, ColumnAddress>,
+        vars: &StructVars<F>,
+    ) -> bool;
 }
 
-impl<'a, 'ctx: 'sco, 'sco, F, T> EmitLlzkInCompute<'a, 'ctx, 'sco, F> for Vec<T>
-where
-    F: FieldInfo,
-    T: EmitLlzkInCompute<'a, 'ctx, 'sco, F, Output = ()>,
-{
-    type Output = ();
-
-    fn emit_compute(
+impl<F: FieldInfo> UsesRuntimeMemory<F> for Variable {
+    fn uses_runtime_memory(
         &self,
-        lowering: &mut ComputeLowering<'a, 'ctx, 'sco, F>,
-    ) -> Result<Self::Output> {
-        self.iter().try_for_each(|expr| expr.emit_compute(lowering))
+        variable_mapping: &BTreeMap<Variable, ColumnAddress>,
+        vars: &StructVars<F>,
+    ) -> bool {
+        matches!(
+            variable_mapping.get(self),
+            Some(ColumnAddress::MemorySubtree(_))
+        ) && !vars.is_compute_exposed(self)
     }
 }
 
-/// Borrowed view of the SSA lookup forms that need dedicated lowering.
-///
-/// Keeping these variants separate from the rest of [`RawExpression`] mirrors the constraint-side
-/// organization more closely: generic expression dispatch stays in `RawExpression`, while lookup
-/// semantics live behind their own lowering implementation.
-enum LookupInvocation {
-    Perform {
-        input_subexpr_idxes: Box<[usize]>,
-        table_id_subexpr_idx: usize,
-        num_outputs: usize,
-        lookup_mapping_idx: usize,
-    },
-    MaybePerform {
-        input_subexpr_idxes: Box<[usize]>,
-        table_id_subexpr_idx: usize,
-        mask_id_subexpr_idx: usize,
-        num_outputs: usize,
-    },
-}
-
-impl LookupInvocation {
-    fn from_raw<F: PrimeField>(expr: &RawExpression<F>) -> Option<Self> {
-        match expr {
-            RawExpression::PerformLookup {
-                input_subexpr_idxes,
-                table_id_subexpr_idx,
-                num_outputs,
-                lookup_mapping_idx,
-            } => Some(Self::Perform {
-                input_subexpr_idxes: input_subexpr_idxes.clone(),
-                table_id_subexpr_idx: *table_id_subexpr_idx,
-                num_outputs: *num_outputs,
-                lookup_mapping_idx: *lookup_mapping_idx,
-            }),
-            RawExpression::MaybePerformLookup {
-                input_subexpr_idxes,
-                table_id_subexpr_idx,
-                mask_id_subexpr_idx,
-                num_outputs,
-            } => Some(Self::MaybePerform {
-                input_subexpr_idxes: input_subexpr_idxes.clone(),
-                table_id_subexpr_idx: *table_id_subexpr_idx,
-                mask_id_subexpr_idx: *mask_id_subexpr_idx,
-                num_outputs: *num_outputs,
-            }),
-            _ => None,
-        }
-    }
-
-    fn input_subexpr_idxes(&self) -> &[usize] {
+impl<F: FieldInfo> UsesRuntimeMemory<F> for Expression<F> {
+    fn uses_runtime_memory(
+        &self,
+        variable_mapping: &BTreeMap<Variable, ColumnAddress>,
+        vars: &StructVars<F>,
+    ) -> bool {
         match self {
-            Self::Perform {
-                input_subexpr_idxes,
-                ..
-            }
-            | Self::MaybePerform {
-                input_subexpr_idxes,
-                ..
-            } => input_subexpr_idxes,
-        }
-    }
-
-    fn table_id_subexpr_idx(&self) -> usize {
-        match self {
-            Self::Perform {
-                table_id_subexpr_idx,
-                ..
-            }
-            | Self::MaybePerform {
-                table_id_subexpr_idx,
-                ..
-            } => *table_id_subexpr_idx,
-        }
-    }
-
-    fn num_outputs(&self) -> usize {
-        match self {
-            Self::Perform { num_outputs, .. } | Self::MaybePerform { num_outputs, .. } => {
-                *num_outputs
+            Expression::Bool(expr) => expr.uses_runtime_memory(variable_mapping, vars),
+            Expression::Field(expr) => expr.uses_runtime_memory(variable_mapping, vars),
+            Expression::U8(expr) | Expression::U16(expr) | Expression::U32(expr) => {
+                expr.uses_runtime_memory(variable_mapping, vars)
             }
         }
     }
+}
 
-    fn lookup_mapping_idx(&self) -> Option<usize> {
+impl<F: FieldInfo> UsesRuntimeMemory<F> for FieldNodeExpression<F> {
+    fn uses_runtime_memory(
+        &self,
+        variable_mapping: &BTreeMap<Variable, ColumnAddress>,
+        vars: &StructVars<F>,
+    ) -> bool {
         match self {
-            Self::Perform {
-                lookup_mapping_idx, ..
-            } => Some(*lookup_mapping_idx),
-            Self::MaybePerform { .. } => None,
+            FieldNodeExpression::Place(variable) => {
+                variable.uses_runtime_memory(variable_mapping, vars)
+            }
+            FieldNodeExpression::SubExpression(..)
+            | FieldNodeExpression::Constant(..)
+            | FieldNodeExpression::OracleValue { .. }
+            | FieldNodeExpression::LookupOutput { .. }
+            | FieldNodeExpression::MaybeLookupOutput { .. } => false,
+            FieldNodeExpression::FromInteger(expr) => {
+                expr.uses_runtime_memory(variable_mapping, vars)
+            }
+            FieldNodeExpression::FromMask(expr) => expr.uses_runtime_memory(variable_mapping, vars),
+            FieldNodeExpression::Add { lhs, rhs }
+            | FieldNodeExpression::Sub { lhs, rhs }
+            | FieldNodeExpression::Mul { lhs, rhs } => {
+                lhs.uses_runtime_memory(variable_mapping, vars)
+                    || rhs.uses_runtime_memory(variable_mapping, vars)
+            }
+            FieldNodeExpression::AddProduct {
+                additive_term,
+                mul_0,
+                mul_1,
+            } => {
+                additive_term.uses_runtime_memory(variable_mapping, vars)
+                    || mul_0.uses_runtime_memory(variable_mapping, vars)
+                    || mul_1.uses_runtime_memory(variable_mapping, vars)
+            }
+            FieldNodeExpression::Select {
+                selector,
+                if_true,
+                if_false,
+            } => {
+                selector.uses_runtime_memory(variable_mapping, vars)
+                    || if_true.uses_runtime_memory(variable_mapping, vars)
+                    || if_false.uses_runtime_memory(variable_mapping, vars)
+            }
+            FieldNodeExpression::InverseUnchecked(expr)
+            | FieldNodeExpression::InverseOrZero(expr) => {
+                expr.uses_runtime_memory(variable_mapping, vars)
+            }
         }
     }
+}
 
-    fn mask_id_subexpr_idx(&self) -> Option<usize> {
+impl<F: FieldInfo> UsesRuntimeMemory<F> for BoolNodeExpression<F> {
+    fn uses_runtime_memory(
+        &self,
+        variable_mapping: &BTreeMap<Variable, ColumnAddress>,
+        vars: &StructVars<F>,
+    ) -> bool {
         match self {
-            Self::Perform { .. } => None,
-            Self::MaybePerform {
-                mask_id_subexpr_idx,
-                ..
-            } => Some(*mask_id_subexpr_idx),
+            BoolNodeExpression::Place(variable) => {
+                variable.uses_runtime_memory(variable_mapping, vars)
+            }
+            BoolNodeExpression::SubExpression(..)
+            | BoolNodeExpression::Constant(..)
+            | BoolNodeExpression::OracleValue { .. } => false,
+            BoolNodeExpression::FromGenericInteger(expr) => {
+                expr.uses_runtime_memory(variable_mapping, vars)
+            }
+            BoolNodeExpression::FromGenericIntegerEquality { lhs, rhs }
+            | BoolNodeExpression::FromGenericIntegerCarry { lhs, rhs }
+            | BoolNodeExpression::FromGenericIntegerBorrow { lhs, rhs } => {
+                lhs.uses_runtime_memory(variable_mapping, vars)
+                    || rhs.uses_runtime_memory(variable_mapping, vars)
+            }
+            BoolNodeExpression::FromField(expr) => expr.uses_runtime_memory(variable_mapping, vars),
+            BoolNodeExpression::FromFieldEquality { lhs, rhs } => {
+                lhs.uses_runtime_memory(variable_mapping, vars)
+                    || rhs.uses_runtime_memory(variable_mapping, vars)
+            }
+            BoolNodeExpression::And { lhs, rhs } | BoolNodeExpression::Or { lhs, rhs } => {
+                lhs.uses_runtime_memory(variable_mapping, vars)
+                    || rhs.uses_runtime_memory(variable_mapping, vars)
+            }
+            BoolNodeExpression::Select {
+                selector,
+                if_true,
+                if_false,
+            } => {
+                selector.uses_runtime_memory(variable_mapping, vars)
+                    || if_true.uses_runtime_memory(variable_mapping, vars)
+                    || if_false.uses_runtime_memory(variable_mapping, vars)
+            }
+            BoolNodeExpression::Negate(expr) => expr.uses_runtime_memory(variable_mapping, vars),
         }
     }
 }
 
-fn variable_uses_runtime_memory<F: FieldInfo>(
-    variable: Variable,
-    variable_mapping: &BTreeMap<Variable, ColumnAddress>,
-    vars: &StructVars<F>,
-) -> bool {
-    matches!(
-        variable_mapping.get(&variable),
-        Some(ColumnAddress::MemorySubtree(_))
-    ) && !vars.is_compute_exposed(&variable)
-}
-
-fn expression_reads_runtime_memory<F: FieldInfo>(
-    expr: &Expression<F>,
-    variable_mapping: &BTreeMap<Variable, ColumnAddress>,
-    vars: &StructVars<F>,
-) -> bool {
-    match expr {
-        Expression::Bool(expr) => {
-            bool_expression_reads_runtime_memory(expr, variable_mapping, vars)
-        }
-        Expression::Field(expr) => {
-            field_expression_reads_runtime_memory(expr, variable_mapping, vars)
-        }
-        Expression::U8(expr) | Expression::U16(expr) | Expression::U32(expr) => {
-            integer_expression_reads_runtime_memory(expr, variable_mapping, vars)
-        }
-    }
-}
-
-fn field_expression_reads_runtime_memory<F: FieldInfo>(
-    expr: &FieldNodeExpression<F>,
-    variable_mapping: &BTreeMap<Variable, ColumnAddress>,
-    vars: &StructVars<F>,
-) -> bool {
-    match expr {
-        FieldNodeExpression::Place(variable) => {
-            variable_uses_runtime_memory(*variable, variable_mapping, vars)
-        }
-        FieldNodeExpression::SubExpression(..)
-        | FieldNodeExpression::Constant(..)
-        | FieldNodeExpression::OracleValue { .. }
-        | FieldNodeExpression::LookupOutput { .. }
-        | FieldNodeExpression::MaybeLookupOutput { .. } => false,
-        FieldNodeExpression::FromInteger(expr) => {
-            integer_expression_reads_runtime_memory(expr, variable_mapping, vars)
-        }
-        FieldNodeExpression::FromMask(expr) => {
-            bool_expression_reads_runtime_memory(expr, variable_mapping, vars)
-        }
-        FieldNodeExpression::Add { lhs, rhs }
-        | FieldNodeExpression::Sub { lhs, rhs }
-        | FieldNodeExpression::Mul { lhs, rhs } => {
-            field_expression_reads_runtime_memory(lhs, variable_mapping, vars)
-                || field_expression_reads_runtime_memory(rhs, variable_mapping, vars)
-        }
-        FieldNodeExpression::AddProduct {
-            additive_term,
-            mul_0,
-            mul_1,
-        } => {
-            field_expression_reads_runtime_memory(additive_term, variable_mapping, vars)
-                || field_expression_reads_runtime_memory(mul_0, variable_mapping, vars)
-                || field_expression_reads_runtime_memory(mul_1, variable_mapping, vars)
-        }
-        FieldNodeExpression::Select {
-            selector,
-            if_true,
-            if_false,
-        } => {
-            bool_expression_reads_runtime_memory(selector, variable_mapping, vars)
-                || field_expression_reads_runtime_memory(if_true, variable_mapping, vars)
-                || field_expression_reads_runtime_memory(if_false, variable_mapping, vars)
-        }
-        FieldNodeExpression::InverseUnchecked(expr) | FieldNodeExpression::InverseOrZero(expr) => {
-            field_expression_reads_runtime_memory(expr, variable_mapping, vars)
-        }
-    }
-}
-
-fn bool_expression_reads_runtime_memory<F: FieldInfo>(
-    expr: &BoolNodeExpression<F>,
-    variable_mapping: &BTreeMap<Variable, ColumnAddress>,
-    vars: &StructVars<F>,
-) -> bool {
-    match expr {
-        BoolNodeExpression::Place(variable) => {
-            variable_uses_runtime_memory(*variable, variable_mapping, vars)
-        }
-        BoolNodeExpression::SubExpression(..)
-        | BoolNodeExpression::Constant(..)
-        | BoolNodeExpression::OracleValue { .. } => false,
-        BoolNodeExpression::FromGenericInteger(expr) => {
-            integer_expression_reads_runtime_memory(expr, variable_mapping, vars)
-        }
-        BoolNodeExpression::FromGenericIntegerEquality { lhs, rhs }
-        | BoolNodeExpression::FromGenericIntegerCarry { lhs, rhs }
-        | BoolNodeExpression::FromGenericIntegerBorrow { lhs, rhs } => {
-            integer_expression_reads_runtime_memory(lhs, variable_mapping, vars)
-                || integer_expression_reads_runtime_memory(rhs, variable_mapping, vars)
-        }
-        BoolNodeExpression::FromField(expr) => {
-            field_expression_reads_runtime_memory(expr, variable_mapping, vars)
-        }
-        BoolNodeExpression::FromFieldEquality { lhs, rhs } => {
-            field_expression_reads_runtime_memory(lhs, variable_mapping, vars)
-                || field_expression_reads_runtime_memory(rhs, variable_mapping, vars)
-        }
-        BoolNodeExpression::And { lhs, rhs } | BoolNodeExpression::Or { lhs, rhs } => {
-            bool_expression_reads_runtime_memory(lhs, variable_mapping, vars)
-                || bool_expression_reads_runtime_memory(rhs, variable_mapping, vars)
-        }
-        BoolNodeExpression::Select {
-            selector,
-            if_true,
-            if_false,
-        } => {
-            bool_expression_reads_runtime_memory(selector, variable_mapping, vars)
-                || bool_expression_reads_runtime_memory(if_true, variable_mapping, vars)
-                || bool_expression_reads_runtime_memory(if_false, variable_mapping, vars)
-        }
-        BoolNodeExpression::Negate(expr) => {
-            bool_expression_reads_runtime_memory(expr, variable_mapping, vars)
+impl<F: FieldInfo> UsesRuntimeMemory<F> for FixedWidthIntegerNodeExpression<F> {
+    fn uses_runtime_memory(
+        &self,
+        variable_mapping: &BTreeMap<Variable, ColumnAddress>,
+        vars: &StructVars<F>,
+    ) -> bool {
+        match self {
+            FixedWidthIntegerNodeExpression::U8Place(variable)
+            | FixedWidthIntegerNodeExpression::U16Place(variable) => {
+                variable.uses_runtime_memory(variable_mapping, vars)
+            }
+            FixedWidthIntegerNodeExpression::U8SubExpression(..)
+            | FixedWidthIntegerNodeExpression::U16SubExpression(..)
+            | FixedWidthIntegerNodeExpression::U32SubExpression(..)
+            | FixedWidthIntegerNodeExpression::U32OracleValue { .. }
+            | FixedWidthIntegerNodeExpression::U16OracleValue { .. }
+            | FixedWidthIntegerNodeExpression::U8OracleValue { .. }
+            | FixedWidthIntegerNodeExpression::ConstantU8(..)
+            | FixedWidthIntegerNodeExpression::ConstantU16(..)
+            | FixedWidthIntegerNodeExpression::ConstantU32(..) => false,
+            FixedWidthIntegerNodeExpression::U32FromMask(expr) => {
+                expr.uses_runtime_memory(variable_mapping, vars)
+            }
+            FixedWidthIntegerNodeExpression::U32FromField(expr) => {
+                expr.uses_runtime_memory(variable_mapping, vars)
+            }
+            FixedWidthIntegerNodeExpression::WidenFromU8(expr)
+            | FixedWidthIntegerNodeExpression::WidenFromU16(expr)
+            | FixedWidthIntegerNodeExpression::TruncateFromU16(expr)
+            | FixedWidthIntegerNodeExpression::TruncateFromU32(expr)
+            | FixedWidthIntegerNodeExpression::I32FromU32(expr)
+            | FixedWidthIntegerNodeExpression::U32FromI32(expr)
+            | FixedWidthIntegerNodeExpression::BinaryNot(expr) => {
+                expr.uses_runtime_memory(variable_mapping, vars)
+            }
+            FixedWidthIntegerNodeExpression::Select {
+                selector,
+                if_true,
+                if_false,
+            } => {
+                selector.uses_runtime_memory(variable_mapping, vars)
+                    || if_true.uses_runtime_memory(variable_mapping, vars)
+                    || if_false.uses_runtime_memory(variable_mapping, vars)
+            }
+            FixedWidthIntegerNodeExpression::WrappingAdd { lhs, rhs }
+            | FixedWidthIntegerNodeExpression::WrappingSub { lhs, rhs }
+            | FixedWidthIntegerNodeExpression::BinaryAnd { lhs, rhs }
+            | FixedWidthIntegerNodeExpression::BinaryOr { lhs, rhs }
+            | FixedWidthIntegerNodeExpression::BinaryXor { lhs, rhs }
+            | FixedWidthIntegerNodeExpression::MulLow { lhs, rhs }
+            | FixedWidthIntegerNodeExpression::MulHigh { lhs, rhs }
+            | FixedWidthIntegerNodeExpression::DivAssumeNonzero { lhs, rhs }
+            | FixedWidthIntegerNodeExpression::RemAssumeNonzero { lhs, rhs }
+            | FixedWidthIntegerNodeExpression::SignedDivAssumeNonzeroNoOverflowBits { lhs, rhs }
+            | FixedWidthIntegerNodeExpression::SignedRemAssumeNonzeroNoOverflowBits { lhs, rhs }
+            | FixedWidthIntegerNodeExpression::SignedMulLowBits { lhs, rhs }
+            | FixedWidthIntegerNodeExpression::SignedMulHighBits { lhs, rhs }
+            | FixedWidthIntegerNodeExpression::SignedByUnsignedMulLowBits { lhs, rhs }
+            | FixedWidthIntegerNodeExpression::SignedByUnsignedMulHighBits { lhs, rhs } => {
+                lhs.uses_runtime_memory(variable_mapping, vars)
+                    || rhs.uses_runtime_memory(variable_mapping, vars)
+            }
+            FixedWidthIntegerNodeExpression::WrappingShl { lhs, .. }
+            | FixedWidthIntegerNodeExpression::WrappingShr { lhs, .. } => {
+                lhs.uses_runtime_memory(variable_mapping, vars)
+            }
+            FixedWidthIntegerNodeExpression::LowestBits { value, .. } => {
+                value.uses_runtime_memory(variable_mapping, vars)
+            }
+            FixedWidthIntegerNodeExpression::AddProduct {
+                additive_term,
+                mul_0,
+                mul_1,
+            } => {
+                additive_term.uses_runtime_memory(variable_mapping, vars)
+                    || mul_0.uses_runtime_memory(variable_mapping, vars)
+                    || mul_1.uses_runtime_memory(variable_mapping, vars)
+            }
         }
     }
 }
 
-fn integer_expression_reads_runtime_memory<F: FieldInfo>(
-    expr: &FixedWidthIntegerNodeExpression<F>,
-    variable_mapping: &BTreeMap<Variable, ColumnAddress>,
-    vars: &StructVars<F>,
-) -> bool {
-    match expr {
-        FixedWidthIntegerNodeExpression::U8Place(variable)
-        | FixedWidthIntegerNodeExpression::U16Place(variable) => {
-            variable_uses_runtime_memory(*variable, variable_mapping, vars)
-        }
-        FixedWidthIntegerNodeExpression::U8SubExpression(..)
-        | FixedWidthIntegerNodeExpression::U16SubExpression(..)
-        | FixedWidthIntegerNodeExpression::U32SubExpression(..)
-        | FixedWidthIntegerNodeExpression::U32OracleValue { .. }
-        | FixedWidthIntegerNodeExpression::U16OracleValue { .. }
-        | FixedWidthIntegerNodeExpression::U8OracleValue { .. }
-        | FixedWidthIntegerNodeExpression::ConstantU8(..)
-        | FixedWidthIntegerNodeExpression::ConstantU16(..)
-        | FixedWidthIntegerNodeExpression::ConstantU32(..) => false,
-        FixedWidthIntegerNodeExpression::U32FromMask(expr) => {
-            bool_expression_reads_runtime_memory(expr, variable_mapping, vars)
-        }
-        FixedWidthIntegerNodeExpression::U32FromField(expr) => {
-            field_expression_reads_runtime_memory(expr, variable_mapping, vars)
-        }
-        FixedWidthIntegerNodeExpression::WidenFromU8(expr)
-        | FixedWidthIntegerNodeExpression::WidenFromU16(expr)
-        | FixedWidthIntegerNodeExpression::TruncateFromU16(expr)
-        | FixedWidthIntegerNodeExpression::TruncateFromU32(expr)
-        | FixedWidthIntegerNodeExpression::I32FromU32(expr)
-        | FixedWidthIntegerNodeExpression::U32FromI32(expr)
-        | FixedWidthIntegerNodeExpression::BinaryNot(expr) => {
-            integer_expression_reads_runtime_memory(expr, variable_mapping, vars)
-        }
-        FixedWidthIntegerNodeExpression::Select {
-            selector,
-            if_true,
-            if_false,
-        } => {
-            bool_expression_reads_runtime_memory(selector, variable_mapping, vars)
-                || integer_expression_reads_runtime_memory(if_true, variable_mapping, vars)
-                || integer_expression_reads_runtime_memory(if_false, variable_mapping, vars)
-        }
-        FixedWidthIntegerNodeExpression::WrappingAdd { lhs, rhs }
-        | FixedWidthIntegerNodeExpression::WrappingSub { lhs, rhs }
-        | FixedWidthIntegerNodeExpression::BinaryAnd { lhs, rhs }
-        | FixedWidthIntegerNodeExpression::BinaryOr { lhs, rhs }
-        | FixedWidthIntegerNodeExpression::BinaryXor { lhs, rhs }
-        | FixedWidthIntegerNodeExpression::MulLow { lhs, rhs }
-        | FixedWidthIntegerNodeExpression::MulHigh { lhs, rhs }
-        | FixedWidthIntegerNodeExpression::DivAssumeNonzero { lhs, rhs }
-        | FixedWidthIntegerNodeExpression::RemAssumeNonzero { lhs, rhs }
-        | FixedWidthIntegerNodeExpression::SignedDivAssumeNonzeroNoOverflowBits { lhs, rhs }
-        | FixedWidthIntegerNodeExpression::SignedRemAssumeNonzeroNoOverflowBits { lhs, rhs }
-        | FixedWidthIntegerNodeExpression::SignedMulLowBits { lhs, rhs }
-        | FixedWidthIntegerNodeExpression::SignedMulHighBits { lhs, rhs }
-        | FixedWidthIntegerNodeExpression::SignedByUnsignedMulLowBits { lhs, rhs }
-        | FixedWidthIntegerNodeExpression::SignedByUnsignedMulHighBits { lhs, rhs } => {
-            integer_expression_reads_runtime_memory(lhs, variable_mapping, vars)
-                || integer_expression_reads_runtime_memory(rhs, variable_mapping, vars)
-        }
-        FixedWidthIntegerNodeExpression::WrappingShl { lhs, .. }
-        | FixedWidthIntegerNodeExpression::WrappingShr { lhs, .. } => {
-            integer_expression_reads_runtime_memory(lhs, variable_mapping, vars)
-        }
-        FixedWidthIntegerNodeExpression::LowestBits { value, .. } => {
-            integer_expression_reads_runtime_memory(value, variable_mapping, vars)
-        }
-        FixedWidthIntegerNodeExpression::AddProduct {
-            additive_term,
-            mul_0,
-            mul_1,
-        } => {
-            integer_expression_reads_runtime_memory(additive_term, variable_mapping, vars)
-                || integer_expression_reads_runtime_memory(mul_0, variable_mapping, vars)
-                || integer_expression_reads_runtime_memory(mul_1, variable_mapping, vars)
-        }
-    }
-}
-
-fn raw_expression_reads_runtime_memory<F: FieldInfo>(
-    expr: &RawExpression<F>,
-    variable_mapping: &BTreeMap<Variable, ColumnAddress>,
-    vars: &StructVars<F>,
-) -> bool {
-    match expr {
-        RawExpression::Bool(expr) => {
-            bool_expression_reads_runtime_memory(expr, variable_mapping, vars)
-        }
-        RawExpression::Field(expr) => {
-            field_expression_reads_runtime_memory(expr, variable_mapping, vars)
-        }
-        RawExpression::Integer(expr) => {
-            integer_expression_reads_runtime_memory(expr, variable_mapping, vars)
-        }
-        RawExpression::AccessLookup { .. }
-        | RawExpression::PerformLookup { .. }
-        | RawExpression::MaybePerformLookup { .. } => false,
-        RawExpression::WriteVariable {
-            into_variable,
-            source_subexpr,
-            condition_subexpr_idx,
-        } => {
-            expression_reads_runtime_memory(source_subexpr, variable_mapping, vars)
-                || (condition_subexpr_idx.is_some()
-                    && matches!(
-                        variable_mapping.get(into_variable),
-                        Some(ColumnAddress::MemorySubtree(_))
-                    )
-                    && !vars.has_member(into_variable))
+impl<F: FieldInfo> UsesRuntimeMemory<F> for RawExpression<F> {
+    fn uses_runtime_memory(
+        &self,
+        variable_mapping: &BTreeMap<Variable, ColumnAddress>,
+        vars: &StructVars<F>,
+    ) -> bool {
+        match self {
+            RawExpression::Bool(expr) => expr.uses_runtime_memory(variable_mapping, vars),
+            RawExpression::Field(expr) => expr.uses_runtime_memory(variable_mapping, vars),
+            RawExpression::Integer(expr) => expr.uses_runtime_memory(variable_mapping, vars),
+            RawExpression::AccessLookup { .. }
+            | RawExpression::PerformLookup { .. }
+            | RawExpression::MaybePerformLookup { .. } => false,
+            RawExpression::WriteVariable {
+                into_variable,
+                source_subexpr,
+                condition_subexpr_idx,
+            } => {
+                source_subexpr.uses_runtime_memory(variable_mapping, vars)
+                    || (condition_subexpr_idx.is_some()
+                        && matches!(
+                            variable_mapping.get(into_variable),
+                            Some(ColumnAddress::MemorySubtree(_))
+                        )
+                        && !vars.has_member(into_variable))
+            }
         }
     }
 }
@@ -734,6 +626,14 @@ struct ComputeLowering<'a, 'ctx: 'sco, 'sco, F: FieldInfo> {
     block: &'a [RawExpression<F>],
     slots: Vec<SsaSlot<'ctx, 'sco>>,
     slot_input_origins: Vec<Option<Variable>>,
+}
+
+impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> Deref for ComputeLowering<'a, 'ctx, 'sco, F> {
+    type Target = OpsBuilder<'ctx, 'sco, F>;
+
+    fn deref(&self) -> &Self::Target {
+        self.builder
+    }
 }
 
 impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
@@ -789,7 +689,9 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
                 let existing =
                     self.vars
                         .get_compute_val(self.builder, self.self_value, into_variable)?;
-                value = self.select_value(condition, value, existing)?;
+                value = self
+                    .builder
+                    .append_select_value(condition, value, existing)?;
             }
 
             return self.vars.assign_compute_member(
@@ -817,7 +719,9 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
                 if let Some(condition_idx) = condition_subexpr_idx {
                     let condition = self.slot_as_bool(condition_idx)?;
                     let existing = self.read_memory_subtree(offset)?;
-                    value = self.select_value(condition, value, existing)?;
+                    value = self
+                        .builder
+                        .append_select_value(condition, value, existing)?;
                 }
                 return self.write_memory_subtree(offset, value);
             }
@@ -837,7 +741,9 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             let existing =
                 self.vars
                     .get_compute_val(self.builder, self.self_value, into_variable)?;
-            value = self.select_value(condition, value, existing)?;
+            value = self
+                .builder
+                .append_select_value(condition, value, existing)?;
         }
 
         self.vars
@@ -880,7 +786,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         value: ComputedValue<'ctx, 'sco>,
     ) -> Result<Value<'ctx, 'sco>> {
         match value {
-            ComputedValue::Bool(value) => self.bool_to_field(value),
+            ComputedValue::Bool(value) => self.append_bool_to_field(value),
             ComputedValue::Field(value) => Ok(value),
             ComputedValue::Integer(value) => self.integer_to_field(value),
         }
@@ -915,29 +821,25 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
 
     /// Read a compiled memory-subtree column through the LLZK runtime hook.
     fn read_memory_subtree(&self, offset: usize) -> Result<Value<'ctx, 'sco>> {
-        let location = self.builder.unknown_location();
+        let location = self.unknown_location();
         let offset = self
             .builder
-            .get_constant_from_start(self.builder.index_type(), offset as u64)?;
-        self.builder.append_call_with_result(
+            .get_constant_from_start(self.index_type(), offset as u64)?;
+        self.append_call_with_result(
             location,
             READ_FROM_MEMORY_SUBTREE_EXTERN,
             &[offset],
-            self.builder.felt_type(),
+            self.felt_type(),
         )
     }
 
     /// Write a compiled memory-subtree column through the LLZK runtime hook.
     fn write_memory_subtree(&self, offset: usize, value: Value<'ctx, 'sco>) -> Result<()> {
-        let location = self.builder.unknown_location();
+        let location = self.unknown_location();
         let offset = self
             .builder
-            .get_constant_from_start(self.builder.index_type(), offset as u64)?;
-        self.builder.append_call_no_results(
-            location,
-            WRITE_TO_MEMORY_SUBTREE_EXTERN,
-            &[offset, value],
-        )
+            .get_constant_from_start(self.index_type(), offset as u64)?;
+        self.append_call_no_results(location, WRITE_TO_MEMORY_SUBTREE_EXTERN, &[offset, value])
     }
 
     /// Try to resolve one placeholder limb through the explicit `@compute` inputs.
@@ -983,7 +885,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         placeholder: Placeholder,
     ) -> Result<Option<Value<'ctx, 'sco>>> {
         self.try_read_placeholder_input_limb(placeholder, 0)?
-            .map(|value| self.field_is_nonzero(value))
+            .map(|value| self.append_field_is_nonzero(value))
             .transpose()
     }
 
@@ -1041,13 +943,12 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
     /// still needs to use LLZK value types. `function.def` rejects plain `i64` arguments, so we
     /// materialize the `(kind, arg0, arg1, subindex)` metadata as felt constants instead.
     fn oracle_abi_type(&self) -> Type<'ctx> {
-        self.builder.felt_type()
+        self.felt_type()
     }
 
     /// Materialize one metadata constant for an oracle hook call.
     fn oracle_abi_constant(&self, value: u64) -> Result<Value<'ctx, 'sco>> {
-        self.builder
-            .get_constant_from_start(self.oracle_abi_type(), value)
+        self.get_constant_from_start(self.oracle_abi_type(), value)
     }
 
     /// Convert a [`Placeholder`] into the three metadata arguments passed to oracle hooks.
@@ -1070,14 +971,14 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             return Ok(value);
         }
 
-        let location = self.builder.unknown_location();
+        let location = self.unknown_location();
         let [kind, arg0, arg1] = self.oracle_placeholder_args(placeholder)?;
         let subindex = self.oracle_abi_constant(subindex as u64)?;
-        self.builder.append_call_with_result(
+        self.append_call_with_result(
             location,
             READ_ORACLE_FIELD_EXTERN,
             &[kind, arg0, arg1, subindex],
-            self.builder.felt_type(),
+            self.felt_type(),
         )
     }
 
@@ -1087,13 +988,13 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             return Ok(value);
         }
 
-        let location = self.builder.unknown_location();
+        let location = self.unknown_location();
         let [kind, arg0, arg1] = self.oracle_placeholder_args(placeholder)?;
-        self.builder.append_call_with_result(
+        self.append_call_with_result(
             location,
             READ_ORACLE_BOOL_EXTERN,
             &[kind, arg0, arg1],
-            self.builder.bool_type(),
+            self.bool_type(),
         )
     }
 
@@ -1103,13 +1004,13 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             return Ok(value);
         }
 
-        let location = self.builder.unknown_location();
+        let location = self.unknown_location();
         let [kind, arg0, arg1] = self.oracle_placeholder_args(placeholder)?;
-        self.builder.append_call_with_result(
+        self.append_call_with_result(
             location,
             READ_ORACLE_U8_EXTERN,
             &[kind, arg0, arg1],
-            self.builder.felt_type(),
+            self.felt_type(),
         )
     }
 
@@ -1119,13 +1020,13 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             return Ok(value);
         }
 
-        let location = self.builder.unknown_location();
+        let location = self.unknown_location();
         let [kind, arg0, arg1] = self.oracle_placeholder_args(placeholder)?;
-        self.builder.append_call_with_result(
+        self.append_call_with_result(
             location,
             READ_ORACLE_U16_EXTERN,
             &[kind, arg0, arg1],
-            self.builder.felt_type(),
+            self.felt_type(),
         )
     }
 
@@ -1135,65 +1036,27 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             return Ok(value);
         }
 
-        let location = self.builder.unknown_location();
+        let location = self.unknown_location();
         let [low, high] = {
             let [kind, arg0, arg1] = self.oracle_placeholder_args(placeholder)?;
-            self.builder.append_call::<2>(
+            self.append_call::<2>(
                 location,
                 READ_ORACLE_U32_EXTERN,
                 &[kind, arg0, arg1],
-                &[self.builder.felt_type(), self.builder.felt_type()],
+                &[self.felt_type(), self.felt_type()],
             )?
         };
         Ok(U32Parts { low, high })
     }
 
-    /// Convert an `i1` condition into the felt encoding used by witness columns.
-    fn bool_to_field(&self, value: Value<'ctx, 'sco>) -> Result<Value<'ctx, 'sco>> {
-        self.select_value(
-            value,
-            self.builder.get_felt_constant_from_start(1)?,
-            self.builder.get_felt_constant_from_start(0)?,
-        )
-    }
-
-    /// Return an `i1` indicating whether the felt value is non-zero.
-    fn field_is_nonzero(&self, value: Value<'ctx, 'sco>) -> Result<Value<'ctx, 'sco>> {
-        self.builder.append_op_with_result(bool::ne(
-            self.builder.unknown_location(),
-            value,
-            self.builder.get_felt_constant_from_start(0)?,
-        )?)
-    }
-
-    /// Emit a generic `arith.select`, which works for both LLZK felt values and builtin integer
-    /// values such as `i1`.
-    fn select_value(
-        &self,
-        condition: Value<'ctx, 'sco>,
-        if_true: Value<'ctx, 'sco>,
-        if_false: Value<'ctx, 'sco>,
-    ) -> Result<Value<'ctx, 'sco>> {
-        self.builder.append_op_with_result(arith::select(
-            condition,
-            if_true,
-            if_false,
-            self.builder.unknown_location(),
-        ))
-    }
-
     /// Convert a 32-bit limb pair back into the field encoding used by witness columns.
     fn u32_to_field(&self, value: U32Parts<'ctx, 'sco>) -> Result<Value<'ctx, 'sco>> {
-        let high_scaled = self.builder.append_op_with_result(felt::mul(
-            self.builder.unknown_location(),
+        let high_scaled = self.append_op_with_result(felt::mul(
+            self.unknown_location(),
             value.high,
-            self.builder.get_felt_constant_from_start(U16_MODULUS)?,
+            self.get_felt_constant_from_start(U16_MODULUS)?,
         )?)?;
-        self.builder.append_op_with_result(felt::add(
-            self.builder.unknown_location(),
-            value.low,
-            high_scaled,
-        )?)
+        self.append_op_with_result(felt::add(self.unknown_location(), value.low, high_scaled)?)
     }
 
     /// Convert an integer witness value into the felt encoding stored in struct members.
@@ -1206,11 +1069,11 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
 
     /// Decompose a felt value into a 32-bit pair of 16-bit limbs.
     fn field_to_u32(&self, value: Value<'ctx, 'sco>) -> Result<U32Parts<'ctx, 'sco>> {
-        let low = self.lowest_bits_felt(value, 16)?;
-        let high = self.builder.append_op_with_result(felt::uintdiv(
-            self.builder.unknown_location(),
+        let low = self.append_lowest_bits_felt(value, 16)?;
+        let high = self.append_op_with_result(felt::uintdiv(
+            self.unknown_location(),
             value,
-            self.builder.get_felt_constant_from_start(U16_MODULUS)?,
+            self.get_felt_constant_from_start(U16_MODULUS)?,
         )?)?;
         Ok(U32Parts { low, high })
     }
@@ -1227,19 +1090,6 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         })
     }
 
-    /// Reduce a felt value modulo `2^bits`.
-    fn lowest_bits_felt(&self, value: Value<'ctx, 'sco>, bits: u32) -> Result<Value<'ctx, 'sco>> {
-        if bits == 0 {
-            return self.builder.get_felt_constant_from_start(0);
-        }
-        let modulus = 1u64 << bits;
-        self.builder.append_op_with_result(felt::umod(
-            self.builder.unknown_location(),
-            value,
-            self.builder.get_felt_constant_from_start(modulus)?,
-        )?)
-    }
-
     /// Compute `lhs == rhs` over witness integers.
     fn integer_equal(
         &self,
@@ -1250,23 +1100,19 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             (IntegerValue::U8(lhs), IntegerValue::U8(rhs))
             | (IntegerValue::U16(lhs), IntegerValue::U16(rhs)) => self
                 .builder
-                .append_op_with_result(bool::eq(self.builder.unknown_location(), lhs, rhs)?),
+                .append_op_with_result(bool::eq(self.unknown_location(), lhs, rhs)?),
             (IntegerValue::U32(lhs), IntegerValue::U32(rhs)) => {
-                let low_eq = self.builder.append_op_with_result(bool::eq(
-                    self.builder.unknown_location(),
+                let low_eq = self.append_op_with_result(bool::eq(
+                    self.unknown_location(),
                     lhs.low,
                     rhs.low,
                 )?)?;
-                let high_eq = self.builder.append_op_with_result(bool::eq(
-                    self.builder.unknown_location(),
+                let high_eq = self.append_op_with_result(bool::eq(
+                    self.unknown_location(),
                     lhs.high,
                     rhs.high,
                 )?)?;
-                self.builder.append_op_with_result(bool::and(
-                    self.builder.unknown_location(),
-                    low_eq,
-                    high_eq,
-                )?)
+                self.append_op_with_result(bool::and(self.unknown_location(), low_eq, high_eq)?)
             }
             _ => bail!("integer equality requires operands of the same width"),
         }
@@ -1275,12 +1121,14 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
     /// Compute whether an integer witness value is non-zero.
     fn integer_is_nonzero(&self, value: IntegerValue<'ctx, 'sco>) -> Result<Value<'ctx, 'sco>> {
         match value {
-            IntegerValue::U8(value) | IntegerValue::U16(value) => self.field_is_nonzero(value),
+            IntegerValue::U8(value) | IntegerValue::U16(value) => {
+                self.append_field_is_nonzero(value)
+            }
             IntegerValue::U32(value) => {
-                let low_nonzero = self.field_is_nonzero(value.low)?;
-                let high_nonzero = self.field_is_nonzero(value.high)?;
-                self.builder.append_op_with_result(bool::or(
-                    self.builder.unknown_location(),
+                let low_nonzero = self.append_field_is_nonzero(value.low)?;
+                let high_nonzero = self.append_field_is_nonzero(value.high)?;
+                self.append_op_with_result(bool::or(
+                    self.unknown_location(),
                     low_nonzero,
                     high_nonzero,
                 )?)
@@ -1341,18 +1189,14 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         rhs: Value<'ctx, 'sco>,
         width: u32,
     ) -> Result<(Value<'ctx, 'sco>, Value<'ctx, 'sco>)> {
-        let sum = self.builder.append_op_with_result(felt::add(
-            self.builder.unknown_location(),
-            lhs,
-            rhs,
-        )?)?;
+        let sum = self.append_op_with_result(felt::add(self.unknown_location(), lhs, rhs)?)?;
         let modulus = 1u64 << width;
-        let carry = self.builder.append_op_with_result(bool::ge(
-            self.builder.unknown_location(),
+        let carry = self.append_op_with_result(bool::ge(
+            self.unknown_location(),
             sum,
-            self.builder.get_felt_constant_from_start(modulus)?,
+            self.get_felt_constant_from_start(modulus)?,
         )?)?;
-        let wrapped = self.lowest_bits_felt(sum, width)?;
+        let wrapped = self.append_lowest_bits_felt(sum, width)?;
         Ok((wrapped, carry))
     }
 
@@ -1363,26 +1207,22 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         rhs: Value<'ctx, 'sco>,
         width: u32,
     ) -> Result<(Value<'ctx, 'sco>, Value<'ctx, 'sco>)> {
-        let borrow = self.builder.append_op_with_result(bool::lt(
-            self.builder.unknown_location(),
-            lhs,
-            rhs,
-        )?)?;
-        let borrow_case = self.builder.append_op_with_result(felt::sub(
-            self.builder.unknown_location(),
-            self.builder.append_op_with_result(felt::add(
-                self.builder.unknown_location(),
+        let borrow = self.append_op_with_result(bool::lt(self.unknown_location(), lhs, rhs)?)?;
+        let borrow_case = self.append_op_with_result(felt::sub(
+            self.unknown_location(),
+            self.append_op_with_result(felt::add(
+                self.unknown_location(),
                 lhs,
-                self.builder.get_felt_constant_from_start(1u64 << width)?,
+                self.get_felt_constant_from_start(1u64 << width)?,
             )?)?,
             rhs,
         )?)?;
-        let direct_case = self.builder.append_op_with_result(felt::sub(
-            self.builder.unknown_location(),
-            lhs,
-            rhs,
-        )?)?;
-        Ok((self.select_value(borrow, borrow_case, direct_case)?, borrow))
+        let direct_case =
+            self.append_op_with_result(felt::sub(self.unknown_location(), lhs, rhs)?)?;
+        Ok((
+            self.append_select_value(borrow, borrow_case, direct_case)?,
+            borrow,
+        ))
     }
 
     /// Add two 32-bit limb pairs and recover the carry bit from the high limb.
@@ -1392,12 +1232,9 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         rhs: U32Parts<'ctx, 'sco>,
     ) -> Result<(U32Parts<'ctx, 'sco>, Value<'ctx, 'sco>)> {
         let (low, low_carry) = self.add_small(lhs.low, rhs.low, 16)?;
-        let carry_felt = self.bool_to_field(low_carry)?;
-        let high_rhs = self.builder.append_op_with_result(felt::add(
-            self.builder.unknown_location(),
-            rhs.high,
-            carry_felt,
-        )?)?;
+        let carry_felt = self.append_bool_to_field(low_carry)?;
+        let high_rhs =
+            self.append_op_with_result(felt::add(self.unknown_location(), rhs.high, carry_felt)?)?;
         let (high, high_carry) = self.add_small(lhs.high, high_rhs, 16)?;
         Ok((U32Parts { low, high }, high_carry))
     }
@@ -1409,12 +1246,9 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         rhs: U32Parts<'ctx, 'sco>,
     ) -> Result<(U32Parts<'ctx, 'sco>, Value<'ctx, 'sco>)> {
         let (low, low_borrow) = self.sub_small(lhs.low, rhs.low, 16)?;
-        let borrow_felt = self.bool_to_field(low_borrow)?;
-        let high_rhs = self.builder.append_op_with_result(felt::add(
-            self.builder.unknown_location(),
-            rhs.high,
-            borrow_felt,
-        )?)?;
+        let borrow_felt = self.append_bool_to_field(low_borrow)?;
+        let high_rhs =
+            self.append_op_with_result(felt::add(self.unknown_location(), rhs.high, borrow_felt)?)?;
         let (high, high_borrow) = self.sub_small(lhs.high, high_rhs, 16)?;
         Ok((U32Parts { low, high }, high_borrow))
     }
@@ -1426,22 +1260,20 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         magnitude: u32,
     ) -> Result<IntegerValue<'ctx, 'sco>> {
         match value {
-            IntegerValue::U8(value) => Ok(IntegerValue::U8(
-                self.builder.append_op_with_result(felt::shr(
-                    self.builder.unknown_location(),
+            IntegerValue::U8(value) => {
+                Ok(IntegerValue::U8(self.append_op_with_result(felt::shr(
+                    self.unknown_location(),
                     value,
-                    self.builder
-                        .get_felt_constant_from_start(u64::from(magnitude))?,
-                )?)?,
-            )),
-            IntegerValue::U16(value) => Ok(IntegerValue::U16(
-                self.builder.append_op_with_result(felt::shr(
-                    self.builder.unknown_location(),
+                    self.get_felt_constant_from_start(u64::from(magnitude))?,
+                )?)?))
+            }
+            IntegerValue::U16(value) => {
+                Ok(IntegerValue::U16(self.append_op_with_result(felt::shr(
+                    self.unknown_location(),
                     value,
-                    self.builder
-                        .get_felt_constant_from_start(u64::from(magnitude))?,
-                )?)?,
-            )),
+                    self.get_felt_constant_from_start(u64::from(magnitude))?,
+                )?)?))
+            }
             IntegerValue::U32(value) => {
                 Ok(IntegerValue::U32(self.shift_right_u32(value, magnitude)?))
             }
@@ -1456,22 +1288,22 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
     ) -> Result<IntegerValue<'ctx, 'sco>> {
         match value {
             IntegerValue::U8(value) => {
-                let shifted = self.builder.append_op_with_result(felt::shl(
-                    self.builder.unknown_location(),
+                let shifted = self.append_op_with_result(felt::shl(
+                    self.unknown_location(),
                     value,
-                    self.builder
-                        .get_felt_constant_from_start(u64::from(magnitude))?,
+                    self.get_felt_constant_from_start(u64::from(magnitude))?,
                 )?)?;
-                Ok(IntegerValue::U8(self.lowest_bits_felt(shifted, 8)?))
+                Ok(IntegerValue::U8(self.append_lowest_bits_felt(shifted, 8)?))
             }
             IntegerValue::U16(value) => {
-                let shifted = self.builder.append_op_with_result(felt::shl(
-                    self.builder.unknown_location(),
+                let shifted = self.append_op_with_result(felt::shl(
+                    self.unknown_location(),
                     value,
-                    self.builder
-                        .get_felt_constant_from_start(u64::from(magnitude))?,
+                    self.get_felt_constant_from_start(u64::from(magnitude))?,
                 )?)?;
-                Ok(IntegerValue::U16(self.lowest_bits_felt(shifted, 16)?))
+                Ok(IntegerValue::U16(
+                    self.append_lowest_bits_felt(shifted, 16)?,
+                ))
             }
             IntegerValue::U32(value) => {
                 Ok(IntegerValue::U32(self.shift_left_u32(value, magnitude)?))
@@ -1487,23 +1319,25 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
     ) -> Result<IntegerValue<'ctx, 'sco>> {
         match value {
             IntegerValue::U8(value) => Ok(IntegerValue::U8(
-                self.lowest_bits_felt(value, num_bits.min(8))?,
+                self.append_lowest_bits_felt(value, num_bits.min(8))?,
             )),
             IntegerValue::U16(value) => Ok(IntegerValue::U16(
-                self.lowest_bits_felt(value, num_bits.min(16))?,
+                self.append_lowest_bits_felt(value, num_bits.min(16))?,
             )),
             IntegerValue::U32(value) => {
                 if num_bits >= 32 {
                     Ok(IntegerValue::U32(value))
                 } else if num_bits <= 16 {
                     Ok(IntegerValue::U32(U32Parts {
-                        low: self.lowest_bits_felt(value.low, num_bits)?,
-                        high: self.builder.get_felt_constant_from_start(0)?,
+                        low: self.append_lowest_bits_felt(value.low, num_bits)?,
+                        high: self.get_felt_constant_from_start(0)?,
                     }))
                 } else {
                     Ok(IntegerValue::U32(U32Parts {
                         low: value.low,
-                        high: self.lowest_bits_felt(value.high, num_bits - 16)?,
+                        high: self
+                            .builder
+                            .append_lowest_bits_felt(value.high, num_bits - 16)?,
                     }))
                 }
             }
@@ -1518,15 +1352,19 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         if_false: IntegerValue<'ctx, 'sco>,
     ) -> Result<IntegerValue<'ctx, 'sco>> {
         match (if_true, if_false) {
-            (IntegerValue::U8(lhs), IntegerValue::U8(rhs)) => {
-                Ok(IntegerValue::U8(self.select_value(condition, lhs, rhs)?))
-            }
-            (IntegerValue::U16(lhs), IntegerValue::U16(rhs)) => {
-                Ok(IntegerValue::U16(self.select_value(condition, lhs, rhs)?))
-            }
+            (IntegerValue::U8(lhs), IntegerValue::U8(rhs)) => Ok(IntegerValue::U8(
+                self.append_select_value(condition, lhs, rhs)?,
+            )),
+            (IntegerValue::U16(lhs), IntegerValue::U16(rhs)) => Ok(IntegerValue::U16(
+                self.append_select_value(condition, lhs, rhs)?,
+            )),
             (IntegerValue::U32(lhs), IntegerValue::U32(rhs)) => Ok(IntegerValue::U32(U32Parts {
-                low: self.select_value(condition, lhs.low, rhs.low)?,
-                high: self.select_value(condition, lhs.high, rhs.high)?,
+                low: self
+                    .builder
+                    .append_select_value(condition, lhs.low, rhs.low)?,
+                high: self
+                    .builder
+                    .append_select_value(condition, lhs.high, rhs.high)?,
             })),
             _ => bail!("integer select requires both branches to have the same width"),
         }
@@ -1536,15 +1374,15 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
     fn bitwise_not(&self, value: IntegerValue<'ctx, 'sco>) -> Result<IntegerValue<'ctx, 'sco>> {
         match value {
             IntegerValue::U8(value) => {
-                let mask = self.builder.get_felt_constant_from_start(U8_MODULUS - 1)?;
-                Ok(IntegerValue::U8(self.builder.append_op_with_result(
-                    felt::bit_xor(self.builder.unknown_location(), value, mask)?,
+                let mask = self.get_felt_constant_from_start(U8_MODULUS - 1)?;
+                Ok(IntegerValue::U8(self.append_op_with_result(
+                    felt::bit_xor(self.unknown_location(), value, mask)?,
                 )?))
             }
             IntegerValue::U16(value) => {
-                let mask = self.builder.get_felt_constant_from_start(U16_MODULUS - 1)?;
-                Ok(IntegerValue::U16(self.builder.append_op_with_result(
-                    felt::bit_xor(self.builder.unknown_location(), value, mask)?,
+                let mask = self.get_felt_constant_from_start(U16_MODULUS - 1)?;
+                Ok(IntegerValue::U16(self.append_op_with_result(
+                    felt::bit_xor(self.unknown_location(), value, mask)?,
                 )?))
             }
             IntegerValue::U32(value) => Ok(IntegerValue::U32(U32Parts {
@@ -1569,21 +1407,15 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
     ) -> Result<IntegerValue<'ctx, 'sco>> {
         let op = |lhs, rhs| -> Result<Value<'ctx, 'sco>> {
             match opname {
-                "and" => self.builder.append_op_with_result(felt::bit_and(
-                    self.builder.unknown_location(),
-                    lhs,
-                    rhs,
-                )?),
-                "or" => self.builder.append_op_with_result(felt::bit_or(
-                    self.builder.unknown_location(),
-                    lhs,
-                    rhs,
-                )?),
-                "xor" => self.builder.append_op_with_result(felt::bit_xor(
-                    self.builder.unknown_location(),
-                    lhs,
-                    rhs,
-                )?),
+                "and" => {
+                    self.append_op_with_result(felt::bit_and(self.unknown_location(), lhs, rhs)?)
+                }
+                "or" => {
+                    self.append_op_with_result(felt::bit_or(self.unknown_location(), lhs, rhs)?)
+                }
+                "xor" => {
+                    self.append_op_with_result(felt::bit_xor(self.unknown_location(), lhs, rhs)?)
+                }
                 _ => bail!("unsupported bitwise operation {opname}"),
             }
         };
@@ -1612,52 +1444,48 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         }
         if magnitude >= 32 {
             return Ok(U32Parts {
-                low: self.builder.get_felt_constant_from_start(0)?,
-                high: self.builder.get_felt_constant_from_start(0)?,
+                low: self.get_felt_constant_from_start(0)?,
+                high: self.get_felt_constant_from_start(0)?,
             });
         }
         if magnitude >= 16 {
             let shift = magnitude - 16;
             return Ok(U32Parts {
-                low: self.builder.append_op_with_result(felt::shr(
-                    self.builder.unknown_location(),
+                low: self.append_op_with_result(felt::shr(
+                    self.unknown_location(),
                     value.high,
-                    self.builder
-                        .get_felt_constant_from_start(u64::from(shift))?,
+                    self.get_felt_constant_from_start(u64::from(shift))?,
                 )?)?,
-                high: self.builder.get_felt_constant_from_start(0)?,
+                high: self.get_felt_constant_from_start(0)?,
             });
         }
 
-        let low_base = self.builder.append_op_with_result(felt::shr(
-            self.builder.unknown_location(),
+        let low_base = self.append_op_with_result(felt::shr(
+            self.unknown_location(),
             value.low,
-            self.builder
-                .get_felt_constant_from_start(u64::from(magnitude))?,
+            self.get_felt_constant_from_start(u64::from(magnitude))?,
         )?)?;
-        let high_base = self.builder.append_op_with_result(felt::shr(
-            self.builder.unknown_location(),
+        let high_base = self.append_op_with_result(felt::shr(
+            self.unknown_location(),
             value.high,
-            self.builder
-                .get_felt_constant_from_start(u64::from(magnitude))?,
+            self.get_felt_constant_from_start(u64::from(magnitude))?,
         )?)?;
         let carry_mask = self
             .builder
             .get_felt_constant_from_start((1u64 << magnitude) - 1)?;
-        let carry_bits = self.builder.append_op_with_result(felt::bit_and(
-            self.builder.unknown_location(),
+        let carry_bits = self.append_op_with_result(felt::bit_and(
+            self.unknown_location(),
             value.high,
             carry_mask,
         )?)?;
-        let carry = self.builder.append_op_with_result(felt::shl(
-            self.builder.unknown_location(),
+        let carry = self.append_op_with_result(felt::shl(
+            self.unknown_location(),
             carry_bits,
-            self.builder
-                .get_felt_constant_from_start(u64::from(16 - magnitude))?,
+            self.get_felt_constant_from_start(u64::from(16 - magnitude))?,
         )?)?;
         Ok(U32Parts {
-            low: self.builder.append_op_with_result(felt::bit_or(
-                self.builder.unknown_location(),
+            low: self.append_op_with_result(felt::bit_or(
+                self.unknown_location(),
                 low_base,
                 carry,
             )?)?,
@@ -1676,47 +1504,43 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         }
         if magnitude >= 32 {
             return Ok(U32Parts {
-                low: self.builder.get_felt_constant_from_start(0)?,
-                high: self.builder.get_felt_constant_from_start(0)?,
+                low: self.get_felt_constant_from_start(0)?,
+                high: self.get_felt_constant_from_start(0)?,
             });
         }
         if magnitude >= 16 {
             let shift = magnitude - 16;
-            let shifted_high = self.builder.append_op_with_result(felt::shl(
-                self.builder.unknown_location(),
+            let shifted_high = self.append_op_with_result(felt::shl(
+                self.unknown_location(),
                 value.low,
-                self.builder
-                    .get_felt_constant_from_start(u64::from(shift))?,
+                self.get_felt_constant_from_start(u64::from(shift))?,
             )?)?;
             return Ok(U32Parts {
-                low: self.builder.get_felt_constant_from_start(0)?,
-                high: self.lowest_bits_felt(shifted_high, 16)?,
+                low: self.get_felt_constant_from_start(0)?,
+                high: self.append_lowest_bits_felt(shifted_high, 16)?,
             });
         }
 
-        let low_shifted = self.builder.append_op_with_result(felt::shl(
-            self.builder.unknown_location(),
+        let low_shifted = self.append_op_with_result(felt::shl(
+            self.unknown_location(),
             value.low,
-            self.builder
-                .get_felt_constant_from_start(u64::from(magnitude))?,
+            self.get_felt_constant_from_start(u64::from(magnitude))?,
         )?)?;
-        let high_shifted = self.builder.append_op_with_result(felt::shl(
-            self.builder.unknown_location(),
+        let high_shifted = self.append_op_with_result(felt::shl(
+            self.unknown_location(),
             value.high,
-            self.builder
-                .get_felt_constant_from_start(u64::from(magnitude))?,
+            self.get_felt_constant_from_start(u64::from(magnitude))?,
         )?)?;
-        let carry = self.builder.append_op_with_result(felt::shr(
-            self.builder.unknown_location(),
+        let carry = self.append_op_with_result(felt::shr(
+            self.unknown_location(),
             value.low,
-            self.builder
-                .get_felt_constant_from_start(u64::from(16 - magnitude))?,
+            self.get_felt_constant_from_start(u64::from(16 - magnitude))?,
         )?)?;
         Ok(U32Parts {
-            low: self.lowest_bits_felt(low_shifted, 16)?,
-            high: self.builder.append_op_with_result(felt::bit_or(
-                self.builder.unknown_location(),
-                self.lowest_bits_felt(high_shifted, 16)?,
+            low: self.append_lowest_bits_felt(low_shifted, 16)?,
+            high: self.append_op_with_result(felt::bit_or(
+                self.unknown_location(),
+                self.append_lowest_bits_felt(high_shifted, 16)?,
                 carry,
             )?)?,
         })
@@ -1740,6 +1564,40 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
     /// when the table cannot be identified purely from the original raw expression.
     fn lookup_table_id_value(&self, table_id_subexpr_idx: usize) -> Result<Value<'ctx, 'sco>> {
         self.slot_as_field(table_id_subexpr_idx)
+    }
+
+    /// Lower either `perform_lookup` or `maybe_perform_lookup` directly from the raw SSA node.
+    ///
+    /// Keeping this as a dedicated helper still isolates the table-resolution logic from the rest
+    /// of `RawExpression`, but avoids the intermediate `LookupInvocation` wrapper and its cloned
+    /// input index list.
+    fn lower_lookup_invocation(
+        &self,
+        input_subexpr_idxes: &[usize],
+        table_id_subexpr_idx: usize,
+        lookup_mapping_idx: Option<usize>,
+        mask_id_subexpr_idx: Option<usize>,
+        num_outputs: usize,
+    ) -> Result<Vec<Value<'ctx, 'sco>>> {
+        let inputs = self.lookup_inputs_as_fields(input_subexpr_idxes)?;
+        let outputs = if let Some(table) =
+            self.resolve_lookup_table(table_id_subexpr_idx, lookup_mapping_idx)?
+        {
+            self.compute_lookup_for_table(table, &inputs, num_outputs)?
+        } else {
+            self.compute_dynamic_lookup(
+                self.lookup_table_id_value(table_id_subexpr_idx)?,
+                &inputs,
+                num_outputs,
+            )?
+        };
+
+        if let Some(mask_id_subexpr_idx) = mask_id_subexpr_idx {
+            let mask = self.slot_as_bool(mask_id_subexpr_idx)?;
+            self.mask_lookup_outputs(mask, outputs)
+        } else {
+            Ok(outputs)
+        }
     }
 
     /// Resolve the table id referenced by a lookup SSA node when it is statically identifiable.
@@ -1837,9 +1695,9 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             }
             TableType::AlignedRomRead => self.compute_aligned_rom_read_lookup(inputs, num_outputs),
             _ => {
-                // TODO(LLZK compute): add deterministic lowering for the remaining lookup tables
+                // TODO: add deterministic lowering for the remaining lookup tables
                 // used by the supported circuits.
-                self.new_lookup_outputs(num_outputs)
+                todo!("add lowering for lookup table {:?}", table)
             }
         }
     }
@@ -1871,11 +1729,15 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         let mut outputs = self.new_lookup_outputs(num_outputs)?;
         for table in supported_tables.iter().copied() {
             let candidate_outputs = self.compute_lookup_for_table(table, inputs, num_outputs)?;
-            let is_selected = self.field_eq_constant(table_id, u64::from(table.to_table_id()))?;
+            let is_selected = self
+                .builder
+                .append_field_eq_constant(table_id, u64::from(table.to_table_id()))?;
             outputs = candidate_outputs
                 .into_iter()
                 .zip(outputs.into_iter())
-                .map(|(candidate, fallback)| self.select_value(is_selected, candidate, fallback))
+                .map(|(candidate, fallback)| {
+                    self.append_select_value(is_selected, candidate, fallback)
+                })
                 .collect::<Result<Vec<_>>>()?;
         }
 
@@ -1884,7 +1746,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
 
     /// Materialize the all-zero lookup row used by `maybe_lookup` and by padded table outputs.
     fn zero_lookup_outputs(&self, num_outputs: usize) -> Result<Vec<Value<'ctx, 'sco>>> {
-        let zero = self.builder.get_felt_constant_from_start(0)?;
+        let zero = self.get_felt_constant_from_start(0)?;
         Ok((0..num_outputs).map(|_| zero).collect())
     }
 
@@ -1897,10 +1759,10 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         mask: Value<'ctx, 'sco>,
         outputs: Vec<Value<'ctx, 'sco>>,
     ) -> Result<Vec<Value<'ctx, 'sco>>> {
-        let zero = self.builder.get_felt_constant_from_start(0)?;
+        let zero = self.get_felt_constant_from_start(0)?;
         outputs
             .into_iter()
-            .map(|value| self.select_value(mask, value, zero))
+            .map(|value| self.append_select_value(mask, value, zero))
             .collect()
     }
 
@@ -1926,51 +1788,6 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         Ok(outputs)
     }
 
-    /// Build a boolean literal for control-flow within a lowered lookup.
-    fn bool_constant(&self, value: bool) -> Result<Value<'ctx, 'sco>> {
-        self.builder
-            .get_constant_from_start(self.builder.bool_type(), value as u64)
-    }
-
-    /// Compare a felt-encoded small integer against a literal used by a lookup decoder.
-    ///
-    /// The witness SSA records lookup inputs as field elements, so deterministic lowering needs a
-    /// compact way to recover table cases such as `funct3 == 0b101` without first building a wider
-    /// integer type.
-    fn field_eq_constant(
-        &self,
-        value: Value<'ctx, 'sco>,
-        constant: u64,
-    ) -> Result<Value<'ctx, 'sco>> {
-        self.builder.append_op_with_result(bool::eq(
-            self.builder.unknown_location(),
-            value,
-            self.builder.get_felt_constant_from_start(constant)?,
-        )?)
-    }
-
-    /// Extract a small bit-slice from a felt-encoded lookup input.
-    ///
-    /// Many witness tables pack several control fields into one felt key. This helper mirrors the
-    /// table-generation code by shifting right by a fixed amount and then reducing modulo `2^bits`.
-    fn shifted_low_bits(
-        &self,
-        value: Value<'ctx, 'sco>,
-        shift: u64,
-        bits: u32,
-    ) -> Result<Value<'ctx, 'sco>> {
-        let shifted = if shift == 0 {
-            value
-        } else {
-            self.builder.append_op_with_result(felt::shr(
-                self.builder.unknown_location(),
-                value,
-                self.builder.get_felt_constant_from_start(shift)?,
-            )?)?
-        };
-        self.lowest_bits_felt(shifted, bits)
-    }
-
     /// Deterministically lower the branch/jump condition lookup used by `jump_branch_slt`.
     ///
     /// This matches `create_conditional_jmp_branch_slt_family_resolution_table` directly instead
@@ -1989,82 +1806,80 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         }
 
         let shift = |value, amount| {
-            self.builder.append_op_with_result(felt::shr(
-                self.builder.unknown_location(),
+            self.append_op_with_result(felt::shr(
+                self.unknown_location(),
                 value,
-                self.builder.get_felt_constant_from_start(amount)?,
+                self.get_felt_constant_from_start(amount)?,
             )?)
         };
 
         let a = inputs[0];
         let funct3 = inputs[1];
 
-        let uf = self.lowest_bits_felt(a, 1)?;
-        let out_is_zero = self.lowest_bits_felt(shift(a, 1)?, 1)?;
-        let sign1_felt = self.lowest_bits_felt(shift(a, 2)?, 1)?;
-        let sign2_felt = self.lowest_bits_felt(shift(a, 3)?, 1)?;
+        let uf = self.append_lowest_bits_felt(a, 1)?;
+        let out_is_zero = self.append_lowest_bits_felt(shift(a, 1)?, 1)?;
+        let sign1_felt = self.append_lowest_bits_felt(shift(a, 2)?, 1)?;
+        let sign2_felt = self.append_lowest_bits_felt(shift(a, 3)?, 1)?;
 
-        let eq = self.field_is_nonzero(out_is_zero)?;
-        let unsigned_lt = self.field_is_nonzero(uf)?;
-        let sign1 = self.field_is_nonzero(sign1_felt)?;
-        let sign2 = self.field_is_nonzero(sign2_felt)?;
+        let eq = self.append_field_is_nonzero(out_is_zero)?;
+        let unsigned_lt = self.append_field_is_nonzero(uf)?;
+        let sign1 = self.append_field_is_nonzero(sign1_felt)?;
+        let sign2 = self.append_field_is_nonzero(sign2_felt)?;
         let not_sign1 = self
             .builder
-            .append_op_with_result(bool::not(self.builder.unknown_location(), sign1)?)?;
+            .append_op_with_result(bool::not(self.unknown_location(), sign1)?)?;
         let not_sign2 = self
             .builder
-            .append_op_with_result(bool::not(self.builder.unknown_location(), sign2)?)?;
-        let sign1_xor_sign2 = self.builder.append_op_with_result(bool::or(
-            self.builder.unknown_location(),
-            self.builder.append_op_with_result(bool::and(
-                self.builder.unknown_location(),
-                sign1,
-                not_sign2,
-            )?)?,
-            self.builder.append_op_with_result(bool::and(
-                self.builder.unknown_location(),
-                not_sign1,
-                sign2,
-            )?)?,
+            .append_op_with_result(bool::not(self.unknown_location(), sign2)?)?;
+        let sign1_xor_sign2 = self.append_op_with_result(bool::or(
+            self.unknown_location(),
+            self.append_op_with_result(bool::and(self.unknown_location(), sign1, not_sign2)?)?,
+            self.append_op_with_result(bool::and(self.unknown_location(), not_sign1, sign2)?)?,
         )?)?;
-        let signed_lt = self.select_value(sign1_xor_sign2, sign1, unsigned_lt)?;
+        let signed_lt = self
+            .builder
+            .append_select_value(sign1_xor_sign2, sign1, unsigned_lt)?;
         let not_eq = self
             .builder
-            .append_op_with_result(bool::not(self.builder.unknown_location(), eq)?)?;
+            .append_op_with_result(bool::not(self.unknown_location(), eq)?)?;
         let not_signed_lt = self
             .builder
-            .append_op_with_result(bool::not(self.builder.unknown_location(), signed_lt)?)?;
+            .append_op_with_result(bool::not(self.unknown_location(), signed_lt)?)?;
         let not_unsigned_lt = self
             .builder
-            .append_op_with_result(bool::not(self.builder.unknown_location(), unsigned_lt)?)?;
+            .append_op_with_result(bool::not(self.unknown_location(), unsigned_lt)?)?;
 
         let match_funct3 = |value| {
-            self.builder.append_op_with_result(bool::eq(
-                self.builder.unknown_location(),
+            self.append_op_with_result(bool::eq(
+                self.unknown_location(),
                 funct3,
-                self.builder.get_felt_constant_from_start(value)?,
+                self.get_felt_constant_from_start(value)?,
             )?)
         };
 
-        let flag = self.select_value(
+        let flag = self.append_select_value(
             match_funct3(0)?,
             eq,
-            self.select_value(
+            self.append_select_value(
                 match_funct3(1)?,
                 not_eq,
-                self.select_value(
+                self.append_select_value(
                     match_funct3(2)?,
                     signed_lt,
-                    self.select_value(
+                    self.append_select_value(
                         match_funct3(3)?,
                         unsigned_lt,
-                        self.select_value(
+                        self.append_select_value(
                             match_funct3(4)?,
                             signed_lt,
-                            self.select_value(
+                            self.append_select_value(
                                 match_funct3(5)?,
                                 not_signed_lt,
-                                self.select_value(match_funct3(6)?, unsigned_lt, not_unsigned_lt)?,
+                                self.append_select_value(
+                                    match_funct3(6)?,
+                                    unsigned_lt,
+                                    not_unsigned_lt,
+                                )?,
                             )?,
                         )?,
                     )?,
@@ -2072,7 +1887,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             )?,
         )?;
 
-        self.finalize_lookup_outputs(vec![self.bool_to_field(flag)?], num_outputs)
+        self.finalize_lookup_outputs(vec![self.append_bool_to_field(flag)?], num_outputs)
     }
 
     /// Deterministically lower the low-PC cleanup lookup used by jumps and taken branches.
@@ -2090,18 +1905,18 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         }
 
         let input = inputs[0];
-        let check_bit = self.lowest_bits_felt(
-            self.builder.append_op_with_result(felt::shr(
-                self.builder.unknown_location(),
+        let check_bit = self.append_lowest_bits_felt(
+            self.append_op_with_result(felt::shr(
+                self.unknown_location(),
                 input,
-                self.builder.get_felt_constant_from_start(1)?,
+                self.get_felt_constant_from_start(1)?,
             )?)?,
             1,
         )?;
-        let cleaned = self.builder.append_op_with_result(felt::sub(
-            self.builder.unknown_location(),
+        let cleaned = self.append_op_with_result(felt::sub(
+            self.unknown_location(),
             input,
-            self.lowest_bits_felt(input, 2)?,
+            self.append_lowest_bits_felt(input, 2)?,
         )?)?;
 
         self.finalize_lookup_outputs(vec![check_bit, cleaned], num_outputs)
@@ -2125,81 +1940,84 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         }
 
         let input = inputs[0];
-        let offset = self.lowest_bits_felt(input, 2)?;
-        let funct3 = self.shifted_low_bits(input, 16, 3)?;
-        let is_store = self.field_is_nonzero(self.shifted_low_bits(input, 17, 1)?)?;
-        let rd_is_x0 = self.field_is_nonzero(self.shifted_low_bits(input, 18, 1)?)?;
+        let offset = self.append_lowest_bits_felt(input, 2)?;
+        let funct3 = self.append_shifted_low_bits(input, 16, 3)?;
+        let is_store = self
+            .builder
+            .append_field_is_nonzero(self.append_shifted_low_bits(input, 17, 1)?)?;
+        let rd_is_x0 = self
+            .builder
+            .append_field_is_nonzero(self.append_shifted_low_bits(input, 18, 1)?)?;
 
-        let offset_is_nonzero = self.field_is_nonzero(offset)?;
-        let offset_is_odd = self.field_is_nonzero(self.lowest_bits_felt(offset, 1)?)?;
-        let false_bool = self.bool_constant(false)?;
-        let match_funct3 = |value| self.field_eq_constant(funct3, value);
+        let offset_is_nonzero = self.append_field_is_nonzero(offset)?;
+        let offset_is_odd = self
+            .builder
+            .append_field_is_nonzero(self.append_lowest_bits_felt(offset, 1)?)?;
+        let false_bool = self.get_bool_constant_from_start(false)?;
+        let match_funct3 = |value| self.append_field_eq_constant(funct3, value);
 
         let is_word = match_funct3(0b010)?;
-        let is_halfword = self.builder.append_op_with_result(bool::or(
-            self.builder.unknown_location(),
+        let is_halfword = self.append_op_with_result(bool::or(
+            self.unknown_location(),
             match_funct3(0b001)?,
             match_funct3(0b101)?,
         )?)?;
-        let is_byte = self.builder.append_op_with_result(bool::or(
-            self.builder.unknown_location(),
+        let is_byte = self.append_op_with_result(bool::or(
+            self.unknown_location(),
             match_funct3(0b000)?,
             match_funct3(0b100)?,
         )?)?;
 
-        let less_than_word = self.builder.append_op_with_result(bool::or(
-            self.builder.unknown_location(),
-            is_halfword,
-            is_byte,
-        )?)?;
-        let base_trap = self.select_value(
+        let less_than_word =
+            self.append_op_with_result(bool::or(self.unknown_location(), is_halfword, is_byte)?)?;
+        let base_trap = self.append_select_value(
             is_word,
             offset_is_nonzero,
-            self.select_value(
+            self.append_select_value(
                 is_halfword,
                 offset_is_odd,
-                self.select_value(is_byte, false_bool, self.bool_constant(true)?)?,
+                self.append_select_value(
+                    is_byte,
+                    false_bool,
+                    self.get_bool_constant_from_start(true)?,
+                )?,
             )?,
         )?;
 
-        let valid_funct3_for_load = self.builder.append_op_with_result(bool::or(
-            self.builder.unknown_location(),
+        let valid_funct3_for_load = self.append_op_with_result(bool::or(
+            self.unknown_location(),
             is_word,
             less_than_word,
         )?)?;
         let is_load = self
             .builder
-            .append_op_with_result(bool::not(self.builder.unknown_location(), is_store)?)?;
-        let allow_x0_unaligned_load = self.builder.append_op_with_result(bool::and(
-            self.builder.unknown_location(),
+            .append_op_with_result(bool::not(self.unknown_location(), is_store)?)?;
+        let allow_x0_unaligned_load = self.append_op_with_result(bool::and(
+            self.unknown_location(),
             valid_funct3_for_load,
-            self.builder.append_op_with_result(bool::and(
-                self.builder.unknown_location(),
-                is_load,
-                rd_is_x0,
-            )?)?,
+            self.append_op_with_result(bool::and(self.unknown_location(), is_load, rd_is_x0)?)?,
         )?)?;
-        let is_trap = self.select_value(allow_x0_unaligned_load, false_bool, base_trap)?;
+        let is_trap = self.append_select_value(allow_x0_unaligned_load, false_bool, base_trap)?;
 
-        let use_high_limb = self.builder.append_op_with_result(bool::ge(
-            self.builder.unknown_location(),
+        let use_high_limb = self.append_op_with_result(bool::ge(
+            self.unknown_location(),
             offset,
-            self.builder.get_felt_constant_from_start(2)?,
+            self.get_felt_constant_from_start(2)?,
         )?)?;
-        let bitmask = self.builder.append_op_with_result(felt::add(
-            self.builder.unknown_location(),
-            self.bool_to_field(less_than_word)?,
-            self.builder.append_op_with_result(felt::add(
-                self.builder.unknown_location(),
-                self.builder.append_op_with_result(felt::mul(
-                    self.builder.unknown_location(),
-                    self.bool_to_field(use_high_limb)?,
-                    self.builder.get_felt_constant_from_start(2)?,
+        let bitmask = self.append_op_with_result(felt::add(
+            self.unknown_location(),
+            self.append_bool_to_field(less_than_word)?,
+            self.append_op_with_result(felt::add(
+                self.unknown_location(),
+                self.append_op_with_result(felt::mul(
+                    self.unknown_location(),
+                    self.append_bool_to_field(use_high_limb)?,
+                    self.get_felt_constant_from_start(2)?,
                 )?)?,
-                self.builder.append_op_with_result(felt::mul(
-                    self.builder.unknown_location(),
-                    self.bool_to_field(is_trap)?,
-                    self.builder.get_felt_constant_from_start(4)?,
+                self.append_op_with_result(felt::mul(
+                    self.unknown_location(),
+                    self.append_bool_to_field(is_trap)?,
+                    self.get_felt_constant_from_start(4)?,
                 )?)?,
             )?)?,
         )?)?;
@@ -2226,16 +2044,17 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
 
         let input = inputs[0];
         let rom_bound = 1u64 << common_constants::ROM_SECOND_WORD_BITS;
-        let is_ram_range = self.builder.append_op_with_result(bool::ge(
-            self.builder.unknown_location(),
+        let is_ram_range = self.append_op_with_result(bool::ge(
+            self.unknown_location(),
             input,
-            self.builder.get_felt_constant_from_start(rom_bound)?,
+            self.get_felt_constant_from_start(rom_bound)?,
         )?)?;
-        let rom_chunk =
-            self.lowest_bits_felt(input, common_constants::ROM_SECOND_WORD_BITS as u32)?;
+        let rom_chunk = self
+            .builder
+            .append_lowest_bits_felt(input, common_constants::ROM_SECOND_WORD_BITS as u32)?;
 
         self.finalize_lookup_outputs(
-            vec![self.bool_to_field(is_ram_range)?, rom_chunk],
+            vec![self.append_bool_to_field(is_ram_range)?, rom_chunk],
             num_outputs,
         )
     }
@@ -2258,69 +2077,73 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         }
 
         let input = inputs[0];
-        let limb_value = self.lowest_bits_felt(input, 16)?;
-        let offset = self.shifted_low_bits(input, 16, 2)?;
-        let funct3 = self.shifted_low_bits(input, 18, 3)?;
-        let offset_is_odd = self.field_is_nonzero(self.lowest_bits_felt(offset, 1)?)?;
+        let limb_value = self.append_lowest_bits_felt(input, 16)?;
+        let offset = self.append_shifted_low_bits(input, 16, 2)?;
+        let funct3 = self.append_shifted_low_bits(input, 18, 3)?;
+        let offset_is_odd = self
+            .builder
+            .append_field_is_nonzero(self.append_lowest_bits_felt(offset, 1)?)?;
         let use_low_byte = self
             .builder
-            .append_op_with_result(bool::not(self.builder.unknown_location(), offset_is_odd)?)?;
-        let low_byte = self.lowest_bits_felt(limb_value, 8)?;
-        let high_byte = self.shifted_low_bits(limb_value, 8, 8)?;
-        let selected_byte = self.select_value(use_low_byte, low_byte, high_byte)?;
-        let byte_sign = self.field_is_nonzero(self.shifted_low_bits(selected_byte, 7, 1)?)?;
-        let limb_sign = self.field_is_nonzero(self.shifted_low_bits(limb_value, 15, 1)?)?;
-        let zero = self.builder.get_felt_constant_from_start(0)?;
-        let byte_signed_low = self.select_value(
+            .append_op_with_result(bool::not(self.unknown_location(), offset_is_odd)?)?;
+        let low_byte = self.append_lowest_bits_felt(limb_value, 8)?;
+        let high_byte = self.append_shifted_low_bits(limb_value, 8, 8)?;
+        let selected_byte = self
+            .builder
+            .append_select_value(use_low_byte, low_byte, high_byte)?;
+        let byte_sign =
+            self.append_field_is_nonzero(self.append_shifted_low_bits(selected_byte, 7, 1)?)?;
+        let limb_sign = self
+            .builder
+            .append_field_is_nonzero(self.append_shifted_low_bits(limb_value, 15, 1)?)?;
+        let zero = self.get_felt_constant_from_start(0)?;
+        let byte_signed_low = self.append_select_value(
             byte_sign,
-            self.builder.append_op_with_result(felt::add(
-                self.builder.unknown_location(),
+            self.append_op_with_result(felt::add(
+                self.unknown_location(),
                 selected_byte,
-                self.builder.get_felt_constant_from_start(0xff00)?,
+                self.get_felt_constant_from_start(0xff00)?,
             )?)?,
             selected_byte,
         )?;
-        let byte_signed_high = self.select_value(
-            byte_sign,
-            self.builder.get_felt_constant_from_start(0xffff)?,
-            zero,
-        )?;
-        let halfword_signed_high = self.select_value(
-            limb_sign,
-            self.builder.get_felt_constant_from_start(0xffff)?,
-            zero,
-        )?;
-        let halfword_low = self.select_value(offset_is_odd, zero, limb_value)?;
-        let halfword_signed_high = self.select_value(offset_is_odd, zero, halfword_signed_high)?;
+        let byte_signed_high =
+            self.append_select_value(byte_sign, self.get_felt_constant_from_start(0xffff)?, zero)?;
+        let halfword_signed_high =
+            self.append_select_value(limb_sign, self.get_felt_constant_from_start(0xffff)?, zero)?;
+        let halfword_low = self
+            .builder
+            .append_select_value(offset_is_odd, zero, limb_value)?;
+        let halfword_signed_high =
+            self.append_select_value(offset_is_odd, zero, halfword_signed_high)?;
 
-        let match_funct3 = |value| self.field_eq_constant(funct3, value);
-        let low = self.select_value(
+        let match_funct3 = |value| self.append_field_eq_constant(funct3, value);
+        let low = self.append_select_value(
             match_funct3(0b010)?,
             zero,
-            self.select_value(
+            self.append_select_value(
                 match_funct3(0b001)?,
                 halfword_low,
-                self.select_value(
+                self.append_select_value(
                     match_funct3(0b101)?,
                     halfword_low,
-                    self.select_value(
+                    self.append_select_value(
                         match_funct3(0b000)?,
                         byte_signed_low,
-                        self.select_value(match_funct3(0b100)?, selected_byte, zero)?,
+                        self.append_select_value(match_funct3(0b100)?, selected_byte, zero)?,
                     )?,
                 )?,
             )?,
         )?;
-        let high = self.select_value(
+        let high = self.append_select_value(
             match_funct3(0b010)?,
             zero,
-            self.select_value(
+            self.append_select_value(
                 match_funct3(0b001)?,
                 halfword_signed_high,
-                self.select_value(
+                self.append_select_value(
                     match_funct3(0b101)?,
                     zero,
-                    self.select_value(match_funct3(0b000)?, byte_signed_high, zero)?,
+                    self.append_select_value(match_funct3(0b000)?, byte_signed_high, zero)?,
                 )?,
             )?,
         )?;
@@ -2346,23 +2169,25 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         }
 
         let input = inputs[0];
-        let limb_value = self.lowest_bits_felt(input, 16)?;
-        let offset = self.shifted_low_bits(input, 16, 2)?;
-        let funct3 = self.shifted_low_bits(input, 18, 3)?;
-        let offset_is_odd = self.field_is_nonzero(self.lowest_bits_felt(offset, 1)?)?;
-        let cleaned_byte = self.select_value(
+        let limb_value = self.append_lowest_bits_felt(input, 16)?;
+        let offset = self.append_shifted_low_bits(input, 16, 2)?;
+        let funct3 = self.append_shifted_low_bits(input, 18, 3)?;
+        let offset_is_odd = self
+            .builder
+            .append_field_is_nonzero(self.append_lowest_bits_felt(offset, 1)?)?;
+        let cleaned_byte = self.append_select_value(
             offset_is_odd,
-            self.lowest_bits_felt(limb_value, 8)?,
-            self.builder.append_op_with_result(felt::bit_and(
-                self.builder.unknown_location(),
+            self.append_lowest_bits_felt(limb_value, 8)?,
+            self.append_op_with_result(felt::bit_and(
+                self.unknown_location(),
                 limb_value,
-                self.builder.get_felt_constant_from_start(0xff00)?,
+                self.get_felt_constant_from_start(0xff00)?,
             )?)?,
         )?;
-        let cleaned = self.select_value(
-            self.field_eq_constant(funct3, 0b000)?,
+        let cleaned = self.append_select_value(
+            self.append_field_eq_constant(funct3, 0b000)?,
             cleaned_byte,
-            self.builder.get_felt_constant_from_start(0)?,
+            self.get_felt_constant_from_start(0)?,
         )?;
 
         self.finalize_lookup_outputs(vec![cleaned], num_outputs)
@@ -2386,27 +2211,29 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         }
 
         let input = inputs[0];
-        let limb_value = self.lowest_bits_felt(input, 16)?;
-        let offset = self.shifted_low_bits(input, 16, 2)?;
-        let funct3 = self.shifted_low_bits(input, 18, 3)?;
-        let offset_is_odd = self.field_is_nonzero(self.lowest_bits_felt(offset, 1)?)?;
-        let value_to_store = self.lowest_bits_felt(limb_value, 8)?;
-        let shifted_byte = self.select_value(
+        let limb_value = self.append_lowest_bits_felt(input, 16)?;
+        let offset = self.append_shifted_low_bits(input, 16, 2)?;
+        let funct3 = self.append_shifted_low_bits(input, 18, 3)?;
+        let offset_is_odd = self
+            .builder
+            .append_field_is_nonzero(self.append_lowest_bits_felt(offset, 1)?)?;
+        let value_to_store = self.append_lowest_bits_felt(limb_value, 8)?;
+        let shifted_byte = self.append_select_value(
             offset_is_odd,
-            self.builder.append_op_with_result(felt::shl(
-                self.builder.unknown_location(),
+            self.append_op_with_result(felt::shl(
+                self.unknown_location(),
                 value_to_store,
-                self.builder.get_felt_constant_from_start(8)?,
+                self.get_felt_constant_from_start(8)?,
             )?)?,
             value_to_store,
         )?;
-        let cleaned = self.select_value(
-            self.field_eq_constant(funct3, 0b001)?,
+        let cleaned = self.append_select_value(
+            self.append_field_eq_constant(funct3, 0b001)?,
             limb_value,
-            self.select_value(
-                self.field_eq_constant(funct3, 0b000)?,
+            self.append_select_value(
+                self.append_field_eq_constant(funct3, 0b000)?,
                 shifted_byte,
-                self.builder.get_felt_constant_from_start(0)?,
+                self.get_felt_constant_from_start(0)?,
             )?,
         )?;
 
@@ -2427,11 +2254,11 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             bail!("AlignedRomRead expects 1 input, found {}", inputs.len());
         }
 
-        let [low, high] = self.builder.append_call::<2>(
-            self.builder.unknown_location(),
+        let [low, high] = self.append_call::<2>(
+            self.unknown_location(),
             READ_FROM_ROM_EXTERN,
             inputs,
-            &[self.builder.felt_type(), self.builder.felt_type()],
+            &[self.felt_type(), self.felt_type()],
         )?;
         self.finalize_lookup_outputs(vec![low, high], num_outputs)
     }
@@ -2441,9 +2268,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         // TODO(LLZK compute): replace these witness holes with deterministic lookup lowering once
         // the remaining table families and hard witness-only helpers are modeled in `@compute`
         // without depending on external oracle state.
-        (0..num_outputs)
-            .map(|_| self.builder.new_nondet_felt())
-            .collect()
+        (0..num_outputs).map(|_| self.new_nondet_felt()).collect()
     }
 
     /// Read a field-valued SSA slot by index.
@@ -2455,7 +2280,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         {
             SsaSlot::Value(ComputedValue::Field(value)) => Ok(*value),
             SsaSlot::Value(ComputedValue::Integer(value)) => self.integer_to_field(*value),
-            SsaSlot::Value(ComputedValue::Bool(value)) => self.bool_to_field(*value),
+            SsaSlot::Value(ComputedValue::Bool(value)) => self.append_bool_to_field(*value),
             SsaSlot::Lookup(_) => bail!("SSA slot {idx} is a lookup tuple, not a scalar value"),
             SsaSlot::Unit => bail!("SSA slot {idx} has no scalar value"),
         }
@@ -2591,77 +2416,71 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInCompute<'a, 'ctx, 'sco, F> fo
         &self,
         lowering: &mut ComputeLowering<'a, 'ctx, 'sco, F>,
     ) -> Result<Self::Output> {
-        let (slot, input_origin) = if let Some(lookup) = LookupInvocation::from_raw(self) {
-            (SsaSlot::Lookup(lookup.emit_compute(lowering)?), None)
-        } else {
-            match self {
-                RawExpression::Bool(expr) => (
-                    SsaSlot::Value(ComputedValue::Bool(expr.emit_compute(lowering)?)),
-                    lowering.strict_input_origin_for_bool_expr(expr),
-                ),
-                RawExpression::Field(expr) => (
-                    SsaSlot::Value(ComputedValue::Field(expr.emit_compute(lowering)?)),
-                    lowering.strict_input_origin_for_field_expr(expr),
-                ),
-                RawExpression::Integer(expr) => (
-                    SsaSlot::Value(ComputedValue::Integer(expr.emit_compute(lowering)?)),
-                    lowering.strict_input_origin_for_integer_expr(expr),
-                ),
-                RawExpression::AccessLookup {
-                    subindex,
-                    output_index,
-                } => {
-                    let lookup_value = *lowering
-                        .slot_as_lookup(*subindex)?
-                        .get(*output_index)
-                        .ok_or_else(|| anyhow!("lookup output {output_index} is out of bounds"))?;
-                    (SsaSlot::Value(ComputedValue::Field(lookup_value)), None)
-                }
-                RawExpression::WriteVariable {
-                    into_variable,
-                    source_subexpr,
-                    condition_subexpr_idx,
-                } => {
-                    lowering.lower_write(into_variable, source_subexpr, *condition_subexpr_idx)?;
-                    (SsaSlot::Unit, None)
-                }
-                RawExpression::PerformLookup { .. } | RawExpression::MaybePerformLookup { .. } => {
-                    unreachable!("lookup raw expressions are handled by LookupInvocation")
-                }
+        let (slot, input_origin) = match self {
+            RawExpression::Bool(expr) => (
+                SsaSlot::Value(ComputedValue::Bool(expr.emit_compute(lowering)?)),
+                lowering.strict_input_origin_for_bool_expr(expr),
+            ),
+            RawExpression::Field(expr) => (
+                SsaSlot::Value(ComputedValue::Field(expr.emit_compute(lowering)?)),
+                lowering.strict_input_origin_for_field_expr(expr),
+            ),
+            RawExpression::Integer(expr) => (
+                SsaSlot::Value(ComputedValue::Integer(expr.emit_compute(lowering)?)),
+                lowering.strict_input_origin_for_integer_expr(expr),
+            ),
+            RawExpression::AccessLookup {
+                subindex,
+                output_index,
+            } => {
+                let lookup_value = *lowering
+                    .slot_as_lookup(*subindex)?
+                    .get(*output_index)
+                    .ok_or_else(|| anyhow!("lookup output {output_index} is out of bounds"))?;
+                (SsaSlot::Value(ComputedValue::Field(lookup_value)), None)
+            }
+            RawExpression::PerformLookup {
+                input_subexpr_idxes,
+                table_id_subexpr_idx,
+                num_outputs,
+                lookup_mapping_idx,
+            } => (
+                SsaSlot::Lookup(lowering.lower_lookup_invocation(
+                    input_subexpr_idxes,
+                    *table_id_subexpr_idx,
+                    Some(*lookup_mapping_idx),
+                    None,
+                    *num_outputs,
+                )?),
+                None,
+            ),
+            RawExpression::MaybePerformLookup {
+                input_subexpr_idxes,
+                table_id_subexpr_idx,
+                mask_id_subexpr_idx,
+                num_outputs,
+            } => (
+                SsaSlot::Lookup(lowering.lower_lookup_invocation(
+                    input_subexpr_idxes,
+                    *table_id_subexpr_idx,
+                    None,
+                    Some(*mask_id_subexpr_idx),
+                    *num_outputs,
+                )?),
+                None,
+            ),
+            RawExpression::WriteVariable {
+                into_variable,
+                source_subexpr,
+                condition_subexpr_idx,
+            } => {
+                lowering.lower_write(into_variable, source_subexpr, *condition_subexpr_idx)?;
+                (SsaSlot::Unit, None)
             }
         };
 
         lowering.push_slot(slot, input_origin);
         Ok(())
-    }
-}
-
-impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInCompute<'a, 'ctx, 'sco, F> for LookupInvocation {
-    type Output = Vec<Value<'ctx, 'sco>>;
-
-    fn emit_compute(
-        &self,
-        lowering: &mut ComputeLowering<'a, 'ctx, 'sco, F>,
-    ) -> Result<Self::Output> {
-        let inputs = lowering.lookup_inputs_as_fields(self.input_subexpr_idxes())?;
-        let outputs = if let Some(table) =
-            lowering.resolve_lookup_table(self.table_id_subexpr_idx(), self.lookup_mapping_idx())?
-        {
-            lowering.compute_lookup_for_table(table, &inputs, self.num_outputs())?
-        } else {
-            lowering.compute_dynamic_lookup(
-                lowering.lookup_table_id_value(self.table_id_subexpr_idx())?,
-                &inputs,
-                self.num_outputs(),
-            )?
-        };
-
-        if let Some(mask_id_subexpr_idx) = self.mask_id_subexpr_idx() {
-            let mask = lowering.slot_as_bool(mask_id_subexpr_idx)?;
-            lowering.mask_lookup_outputs(mask, outputs)
-        } else {
-            Ok(outputs)
-        }
     }
 }
 
@@ -2703,7 +2522,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInCompute<'a, 'ctx, 'sco, F>
             }
             FieldNodeExpression::FromMask(expr) => {
                 let value = expr.emit_compute(lowering)?;
-                lowering.bool_to_field(value)
+                lowering.append_bool_to_field(value)
             }
             FieldNodeExpression::OracleValue {
                 placeholder,
@@ -2712,29 +2531,17 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInCompute<'a, 'ctx, 'sco, F>
             FieldNodeExpression::Add { lhs, rhs } => {
                 let lhs = lhs.emit_compute(lowering)?;
                 let rhs = rhs.emit_compute(lowering)?;
-                lowering.builder.append_op_with_result(felt::add(
-                    lowering.builder.unknown_location(),
-                    lhs,
-                    rhs,
-                )?)
+                lowering.append_op_with_result(felt::add(lowering.unknown_location(), lhs, rhs)?)
             }
             FieldNodeExpression::Sub { lhs, rhs } => {
                 let lhs = lhs.emit_compute(lowering)?;
                 let rhs = rhs.emit_compute(lowering)?;
-                lowering.builder.append_op_with_result(felt::sub(
-                    lowering.builder.unknown_location(),
-                    lhs,
-                    rhs,
-                )?)
+                lowering.append_op_with_result(felt::sub(lowering.unknown_location(), lhs, rhs)?)
             }
             FieldNodeExpression::Mul { lhs, rhs } => {
                 let lhs = lhs.emit_compute(lowering)?;
                 let rhs = rhs.emit_compute(lowering)?;
-                lowering.builder.append_op_with_result(felt::mul(
-                    lowering.builder.unknown_location(),
-                    lhs,
-                    rhs,
-                )?)
+                lowering.append_op_with_result(felt::mul(lowering.unknown_location(), lhs, rhs)?)
             }
             FieldNodeExpression::AddProduct {
                 additive_term,
@@ -2743,14 +2550,14 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInCompute<'a, 'ctx, 'sco, F>
             } => {
                 let mul_0 = mul_0.emit_compute(lowering)?;
                 let mul_1 = mul_1.emit_compute(lowering)?;
-                let product = lowering.builder.append_op_with_result(felt::mul(
-                    lowering.builder.unknown_location(),
+                let product = lowering.append_op_with_result(felt::mul(
+                    lowering.unknown_location(),
                     mul_0,
                     mul_1,
                 )?)?;
                 let additive_term = additive_term.emit_compute(lowering)?;
-                lowering.builder.append_op_with_result(felt::add(
-                    lowering.builder.unknown_location(),
+                lowering.append_op_with_result(felt::add(
+                    lowering.unknown_location(),
                     additive_term,
                     product,
                 )?)
@@ -2763,17 +2570,19 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInCompute<'a, 'ctx, 'sco, F>
                 let selector = selector.emit_compute(lowering)?;
                 let if_true = if_true.emit_compute(lowering)?;
                 let if_false = if_false.emit_compute(lowering)?;
-                lowering.select_value(selector, if_true, if_false)
+                lowering
+                    .builder
+                    .append_select_value(selector, if_true, if_false)
             }
             FieldNodeExpression::InverseUnchecked(expr) => {
                 let value = expr.emit_compute(lowering)?;
                 lowering
                     .builder
-                    .append_op_with_result(felt::inv(lowering.builder.unknown_location(), value)?)
+                    .append_op_with_result(felt::inv(lowering.unknown_location(), value)?)
             }
             // TODO(LLZK compute): lower inverse-or-zero deterministically instead of using a
             // witness hole.
-            FieldNodeExpression::InverseOrZero(_expr) => lowering.builder.new_nondet_felt(),
+            FieldNodeExpression::InverseOrZero(_expr) => lowering.new_nondet_felt(),
             FieldNodeExpression::LookupOutput { .. }
             | FieldNodeExpression::MaybeLookupOutput { .. } => {
                 bail!("lookup outputs must be rewritten into SSA access nodes before lowering")
@@ -2792,13 +2601,13 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInCompute<'a, 'ctx, 'sco, F>
         lowering: &mut ComputeLowering<'a, 'ctx, 'sco, F>,
     ) -> Result<Self::Output> {
         match self {
-            BoolNodeExpression::Place(variable) => {
-                lowering.field_is_nonzero(lowering.read_variable(*variable)?)
-            }
+            BoolNodeExpression::Place(variable) => lowering
+                .builder
+                .append_field_is_nonzero(lowering.read_variable(*variable)?),
             BoolNodeExpression::SubExpression(idx) => lowering.slot_as_bool(*idx),
             BoolNodeExpression::Constant(constant) => lowering
                 .builder
-                .get_constant_from_start(lowering.builder.bool_type(), *constant as u64),
+                .get_constant_from_start(lowering.bool_type(), *constant as u64),
             BoolNodeExpression::OracleValue { placeholder } => {
                 lowering.read_bool_oracle(*placeholder)
             }
@@ -2823,34 +2632,22 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInCompute<'a, 'ctx, 'sco, F>
             }
             BoolNodeExpression::FromField(expr) => {
                 let value = expr.emit_compute(lowering)?;
-                lowering.field_is_nonzero(value)
+                lowering.append_field_is_nonzero(value)
             }
             BoolNodeExpression::FromFieldEquality { lhs, rhs } => {
                 let lhs = lhs.emit_compute(lowering)?;
                 let rhs = rhs.emit_compute(lowering)?;
-                lowering.builder.append_op_with_result(bool::eq(
-                    lowering.builder.unknown_location(),
-                    lhs,
-                    rhs,
-                )?)
+                lowering.append_op_with_result(bool::eq(lowering.unknown_location(), lhs, rhs)?)
             }
             BoolNodeExpression::And { lhs, rhs } => {
                 let lhs = lhs.emit_compute(lowering)?;
                 let rhs = rhs.emit_compute(lowering)?;
-                lowering.builder.append_op_with_result(bool::and(
-                    lowering.builder.unknown_location(),
-                    lhs,
-                    rhs,
-                )?)
+                lowering.append_op_with_result(bool::and(lowering.unknown_location(), lhs, rhs)?)
             }
             BoolNodeExpression::Or { lhs, rhs } => {
                 let lhs = lhs.emit_compute(lowering)?;
                 let rhs = rhs.emit_compute(lowering)?;
-                lowering.builder.append_op_with_result(bool::or(
-                    lowering.builder.unknown_location(),
-                    lhs,
-                    rhs,
-                )?)
+                lowering.append_op_with_result(bool::or(lowering.unknown_location(), lhs, rhs)?)
             }
             BoolNodeExpression::Select {
                 selector,
@@ -2860,13 +2657,15 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInCompute<'a, 'ctx, 'sco, F>
                 let selector = selector.emit_compute(lowering)?;
                 let if_true = if_true.emit_compute(lowering)?;
                 let if_false = if_false.emit_compute(lowering)?;
-                lowering.select_value(selector, if_true, if_false)
+                lowering
+                    .builder
+                    .append_select_value(selector, if_true, if_false)
             }
             BoolNodeExpression::Negate(expr) => {
                 let value = expr.emit_compute(lowering)?;
                 lowering
                     .builder
-                    .append_op_with_result(bool::not(lowering.builder.unknown_location(), value)?)
+                    .append_op_with_result(bool::not(lowering.unknown_location(), value)?)
             }
         }
     }
@@ -2917,10 +2716,10 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInCompute<'a, 'ctx, 'sco, F>
             }
             FixedWidthIntegerNodeExpression::U32FromMask(expr) => {
                 let value = expr.emit_compute(lowering)?;
-                let low = lowering.bool_to_field(value)?;
+                let low = lowering.append_bool_to_field(value)?;
                 Ok(IntegerValue::U32(U32Parts {
                     low,
-                    high: lowering.builder.get_felt_constant_from_start(0)?,
+                    high: lowering.get_felt_constant_from_start(0)?,
                 }))
             }
             FixedWidthIntegerNodeExpression::U32FromField(expr) => {
@@ -2940,7 +2739,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInCompute<'a, 'ctx, 'sco, F>
                 match expr.emit_compute(lowering)? {
                     IntegerValue::U16(value) => Ok(IntegerValue::U32(U32Parts {
                         low: value,
-                        high: lowering.builder.get_felt_constant_from_start(0)?,
+                        high: lowering.get_felt_constant_from_start(0)?,
                     })),
                     other => bail!(
                         "expected u16 input when widening to u32, found {}-bit value",
@@ -2950,9 +2749,9 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInCompute<'a, 'ctx, 'sco, F>
             }
             FixedWidthIntegerNodeExpression::TruncateFromU16(expr) => {
                 match expr.emit_compute(lowering)? {
-                    IntegerValue::U16(value) => {
-                        Ok(IntegerValue::U8(lowering.lowest_bits_felt(value, 8)?))
-                    }
+                    IntegerValue::U16(value) => Ok(IntegerValue::U8(
+                        lowering.append_lowest_bits_felt(value, 8)?,
+                    )),
                     other => bail!(
                         "expected u16 input when truncating to u8, found {}-bit value",
                         other.bit_width()
