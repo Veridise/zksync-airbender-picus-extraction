@@ -1638,9 +1638,14 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             n => todo!("table {:?} with {} inputs is not supported", table_id, n),
         };
 
-        let mut outputs = self.new_lookup_outputs(num_outputs)?;
-        for table in supported_tables.iter() {
-            let candidate_outputs = self.compute_lookup_for_table(*table, inputs, num_outputs)?;
+        let mut tables = supported_tables.iter().copied();
+        let Some(first_table) = tables.next() else {
+            unreachable!("dynamic lookup dispatch requires at least one supported table");
+        };
+
+        let mut outputs = self.compute_lookup_for_table(first_table, inputs, num_outputs)?;
+        for table in tables {
+            let candidate_outputs = self.compute_lookup_for_table(table, inputs, num_outputs)?;
             let is_selected =
                 self.append_field_eq_constant(table_id, u64::from(table.to_table_id()))?;
             outputs = candidate_outputs
@@ -1675,7 +1680,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             .collect()
     }
 
-    /// Resize a concrete lookup result tuple to the arity requested by the SSA node.
+    /// Resize a concrete lookup result tuple to the size requested by the SSA node.
     ///
     /// Some tables conceptually produce fewer than the full width-3 row, with trailing zeros
     /// reserved for unused columns. The SSA only asks for the outputs it later reads, so this
@@ -1929,7 +1934,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         )
     }
 
-    /// Deterministically lower the byte/halfword load extension table used by subword loads.
+    /// Lower the byte/halfword load extension table used by subword loads.
     ///
     /// This follows `create_memory_load_halfword_or_byte_table`: decode the selected 16-bit limb,
     /// the byte offset inside that limb, and the `funct3` mode, then rebuild the two 16-bit output
@@ -2010,7 +2015,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         self.finalize_lookup_outputs(vec![low, high], num_outputs)
     }
 
-    /// Deterministically lower the table that clears bytes from the original RAM limb on stores.
+    /// Lower the table that clears bytes from the original RAM limb on stores.
     ///
     /// This mirrors `create_memory_store_halfword_or_byte_clear_source_limb_table`, which keeps
     /// only the untouched bytes of the original RAM limb before the cleaned write contribution is
@@ -2050,7 +2055,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         self.finalize_lookup_outputs(vec![cleaned], num_outputs)
     }
 
-    /// Deterministically lower the table that positions the written byte/halfword contribution.
+    /// Lower the table that positions the written byte/halfword contribution.
     ///
     /// This matches `create_memory_store_halfword_or_byte_clear_written_limb_table`: depending on
     /// the store width and byte offset, keep either the full halfword or the selected byte shifted
@@ -2118,14 +2123,6 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             &[felt_type, felt_type],
         )?;
         self.finalize_lookup_outputs(vec![low, high], num_outputs)
-    }
-
-    /// Allocate witness holes for lookup outputs that are not yet lowered deterministically.
-    fn new_lookup_outputs(&self, num_outputs: usize) -> Result<Vec<Value<'ctx, 'sco>>> {
-        // TODO(LLZK compute): replace these witness holes with deterministic lookup lowering once
-        // the remaining table families and hard witness-only helpers are modeled in `@compute`
-        // without depending on external oracle state.
-        (0..num_outputs).map(|_| self.new_nondet_felt()).collect()
     }
 
     /// Read a field-valued SSA slot by index.
@@ -2370,9 +2367,9 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInCompute<'a, 'ctx, 'sco, F>
         match self {
             FieldNodeExpression::Place(variable) => lowering.read_variable(*variable),
             FieldNodeExpression::SubExpression(idx) => lowering.slot_as_field(*idx),
-            FieldNodeExpression::Constant(constant) => lowering
-                .builder
-                .get_felt_constant_from_start(constant.as_u64_reduced()),
+            FieldNodeExpression::Constant(constant) => {
+                lowering.get_felt_constant_from_start(constant.as_u64_reduced())
+            }
             FieldNodeExpression::FromInteger(expr) => {
                 let value = expr.emit_compute(lowering)?;
                 lowering.integer_to_field(value)
@@ -2458,13 +2455,13 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInCompute<'a, 'ctx, 'sco, F>
         lowering: &mut ComputeLowering<'a, 'ctx, 'sco, F>,
     ) -> Result<Self::Output> {
         match self {
-            BoolNodeExpression::Place(variable) => lowering
-                .builder
-                .append_field_is_nonzero(lowering.read_variable(*variable)?),
+            BoolNodeExpression::Place(variable) => {
+                lowering.append_field_is_nonzero(lowering.read_variable(*variable)?)
+            }
             BoolNodeExpression::SubExpression(idx) => lowering.slot_as_bool(*idx),
-            BoolNodeExpression::Constant(constant) => lowering
-                .builder
-                .get_constant_from_start(lowering.bool_type(), *constant as u64),
+            BoolNodeExpression::Constant(constant) => {
+                lowering.get_constant_from_start(lowering.bool_type(), *constant as u64)
+            }
             BoolNodeExpression::OracleValue { placeholder } => {
                 lowering.read_bool_oracle(*placeholder)
             }
@@ -2559,14 +2556,10 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInCompute<'a, 'ctx, 'sco, F>
                 Ok(IntegerValue::U8(lowering.read_u8_oracle(*placeholder)?))
             }
             FixedWidthIntegerNodeExpression::ConstantU8(constant) => Ok(IntegerValue::U8(
-                lowering
-                    .builder
-                    .get_felt_constant_from_start(u64::from(*constant))?,
+                lowering.get_felt_constant_from_start(u64::from(*constant))?,
             )),
             FixedWidthIntegerNodeExpression::ConstantU16(constant) => Ok(IntegerValue::U16(
-                lowering
-                    .builder
-                    .get_felt_constant_from_start(u64::from(*constant))?,
+                lowering.get_felt_constant_from_start(u64::from(*constant))?,
             )),
             FixedWidthIntegerNodeExpression::ConstantU32(constant) => {
                 Ok(IntegerValue::U32(lowering.u32_constant(*constant)?))
@@ -2677,8 +2670,6 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInCompute<'a, 'ctx, 'sco, F>
                 let rhs = rhs.emit_compute(lowering)?;
                 lowering.bitwise_binop(felt::bit_xor, lhs, rhs)
             }
-            // TODO(LLZK compute): support the remaining integer witness ops once their exact LLZK
-            // lowering has been validated against the Rust witness evaluator.
             FixedWidthIntegerNodeExpression::MulLow { .. }
             | FixedWidthIntegerNodeExpression::MulHigh { .. }
             | FixedWidthIntegerNodeExpression::AddProduct { .. }
@@ -2690,7 +2681,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInCompute<'a, 'ctx, 'sco, F>
             | FixedWidthIntegerNodeExpression::SignedMulHighBits { .. }
             | FixedWidthIntegerNodeExpression::SignedByUnsignedMulLowBits { .. }
             | FixedWidthIntegerNodeExpression::SignedByUnsignedMulHighBits { .. } => {
-                bail!(
+                todo!(
                     "integer operation {:?} is not yet supported in @compute",
                     self
                 )
