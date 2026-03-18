@@ -105,8 +105,7 @@ pub trait VariableExtractor {
 
 impl<F: PrimeField> VariableExtractor for OpcodeFamilyCircuitState<F> {
     fn get_inputs(&self) -> Result<Vec<ExtractedVariable>> {
-        // The source
-        // circuit also tracks many of these executor machine inputs through placeholder
+        // The source circuit also tracks many of these executor machine inputs through placeholder
         // substitutions for the witness/oracle path, so `@compute` lowers those placeholder
         // reads back to these inputs so the same logical value is not derived from two
         // unrelated sources downstream.
