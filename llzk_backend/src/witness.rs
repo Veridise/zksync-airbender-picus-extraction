@@ -714,7 +714,7 @@ fn raw_expression_reads_runtime_memory<F: FieldInfo>(
                         variable_mapping.get(into_variable),
                         Some(ColumnAddress::MemorySubtree(_))
                     )
-                    && !vars.has_compute_member(into_variable))
+                    && !vars.has_member(into_variable))
         }
     }
 }
@@ -782,7 +782,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         source_subexpr: &Expression<F>,
         condition_subexpr_idx: Option<usize>,
     ) -> Result<()> {
-        if self.vars.has_compute_member(into_variable) {
+        if self.vars.has_member(into_variable) {
             let mut value = self.expression_to_store_value(source_subexpr)?;
             if let Some(condition_idx) = condition_subexpr_idx {
                 let condition = self.slot_as_bool(condition_idx)?;

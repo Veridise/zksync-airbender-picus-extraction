@@ -447,25 +447,20 @@ impl<F: FieldInfo> StructVars<F> {
     }
 
     /// Try to read a variable from the `@compute` view of the struct.
-    ///
-    /// `@compute` does not receive a `self` argument. Its public inputs begin at argument 0 and
-    /// the partially constructed witness struct is the result of the leading `struct.new`.
-    ///
-    /// This is the canonical path for circuit boundary values. Witness lowering prefers these
-    /// inputs over runtime oracle hooks whenever an SSA placeholder is just another name for an
-    /// already-exposed `@compute` argument.
     pub fn try_get_compute_input_val<'ctx, 'sco>(
         &self,
         builder: &OpsBuilder<'ctx, 'sco, F>,
         var: &Variable,
     ) -> Result<Option<Value<'ctx, 'sco>>> {
+        // `@compute` does not receive a `self` argument. Its public inputs begin at argument 0 and
+        // the partially constructed witness struct is the result of the leading `struct.new`.
         self.get_input_val_at_offset::<0>(builder, var)
     }
 
     /// Try to read a variable from the full `@compute` view of the struct.
     ///
-    /// This checks the explicit function arguments first and then falls back to the partially
-    /// constructed struct members.
+    /// This checks the explicit function arguments first and then falls back to struct member
+    /// reads.
     pub fn try_get_compute_val<'ctx, 'sco>(
         &self,
         builder: &OpsBuilder<'ctx, 'sco, F>,
@@ -495,20 +490,15 @@ impl<F: FieldInfo> StructVars<F> {
         self.arg_map.contains_key(var)
     }
 
-    /// Return `true` when `var` is stored as a struct member in the LLZK boundary.
-    ///
-    /// This is the key distinction for witness lowering when the one-row compiler maps a logical
-    /// variable into the `MemorySubtree`: if the same variable is also exposed as an LLZK output or
-    /// intermediate member, `@compute` should update the struct member rather than routing that
-    /// write through the generic memory runtime hook.
-    pub fn has_compute_member(&self, var: &Variable) -> bool {
+    /// Return `true` when `var` is represented by a struct member.
+    pub fn has_member(&self, var: &Variable) -> bool {
         self.member_map.contains_key(var)
     }
 
     /// Return `true` when `var` is visible through either the `@compute` inputs or the returned
     /// struct.
     pub fn is_compute_exposed(&self, var: &Variable) -> bool {
-        self.has_compute_input(var) || self.has_compute_member(var)
+        self.has_compute_input(var) || self.has_member(var)
     }
 
     /// Update `var` with `value` by creating a `struct.writem` operation in `@compute` targeting
