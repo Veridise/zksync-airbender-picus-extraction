@@ -19,7 +19,6 @@ use std::path::Path;
 use crate::builder::ModuleEnv;
 use crate::codegen::CircuitBundle;
 use crate::codegen::EmitLLZKInModule as _;
-use crate::codegen::VariableExtractor;
 use crate::config::LlzkStructLayout;
 use crate::config::OptLevel;
 use crate::output_format::OutputFormat;
@@ -269,35 +268,50 @@ fn merge_llzk_placeholder_aliases<F: prover::field::PrimeField>(
 
 /// Derive aliases for shuffle-RAM placeholders that are already exposed to the [`CircuitOutput`].
 ///
-/// These aliases only cover read values. They are the cases where [`VariableExtractor::get_inputs`]
-/// already exports the same query values as LLZK inputs, so mapping the placeholder back to that
-/// input keeps `@compute` and `@constrain` aligned without requiring any shared-library changes.
+/// The source circuit code uses the same register variables for multiple placeholders, and they
+/// differ between the [`CircuitOutput`] and [`WitnessComputation`], so adding these aliases
+/// allows `@compute` and `@constrain` to reference the same final LLZK members/arguments for
+/// computation and constraints.
 ///
-/// The mapping intentionally mirrors the existing circuit construction helpers
-/// (e.g., optimized_decode_and_preallocate_mem_queries_for_bytecode_in_rom):
-/// - query 0 is the RS1 read slot (`FirstRegMem` / `ShuffleRamReadValue(0)`)
-/// - query 1 is the RS2 read slot (`SecondRegMem` / `ShuffleRamReadValue(1)`)
-/// - query 2 is the destination prior-value slot (`WriteRdReadSetWitness`,
-///   `WriteRegMemReadWitness`, and `ShuffleRamReadValue(2)`)
+/// Sources:
+/// - In `get_rs1_as_shuffle_ram` and `get_rs2_as_shuffle_ram` (`cs/src/machine/utils.rs`), the
+///   registers allocated from `FirstRegMem` and `SecondRegMem` are passed directly into
+///   `form_mem_op_for_register_only`, so the placeholder value and
+///   [`ShuffleRamMemQuery::read_value`] are literally the same two variables.
+/// - In the legacy destination-write helpers `set_rd_with_mask_as_shuffle_ram` and
+///   `set_rd_without_mask_as_shuffle_ram`, the register allocated from `WriteRdReadSetWitness`
+///   becomes the returned query's `read_value`, again without creating a second variable.
+/// - In the newer decode/reduced-machine paths (`decode_and_read_operands.rs` /
+///   `reduced_machine_ops.rs`), the placeholders `ShuffleRamReadValue(0)`,
+///   `ShuffleRamReadValue(1)`, and `ShuffleRamReadValue(2)` are each allocated first and then
+///   written directly into `ShuffleRamMemQuery.read_value`.
+/// - In the unrolled load/store families, `WriteRegMemReadWitness` is assigned into the same
+///   `rd_or_store_ram_access_query_read_value` limbs that are later added as shuffle-RAM query 2,
+///   so aliasing it to query 2's `read_value` preserves the existing witness flow.
 fn derive_shuffle_ram_placeholder_aliases(
     queries: &[ShuffleRamMemQuery],
 ) -> HashMap<(Placeholder, usize), Variable> {
     let mut aliases = HashMap::new();
 
-    for (query_index, query) in queries.iter().enumerate() {
+    // `ShuffleRamReadValue(i)` is only defined for `i in {0, 1, 2}`.
+    for (query_index, query) in queries.iter().take(3).enumerate() {
         insert_register_alias(
             &mut aliases,
             Placeholder::ShuffleRamReadValue(query_index),
             query.read_value,
         );
     }
+    // query 0 is the RS1 read slot (`FirstRegMem` / `ShuffleRamReadValue(0)`):
 
     if let Some(query) = queries.first() {
         insert_register_alias(&mut aliases, Placeholder::FirstRegMem, query.read_value);
     }
+    // query 1 is the RS2 read slot (`SecondRegMem` / `ShuffleRamReadValue(1)`)
     if let Some(query) = queries.get(1) {
         insert_register_alias(&mut aliases, Placeholder::SecondRegMem, query.read_value);
     }
+    // query 2 is the destination prior-value slot (`WriteRdReadSetWitness`,
+    //   `WriteRegMemReadWitness`, and `ShuffleRamReadValue(2)`)
     if let Some(query) = queries.get(2) {
         insert_register_alias(
             &mut aliases,
@@ -441,7 +455,7 @@ mod tests {
     }
 
     #[test]
-    fn shuffle_placeholder_aliases_cover_generic_shuffle_reads() {
+    fn shuffle_placeholder_aliases_cover_supported_shuffle_reads() {
         let aliases = derive_shuffle_ram_placeholder_aliases(&[
             register_query(0, [10, 11]),
             register_query(1, [20, 21]),
@@ -461,9 +475,7 @@ mod tests {
             aliases[&(Placeholder::ShuffleRamReadValue(2), 0)],
             Variable(30)
         );
-        assert_eq!(
-            aliases[&(Placeholder::ShuffleRamReadValue(3), 1)],
-            Variable(41)
-        );
+        assert!(!aliases.contains_key(&(Placeholder::ShuffleRamReadValue(3), 0)));
+        assert!(!aliases.contains_key(&(Placeholder::ShuffleRamReadValue(3), 1)));
     }
 }
