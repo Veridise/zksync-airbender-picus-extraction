@@ -112,9 +112,7 @@ impl<'ctx, F: FieldInfo> ModuleEnv<'ctx, F> {
 
     /// Declare a private module-level external function if it is not already present.
     ///
-    /// The LLZK backend uses this for runtime hooks such as ROM and memory accesses. These are
-    /// emitted as `function.def private` declarations so `@compute` can call them while leaving
-    /// their implementation to the downstream LLZK user.
+    /// Used to create oracle hooks (e.g., ROM reads) for `@compute`.
     pub fn declare_private_extern_function(
         &self,
         name: &str,
@@ -143,17 +141,11 @@ impl<'ctx, F: FieldInfo> ModuleEnv<'ctx, F> {
     /// Query the module for the given named free function.
     fn module_contains_top_level_function(&self, name: &str) -> Result<bool> {
         let module_op = self.module.as_operation();
-        let module_raw = module_op.to_raw();
         let mut found = false;
-        let mut module_op_mut = unsafe { OperationRefMut::from_raw(module_raw) };
-        module_op_mut.walk_mut(WalkOrder::PreOrder, |op| {
-            if op.to_raw().ptr == module_raw.ptr {
-                return WalkResult::Advance;
-            }
-
+        module_op.walk(WalkOrder::PreOrder, |op| {
             if op
                 .parent_operation()
-                .map(|parent| parent.to_raw().ptr == module_raw.ptr)
+                .map(|parent| parent == module_op)
                 .unwrap_or(false)
             {
                 if dialect::function::is_func_def(&op)
@@ -958,5 +950,76 @@ impl<'ctx, 'str, F: FieldInfo> Deref for StructBuilder<'ctx, 'str, F> {
 
     fn deref(&self) -> &Self::Target {
         self.env
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use llzk::operation::verify_operation_with_diags;
+    use prover::field::Mersenne31Field;
+
+    fn count_named_top_level_functions(module: &Module<'_>, name: &str) -> usize {
+        let mut count = 0;
+        let mut current = module.body().first_operation();
+        while let Some(op) = current {
+            if dialect::function::is_func_def(&op)
+                && op
+                    .attribute("sym_name")
+                    .and_then(StringAttribute::try_from)
+                    .map(|attr| attr.value() == name)
+                    .unwrap_or(false)
+            {
+                count += 1;
+            }
+            current = op.next_in_block();
+        }
+        count
+    }
+
+    #[test]
+    fn module_contains_top_level_function_ignores_nested_struct_functions() {
+        let ctx = LlzkContext::new();
+        let module = llzk_module(Location::unknown(&ctx));
+        let env = ModuleEnv::<Mersenne31Field>::new(&ctx, &module);
+
+        let builder = StructBuilder::new(&env, "nested_fns_only");
+        module
+            .body()
+            .append_operation(builder.build().unwrap().into());
+
+        assert!(!env.module_contains_top_level_function("compute").unwrap());
+        assert!(!env.module_contains_top_level_function("constrain").unwrap());
+
+        env.declare_private_extern_function("top_level_hook", &[], &[])
+            .unwrap();
+        assert!(env
+            .module_contains_top_level_function("top_level_hook")
+            .unwrap());
+
+        verify_operation_with_diags(&module.as_operation()).unwrap();
+    }
+
+    #[test]
+    fn declare_private_extern_function_is_idempotent() {
+        let ctx = LlzkContext::new();
+        let module = llzk_module(Location::unknown(&ctx));
+        let env = ModuleEnv::<Mersenne31Field>::new(&ctx, &module);
+        let felt = env.felt_type();
+
+        env.declare_private_extern_function("read_oracle_field", &[felt], &[felt])
+            .unwrap();
+        env.declare_private_extern_function("read_oracle_field", &[felt], &[felt])
+            .unwrap();
+
+        assert_eq!(
+            count_named_top_level_functions(&module, "read_oracle_field"),
+            1
+        );
+        assert!(env
+            .module_contains_top_level_function("read_oracle_field")
+            .unwrap());
+
+        verify_operation_with_diags(&module.as_operation()).unwrap();
     }
 }
