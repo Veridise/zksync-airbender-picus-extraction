@@ -20,7 +20,7 @@ use crate::lookups::add_disjunctive_lookup_constraints;
 use crate::lookups::add_lookup_constraints_for_table;
 
 /// Trait implemented by types that can emit LLZK IR within a struct `@constrain` function.
-pub(crate) trait EmitLLZKInConstrain<'ctx: 'sco, 'sco, F: FieldInfo> {
+pub(crate) trait EmitLlzkInConstrain<'ctx: 'sco, 'sco, F: FieldInfo> {
     type Output;
 
     fn emit_constrain(
@@ -30,8 +30,8 @@ pub(crate) trait EmitLLZKInConstrain<'ctx: 'sco, 'sco, F: FieldInfo> {
     ) -> Result<Self::Output>;
 }
 
-impl<'ctx: 'sco, 'sco, F: FieldInfo, T: EmitLLZKInConstrain<'ctx, 'sco, F, Output = ()>>
-    EmitLLZKInConstrain<'ctx, 'sco, F> for Vec<T>
+impl<'ctx: 'sco, 'sco, F: FieldInfo, T: EmitLlzkInConstrain<'ctx, 'sco, F, Output = ()>>
+    EmitLlzkInConstrain<'ctx, 'sco, F> for Vec<T>
 {
     type Output = ();
 
@@ -74,7 +74,7 @@ impl<'ctx: 'op, 'op, F: FieldInfo, T: StructDefOpMutLike<'ctx, 'op>> AddConstrai
 {
 }
 
-impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInConstrain<'ctx, 'sco, F> for RangeCheckQuery<F> {
+impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInConstrain<'ctx, 'sco, F> for RangeCheckQuery<F> {
     type Output = ();
 
     fn emit_constrain(
@@ -95,7 +95,7 @@ impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInConstrain<'ctx, 'sco, F> for Rang
     }
 }
 
-impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInConstrain<'ctx, 'sco, F> for (Constraint<F>, bool) {
+impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInConstrain<'ctx, 'sco, F> for (Constraint<F>, bool) {
     type Output = ();
 
     fn emit_constrain(
@@ -116,7 +116,7 @@ impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInConstrain<'ctx, 'sco, F> for (Con
     }
 }
 
-impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInConstrain<'ctx, 'sco, F> for Term<F> {
+impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInConstrain<'ctx, 'sco, F> for Term<F> {
     type Output = Value<'ctx, 'sco>;
 
     fn emit_constrain(
@@ -178,7 +178,7 @@ impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInConstrain<'ctx, 'sco, F> for Term
     }
 }
 
-impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInConstrain<'ctx, 'sco, F> for LookupInput<F> {
+impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInConstrain<'ctx, 'sco, F> for LookupInput<F> {
     type Output = Value<'ctx, 'sco>;
 
     fn emit_constrain(
@@ -219,7 +219,7 @@ impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInConstrain<'ctx, 'sco, F> for Look
     }
 }
 
-impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInConstrain<'ctx, 'sco, F> for LookupQuery<F> {
+impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInConstrain<'ctx, 'sco, F> for LookupQuery<F> {
     type Output = ();
 
     fn emit_constrain(
@@ -237,7 +237,7 @@ impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInConstrain<'ctx, 'sco, F> for Look
     }
 }
 
-impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInConstrain<'ctx, 'sco, F> for DisjunctiveLookup<F> {
+impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInConstrain<'ctx, 'sco, F> for DisjunctiveLookup<F> {
     type Output = ();
 
     fn emit_constrain(
@@ -249,7 +249,7 @@ impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInConstrain<'ctx, 'sco, F> for Disj
     }
 }
 
-impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInConstrain<'ctx, 'sco, F> for Boolean {
+impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInConstrain<'ctx, 'sco, F> for Boolean {
     type Output = Value<'ctx, 'sco>;
 
     fn emit_constrain(

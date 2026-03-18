@@ -2,7 +2,7 @@
 
 use crate::builder::OpsBuilder;
 use crate::codegen::StructVars;
-use crate::constraints::EmitLLZKInConstrain as _;
+use crate::constraints::EmitLlzkInConstrain as _;
 use crate::field::FieldInfo;
 use anyhow::Result;
 use llzk::dialect::felt;

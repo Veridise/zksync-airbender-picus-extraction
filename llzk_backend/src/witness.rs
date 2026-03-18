@@ -352,7 +352,7 @@ enum SsaSlot<'ctx, 'sco> {
 
 /// Trait implemented by SSA witness nodes that can emit LLZK IR inside a struct `@compute`
 /// function.
-trait EmitLLZKInCompute<'a, 'ctx: 'sco, 'sco, F: FieldInfo> {
+trait EmitLlzkInCompute<'a, 'ctx: 'sco, 'sco, F: FieldInfo> {
     type Output;
 
     fn emit_compute(
@@ -361,10 +361,10 @@ trait EmitLLZKInCompute<'a, 'ctx: 'sco, 'sco, F: FieldInfo> {
     ) -> Result<Self::Output>;
 }
 
-impl<'a, 'ctx: 'sco, 'sco, F, T> EmitLLZKInCompute<'a, 'ctx, 'sco, F> for Vec<T>
+impl<'a, 'ctx: 'sco, 'sco, F, T> EmitLlzkInCompute<'a, 'ctx, 'sco, F> for Vec<T>
 where
     F: FieldInfo,
-    T: EmitLLZKInCompute<'a, 'ctx, 'sco, F, Output = ()>,
+    T: EmitLlzkInCompute<'a, 'ctx, 'sco, F, Output = ()>,
 {
     type Output = ();
 
@@ -2584,7 +2584,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
     }
 }
 
-impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInCompute<'a, 'ctx, 'sco, F> for RawExpression<F> {
+impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInCompute<'a, 'ctx, 'sco, F> for RawExpression<F> {
     type Output = ();
 
     fn emit_compute(
@@ -2636,7 +2636,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInCompute<'a, 'ctx, 'sco, F> fo
     }
 }
 
-impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInCompute<'a, 'ctx, 'sco, F> for LookupInvocation {
+impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInCompute<'a, 'ctx, 'sco, F> for LookupInvocation {
     type Output = Vec<Value<'ctx, 'sco>>;
 
     fn emit_compute(
@@ -2665,7 +2665,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInCompute<'a, 'ctx, 'sco, F> fo
     }
 }
 
-impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInCompute<'a, 'ctx, 'sco, F> for Expression<F> {
+impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInCompute<'a, 'ctx, 'sco, F> for Expression<F> {
     type Output = ComputedValue<'ctx, 'sco>;
 
     fn emit_compute(
@@ -2682,7 +2682,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInCompute<'a, 'ctx, 'sco, F> fo
     }
 }
 
-impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInCompute<'a, 'ctx, 'sco, F>
+impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInCompute<'a, 'ctx, 'sco, F>
     for FieldNodeExpression<F>
 {
     type Output = Value<'ctx, 'sco>;
@@ -2782,7 +2782,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInCompute<'a, 'ctx, 'sco, F>
     }
 }
 
-impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInCompute<'a, 'ctx, 'sco, F>
+impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInCompute<'a, 'ctx, 'sco, F>
     for BoolNodeExpression<F>
 {
     type Output = Value<'ctx, 'sco>;
@@ -2872,7 +2872,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInCompute<'a, 'ctx, 'sco, F>
     }
 }
 
-impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLLZKInCompute<'a, 'ctx, 'sco, F>
+impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInCompute<'a, 'ctx, 'sco, F>
     for FixedWidthIntegerNodeExpression<F>
 {
     type Output = IntegerValue<'ctx, 'sco>;

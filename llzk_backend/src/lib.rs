@@ -18,7 +18,7 @@ use std::path::Path;
 
 use crate::builder::ModuleEnv;
 use crate::codegen::CircuitBundle;
-use crate::codegen::EmitLLZKInModule as _;
+use crate::codegen::EmitLlzkInModule as _;
 use crate::config::LlzkStructLayout;
 use crate::config::OptLevel;
 use crate::output_format::OutputFormat;

@@ -15,12 +15,12 @@ use prover::field::PrimeField;
 use crate::builder::*;
 use crate::config::LlzkStructLayout;
 use crate::constraints::AddConstraints;
-use crate::constraints::EmitLLZKInConstrain;
+use crate::constraints::EmitLlzkInConstrain;
 use crate::field::FieldInfo;
 use crate::witness::WitnessComputation;
 
 /// Trait implemented by types that can emit LLZK IR within the module scope.
-pub(crate) trait EmitLLZKInModule<'ctx, F: FieldInfo> {
+pub(crate) trait EmitLlzkInModule<'ctx, F: FieldInfo> {
     type Output;
 
     fn emit_llzk(&self, env: &ModuleEnv<'ctx, F>) -> Result<Self::Output>;
@@ -264,7 +264,7 @@ impl<F: FieldInfo> Deref for CircuitBundle<F> {
     }
 }
 
-impl<'ctx, F: FieldInfo> EmitLLZKInModule<'ctx, F> for CircuitBundle<F> {
+impl<'ctx, F: FieldInfo> EmitLlzkInModule<'ctx, F> for CircuitBundle<F> {
     type Output = ();
 
     fn emit_llzk(&self, env: &ModuleEnv<'ctx, F>) -> Result<Self::Output> {
