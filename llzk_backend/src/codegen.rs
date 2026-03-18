@@ -338,11 +338,11 @@ pub struct StructVars<F: FieldInfo> {
     /// is an array type)`. All members are assumed to be either felts or "registers", which are
     /// flat, two-element felt arrays.
     member_map: HashMap<Variable, (String, Option<u64>)>,
-    /// Maps input variables to a tuple `(input ordinal, optional limb index)`.
+    /// Maps input variables to a tuple `(input arg number, optional limb index)`.
     ///
-    /// The stored ordinal is zero-based with respect to the logical circuit inputs. Constraint
+    /// The stored arg number is zero-based with respect to the logical circuit inputs. Constraint
     /// lowering adds one when reading from `@constrain` because argument 0 is the struct `self`
-    /// value, while witness lowering uses the ordinal directly in `@compute`.
+    /// value, while witness lowering uses the arg number directly in `@compute`.
     arg_map: HashMap<Variable, (usize, Option<u64>)>,
     /// Ties [`StructVars`] to a specific field. This is prefered to having every member
     /// take the [`FieldInfo`] struct as a parameter, because mixed-field operations are
@@ -359,6 +359,8 @@ impl<F: FieldInfo> StructVars<F> {
         co: &CircuitOutput<F>,
         struct_builder: &mut StructBuilder<'ctx, '_, F>,
     ) -> Result<Self> {
+        let felt_type = struct_builder.felt_type();
+        let register_type = struct_builder.register_type();
         // Add inputs to struct.
         let mut arg_map: HashMap<Variable, (usize, Option<u64>)> = HashMap::new();
         for (input_num, input) in co.get_inputs()?.iter().enumerate() {
@@ -366,12 +368,10 @@ impl<F: FieldInfo> StructVars<F> {
                 ExtractedVariable::Register { low, high } => {
                     arg_map.insert(*low, (input_num, Some(0)));
                     arg_map.insert(*high, (input_num, Some(1)));
-                    let register_type = struct_builder.register_type();
                     struct_builder.with_input(register_type);
                 }
                 ExtractedVariable::Scalar(variable) => {
                     arg_map.insert(*variable, (input_num, None));
-                    let felt_type = struct_builder.felt_type();
                     struct_builder.with_input(felt_type);
                 }
             };
@@ -386,13 +386,11 @@ impl<F: FieldInfo> StructVars<F> {
                     let name = format!("out_reg_{}_{}", low.0, high.0);
                     member_map.insert(*low, (name.clone(), Some(0)));
                     member_map.insert(*high, (name.clone(), Some(1)));
-                    let register_type = struct_builder.register_type();
                     struct_builder.with_member(name, register_type, true);
                 }
                 ExtractedVariable::Scalar(variable) => {
                     let name = format!("out_var_{}", variable.0);
                     member_map.insert(*variable, (name.clone(), None));
-                    let felt_type = struct_builder.felt_type();
                     struct_builder.with_member(name, felt_type, true);
                 }
             }
@@ -405,13 +403,11 @@ impl<F: FieldInfo> StructVars<F> {
                     let name = format!("internal_reg_{}_{}", low.0, high.0);
                     member_map.insert(*low, (name.clone(), Some(0)));
                     member_map.insert(*high, (name.clone(), Some(1)));
-                    let register_type = struct_builder.register_type();
                     struct_builder.with_member(name, register_type, false);
                 }
                 ExtractedVariable::Scalar(variable) => {
                     let name = format!("internal_var_{}", variable.0);
                     member_map.insert(*variable, (name.clone(), None));
-                    let felt_type = struct_builder.felt_type();
                     struct_builder.with_member(name, felt_type, false);
                 }
             }
@@ -433,7 +429,7 @@ impl<F: FieldInfo> StructVars<F> {
         builder: &OpsBuilder<'ctx, 'sco, F>,
         var: &Variable,
     ) -> Result<Option<Value<'ctx, 'sco>>> {
-        if let Some(val) = self.get_input_val_at_offset(builder, 1, var)? {
+        if let Some(val) = self.get_input_val_at_offset::<1>(builder, var)? {
             Ok(Some(val))
         } else {
             self.get_constrain_member_val(builder, var)
@@ -463,7 +459,7 @@ impl<F: FieldInfo> StructVars<F> {
         builder: &OpsBuilder<'ctx, 'sco, F>,
         var: &Variable,
     ) -> Result<Option<Value<'ctx, 'sco>>> {
-        self.get_input_val_at_offset(builder, 0, var)
+        self.get_input_val_at_offset::<0>(builder, var)
     }
 
     /// Try to read a variable from the full `@compute` view of the struct.
@@ -548,16 +544,15 @@ impl<F: FieldInfo> StructVars<F> {
         }
     }
 
-    fn get_input_val_at_offset<'ctx, 'sco>(
+    fn get_input_val_at_offset<'ctx, 'sco, const ARG_OFFSET: usize>(
         &self,
         builder: &OpsBuilder<'ctx, 'sco, F>,
-        arg_offset: usize,
         var: &Variable,
     ) -> Result<Option<Value<'ctx, 'sco>>> {
         match self.arg_map.get(var) {
             None => Ok(None),
             Some((arg_no, index)) => {
-                let arg_val = builder.get_arg_value(*arg_no + arg_offset)?;
+                let arg_val = builder.get_arg_value(*arg_no + ARG_OFFSET)?;
                 let val = match index {
                     None => arg_val,
                     Some(index) => {
