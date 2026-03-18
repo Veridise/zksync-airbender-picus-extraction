@@ -162,6 +162,7 @@ impl<'ctx> GenCircuitResult<'ctx> {
 
 /// Build, lower, and serialize one LLZK circuit family from the given synthesis
 /// and witness SSA functions.
+#[allow(clippy::too_many_arguments)]
 fn generate_circuit_command(
     name: &str,
     output: &str,

@@ -38,7 +38,6 @@ use prover::cs::definitions::Variable;
 use prover::cs::definitions::COMMON_TABLE_WIDTH;
 use prover::cs::one_row_compiler::CompiledCircuitArtifact;
 use prover::cs::tables::TableType;
-use prover::field::PrimeField;
 
 use crate::builder::ModuleEnv;
 use crate::builder::OpsBuilder;
@@ -664,6 +663,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> Deref for ComputeLowering<'a, 'ctx, 'sc
 
 impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
     /// Create a fresh lowering state for one SSA block.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         builder: &'a OpsBuilder<'ctx, 'sco, F>,
         vars: &'a StructVars<F>,
@@ -893,21 +893,19 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         &self,
         placeholder: Placeholder,
     ) -> Result<Option<U32Parts<'ctx, 'sco>>> {
-        let Some(low_var) = self.substitutions.get(&(placeholder, 0)).copied() else {
+        let Some(low_var) = self.substitutions.get(&(placeholder, 0)) else {
             return Ok(None);
         };
-        let Some(high_var) = self.substitutions.get(&(placeholder, 1)).copied() else {
+        let Some(high_var) = self.substitutions.get(&(placeholder, 1)) else {
             return Err(anyhow!(
                 "placeholder {placeholder:?} is missing its high limb substitution"
             ));
         };
 
-        let low = self
-            .vars
-            .try_get_compute_input_val(self.builder, &low_var)?;
+        let low = self.vars.try_get_compute_input_val(self.builder, low_var)?;
         let high = self
             .vars
-            .try_get_compute_input_val(self.builder, &high_var)?;
+            .try_get_compute_input_val(self.builder, high_var)?;
         match (low, high) {
             (Some(low), Some(high)) => Ok(Some(U32Parts { low, high })),
             (None, None) => Ok(None),
@@ -920,8 +918,9 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
     /// Return the LLZK type used for oracle hook metadata arguments.
     ///
     /// The backend keeps the placeholder encoding stable at the Rust level, but the emitted ABI
-    /// still needs to use LLZK value types. `function.def` rejects plain `i64` arguments, so we
+    /// still needs to use LLZK value types. `function.def` cannot use `i64` arguments, so we
     /// materialize the `(kind, arg0, arg1, subindex)` metadata as felt constants instead.
+    #[inline]
     fn oracle_abi_type(&self) -> Type<'ctx> {
         self.felt_type()
     }
@@ -1029,7 +1028,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         Ok(U32Parts { low, high })
     }
 
-    /// Convert a 32-bit limb pair back into the field encoding used by witness columns.
+    /// Convert a 32-bit limb pair back into felts.
     fn u32_to_field(&self, value: U32Parts<'ctx, 'sco>) -> Result<Value<'ctx, 'sco>> {
         let high_scaled = self.append_op_with_result(felt::mul(
             self.unknown_location(),
@@ -1039,7 +1038,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         self.append_op_with_result(felt::add(self.unknown_location(), value.low, high_scaled)?)
     }
 
-    /// Convert an integer witness value into the felt encoding stored in struct members.
+    /// Convert an integer witness value into a felt.
     fn integer_to_field(&self, value: IntegerValue<'ctx, 'sco>) -> Result<Value<'ctx, 'sco>> {
         match value {
             IntegerValue::U8(value) | IntegerValue::U16(value) => Ok(value),
@@ -1061,12 +1060,8 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
     /// Build a `u32` constant as two 16-bit limbs.
     fn u32_constant(&self, value: u32) -> Result<U32Parts<'ctx, 'sco>> {
         Ok(U32Parts {
-            low: self
-                .builder
-                .get_felt_constant_from_start(u64::from(value & 0xffff))?,
-            high: self
-                .builder
-                .get_felt_constant_from_start(u64::from(value >> 16))?,
+            low: self.get_felt_constant_from_start(u64::from(value & 0xffff))?,
+            high: self.get_felt_constant_from_start(u64::from(value >> 16))?,
         })
     }
 
@@ -1187,18 +1182,18 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         rhs: Value<'ctx, 'sco>,
         width: u32,
     ) -> Result<(Value<'ctx, 'sco>, Value<'ctx, 'sco>)> {
-        let borrow = self.append_op_with_result(bool::lt(self.unknown_location(), lhs, rhs)?)?;
+        let location = self.unknown_location();
+        let borrow = self.append_op_with_result(bool::lt(location, lhs, rhs)?)?;
         let borrow_case = self.append_op_with_result(felt::sub(
-            self.unknown_location(),
+            location,
             self.append_op_with_result(felt::add(
-                self.unknown_location(),
+                location,
                 lhs,
                 self.get_felt_constant_from_start(1u64 << width)?,
             )?)?,
             rhs,
         )?)?;
-        let direct_case =
-            self.append_op_with_result(felt::sub(self.unknown_location(), lhs, rhs)?)?;
+        let direct_case = self.append_op_with_result(felt::sub(location, lhs, rhs)?)?;
         Ok((
             self.append_select_value(borrow, borrow_case, direct_case)?,
             borrow,
@@ -1239,17 +1234,18 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         value: IntegerValue<'ctx, 'sco>,
         magnitude: u32,
     ) -> Result<IntegerValue<'ctx, 'sco>> {
+        let location = self.unknown_location();
         match value {
             IntegerValue::U8(value) => {
                 Ok(IntegerValue::U8(self.append_op_with_result(felt::shr(
-                    self.unknown_location(),
+                    location,
                     value,
                     self.get_felt_constant_from_start(u64::from(magnitude))?,
                 )?)?))
             }
             IntegerValue::U16(value) => {
                 Ok(IntegerValue::U16(self.append_op_with_result(felt::shr(
-                    self.unknown_location(),
+                    location,
                     value,
                     self.get_felt_constant_from_start(u64::from(magnitude))?,
                 )?)?))
@@ -1266,10 +1262,11 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         value: IntegerValue<'ctx, 'sco>,
         magnitude: u32,
     ) -> Result<IntegerValue<'ctx, 'sco>> {
+        let location = self.unknown_location();
         match value {
             IntegerValue::U8(value) => {
                 let shifted = self.append_op_with_result(felt::shl(
-                    self.unknown_location(),
+                    location,
                     value,
                     self.get_felt_constant_from_start(u64::from(magnitude))?,
                 )?)?;
@@ -1277,7 +1274,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             }
             IntegerValue::U16(value) => {
                 let shifted = self.append_op_with_result(felt::shl(
-                    self.unknown_location(),
+                    location,
                     value,
                     self.get_felt_constant_from_start(u64::from(magnitude))?,
                 )?)?;
@@ -1379,35 +1376,34 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
     }
 
     /// Apply a width-preserving bitwise binary operation.
-    fn bitwise_binop(
+    fn bitwise_binop<FN>(
         &self,
-        opname: &str,
+        op: FN,
         lhs: IntegerValue<'ctx, 'sco>,
         rhs: IntegerValue<'ctx, 'sco>,
-    ) -> Result<IntegerValue<'ctx, 'sco>> {
-        let op = |lhs, rhs| -> Result<Value<'ctx, 'sco>> {
-            match opname {
-                "and" => {
-                    self.append_op_with_result(felt::bit_and(self.unknown_location(), lhs, rhs)?)
-                }
-                "or" => {
-                    self.append_op_with_result(felt::bit_or(self.unknown_location(), lhs, rhs)?)
-                }
-                "xor" => {
-                    self.append_op_with_result(felt::bit_xor(self.unknown_location(), lhs, rhs)?)
-                }
-                _ => bail!("unsupported bitwise operation {opname}"),
-            }
+    ) -> Result<IntegerValue<'ctx, 'sco>>
+    where
+        FN: Copy
+            + Fn(
+                Location<'ctx>,
+                Value<'ctx, 'sco>,
+                Value<'ctx, 'sco>,
+            ) -> Result<Operation<'ctx>, llzk::error::Error>,
+    {
+        let apply = |lhs, rhs| -> Result<Value<'ctx, 'sco>> {
+            self.append_op_with_result(op(self.unknown_location(), lhs, rhs)?)
         };
 
         match (lhs, rhs) {
-            (IntegerValue::U8(lhs), IntegerValue::U8(rhs)) => Ok(IntegerValue::U8(op(lhs, rhs)?)),
+            (IntegerValue::U8(lhs), IntegerValue::U8(rhs)) => {
+                Ok(IntegerValue::U8(apply(lhs, rhs)?))
+            }
             (IntegerValue::U16(lhs), IntegerValue::U16(rhs)) => {
-                Ok(IntegerValue::U16(op(lhs, rhs)?))
+                Ok(IntegerValue::U16(apply(lhs, rhs)?))
             }
             (IntegerValue::U32(lhs), IntegerValue::U32(rhs)) => Ok(IntegerValue::U32(U32Parts {
-                low: op(lhs.low, rhs.low)?,
-                high: op(lhs.high, rhs.high)?,
+                low: apply(lhs.low, rhs.low)?,
+                high: apply(lhs.high, rhs.high)?,
             })),
             _ => bail!("bitwise operation requires operands of the same width"),
         }
@@ -1707,8 +1703,8 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         };
 
         let mut outputs = self.new_lookup_outputs(num_outputs)?;
-        for table in supported_tables.iter().copied() {
-            let candidate_outputs = self.compute_lookup_for_table(table, inputs, num_outputs)?;
+        for table in supported_tables.iter() {
+            let candidate_outputs = self.compute_lookup_for_table(*table, inputs, num_outputs)?;
             let is_selected = self
                 .builder
                 .append_field_eq_constant(table_id, u64::from(table.to_table_id()))?;
@@ -2788,17 +2784,17 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInCompute<'a, 'ctx, 'sco, F>
             FixedWidthIntegerNodeExpression::BinaryAnd { lhs, rhs } => {
                 let lhs = lhs.emit_compute(lowering)?;
                 let rhs = rhs.emit_compute(lowering)?;
-                lowering.bitwise_binop("and", lhs, rhs)
+                lowering.bitwise_binop(felt::bit_and, lhs, rhs)
             }
             FixedWidthIntegerNodeExpression::BinaryOr { lhs, rhs } => {
                 let lhs = lhs.emit_compute(lowering)?;
                 let rhs = rhs.emit_compute(lowering)?;
-                lowering.bitwise_binop("or", lhs, rhs)
+                lowering.bitwise_binop(felt::bit_or, lhs, rhs)
             }
             FixedWidthIntegerNodeExpression::BinaryXor { lhs, rhs } => {
                 let lhs = lhs.emit_compute(lowering)?;
                 let rhs = rhs.emit_compute(lowering)?;
-                lowering.bitwise_binop("xor", lhs, rhs)
+                lowering.bitwise_binop(felt::bit_xor, lhs, rhs)
             }
             // TODO(LLZK compute): support the remaining integer witness ops once their exact LLZK
             // lowering has been validated against the Rust witness evaluator.
@@ -2828,6 +2824,7 @@ mod tests {
 
     use prover::cs::tables::TableDriver;
     use prover::field::Mersenne31Field;
+    use prover::field::PrimeField;
 
     fn field(value: u64) -> Mersenne31Field {
         Mersenne31Field::from_u64_unchecked(value)
