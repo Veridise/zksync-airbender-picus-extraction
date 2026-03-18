@@ -316,8 +316,10 @@ impl<F: FieldInfo> WitnessComputation<F> {
     /// Conservatively detect whether any emitted SSA path will read a compiled memory-subtree
     /// column through the LLZK runtime hook.
     ///
-    /// This powers the strict seeding-write omission rule: we only drop boundary-to-memory mirror
-    /// writes when the entire `@compute` body is otherwise independent of runtime memory state.
+    /// The witness contains writes that seed memory with certain input variables.
+    /// If there are no memory reads, however, we know that no seeded memory locations will be
+    /// read, so we are free to omit them for the sake of the this particular circuit.
+    ///
     /// The scan intentionally over-approximates. If it is unsure, it reports `true` and keeps the
     /// write.
     fn has_runtime_memory_reads(&self, vars: &StructVars<F>) -> bool {
@@ -358,14 +360,19 @@ enum ComputedValue<'ctx, 'sco> {
     Integer(IntegerValue<'ctx, 'sco>),
 }
 
+/// The translated result of a [`RawExpression`].
 enum SsaSlot<'ctx, 'sco> {
     Value(ComputedValue<'ctx, 'sco>),
     Lookup(Vec<Value<'ctx, 'sco>>),
     Unit,
 }
 
-/// Returns whether evaluating this SSA node would require reading runtime memory rather
-/// than consuming values already exposed as LLZK struct member or input argument.
+/// Returns whether evaluating this SSA node would require reading the compiled
+/// [`ColumnAddress::MemorySubtree`] through `read_from_memory_subtree`.
+///
+/// ROM hooks, oracle hooks, and lookup tuples do not count here. The only
+/// consumer of this trait is the seed-write omission check, which only needs to know whether the
+/// emitted `@compute` body ever reads back **mutable** memory-subtree state.
 trait UsesRuntimeMemory<F: FieldInfo> {
     fn uses_runtime_memory(
         &self,
@@ -417,7 +424,11 @@ impl<F: FieldInfo> UsesRuntimeMemory<F> for FieldNodeExpression<F> {
             | FieldNodeExpression::Constant(..)
             | FieldNodeExpression::OracleValue { .. }
             | FieldNodeExpression::LookupOutput { .. }
-            | FieldNodeExpression::MaybeLookupOutput { .. } => false,
+            | FieldNodeExpression::MaybeLookupOutput { .. } => {
+                // These variants reuse an already-lowered SSA slot, literal, oracle hook, or
+                // lookup tuple. None of them performs a fresh memory-subtree read on its own.
+                false
+            }
             FieldNodeExpression::FromInteger(expr) => {
                 expr.uses_runtime_memory(variable_mapping, vars)
             }
@@ -466,7 +477,11 @@ impl<F: FieldInfo> UsesRuntimeMemory<F> for BoolNodeExpression<F> {
             }
             BoolNodeExpression::SubExpression(..)
             | BoolNodeExpression::Constant(..)
-            | BoolNodeExpression::OracleValue { .. } => false,
+            | BoolNodeExpression::OracleValue { .. } => {
+                // Boolean subexpressions, literals, and oracle hooks do not read the compiled
+                // memory subtree directly.
+                false
+            }
             BoolNodeExpression::FromGenericInteger(expr) => {
                 expr.uses_runtime_memory(variable_mapping, vars)
             }
@@ -518,7 +533,11 @@ impl<F: FieldInfo> UsesRuntimeMemory<F> for FixedWidthIntegerNodeExpression<F> {
             | FixedWidthIntegerNodeExpression::U8OracleValue { .. }
             | FixedWidthIntegerNodeExpression::ConstantU8(..)
             | FixedWidthIntegerNodeExpression::ConstantU16(..)
-            | FixedWidthIntegerNodeExpression::ConstantU32(..) => false,
+            | FixedWidthIntegerNodeExpression::ConstantU32(..) => {
+                // Integer temporaries, constants, and oracle hooks do not perform a fresh
+                // memory-subtree read here.
+                false
+            }
             FixedWidthIntegerNodeExpression::U32FromMask(expr) => {
                 expr.uses_runtime_memory(variable_mapping, vars)
             }
@@ -593,7 +612,13 @@ impl<F: FieldInfo> UsesRuntimeMemory<F> for RawExpression<F> {
             RawExpression::Integer(expr) => expr.uses_runtime_memory(variable_mapping, vars),
             RawExpression::AccessLookup { .. }
             | RawExpression::PerformLookup { .. }
-            | RawExpression::MaybePerformLookup { .. } => false,
+            | RawExpression::MaybePerformLookup { .. } => {
+                // Lookup nodes operate on previously-lowered SSA inputs. If one of those inputs
+                // came from the memory subtree, the producer expression for that input already
+                // reports it. The lookup node itself may still use ROM or oracle hooks, but it
+                // does not issue `read_from_memory_subtree`.
+                false
+            }
             RawExpression::WriteVariable {
                 into_variable,
                 source_subexpr,
@@ -613,8 +638,9 @@ impl<F: FieldInfo> UsesRuntimeMemory<F> for RawExpression<F> {
 
 /// Lowers one SSA block into LLZK ops while keeping a slot-per-subexpression cache.
 ///
-/// This mirrors the existing Rust witness generator's "one raw expression, one SSA slot" model so
-/// that indices coming from `SubExpression(..)` nodes continue to line up exactly.
+/// `SubExpression(..)` nodes contain an index to look up the previous SSA slots to
+/// reference previously computed values, so we cache that structure of values in this lowering
+/// struct.
 struct ComputeLowering<'a, 'ctx: 'sco, 'sco, F: FieldInfo> {
     builder: &'a OpsBuilder<'ctx, 'sco, F>,
     vars: &'a StructVars<F>,
@@ -712,7 +738,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
 
         match self.variable_mapping[into_variable] {
             ColumnAddress::SetupSubtree(..) => {
-                bail!("setup columns are read-only during witness lowering")
+                unreachable!("setup columns are read-only during witness lowering")
             }
             ColumnAddress::MemorySubtree(offset) => {
                 let mut value = self.expression_to_store_value(source_subexpr)?;
@@ -753,13 +779,11 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
     /// Return `true` when this write is a pure boundary-to-memory seeding copy that can be omitted
     /// without changing the returned LLZK value.
     ///
-    /// The rule is intentionally strict:
-    /// - the target must live in the compiled `MemorySubtree`,
-    /// - the write must be unconditional,
-    /// - the source expression must be provably just an explicit `@compute` input value, and
-    /// - the whole emitted `@compute` must never read memory-subtree state back.
-    ///
-    /// If any of those checks fail, we keep the runtime write.
+    /// This only occurs if:
+    /// - the target lives in the compiled `MemorySubtree`,
+    /// - the write is unconditional,
+    /// - the source expression is provably just an explicit `@compute` input value, and
+    /// - the whole emitted `@compute` never reads memory-subtree state back.
     fn should_omit_seed_memory_write(
         &self,
         into_variable: &Variable,
@@ -767,17 +791,17 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         condition_subexpr_idx: Option<usize>,
     ) -> Result<bool> {
         if self.has_runtime_memory_reads || condition_subexpr_idx.is_some() {
-            return Ok(false);
+            Ok(false)
+        } else if matches!(
+            self.variable_mapping.get(into_variable),
+            Some(ColumnAddress::MemorySubtree(_))
+        ) {
+            Ok(self
+                .strict_input_origin_for_expression(source_subexpr)
+                .is_some())
+        } else {
+            Ok(false)
         }
-        let Some(ColumnAddress::MemorySubtree(_)) =
-            self.variable_mapping.get(into_variable).copied()
-        else {
-            return Ok(false);
-        };
-
-        Ok(self
-            .strict_input_origin_for_expression(source_subexpr)
-            .is_some())
     }
 
     /// Convert a lowered expression into the felt encoding stored in the LLZK witness struct.
@@ -798,24 +822,20 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         self.computed_value_to_store(value)
     }
 
-    /// Read a logical circuit variable as the felt value currently visible to `@compute`.
-    ///
-    /// Variables mapped into the witness struct are read from inputs or members. Variables placed
-    /// in the compiled `MemorySubtree` are read through the external runtime hook because they are
-    /// part of mutable execution-memory state rather than the struct returned by `@compute`.
+    /// Read `variable` as the felt value currently visible to `@compute`.
     fn read_variable(&self, variable: Variable) -> Result<Value<'ctx, 'sco>> {
         if let Some(value) =
             self.vars
                 .try_get_compute_val(self.builder, self.self_value, &variable)?
         {
-            return Ok(value);
-        }
-
-        match self.variable_mapping.get(&variable).copied() {
-            Some(ColumnAddress::MemorySubtree(offset)) => self.read_memory_subtree(offset),
-            other => Err(anyhow!(
-                "variable {variable:?} is not exposed to @compute (column {other:?})"
-            )),
+            Ok(value)
+        } else {
+            match self.variable_mapping.get(&variable) {
+                Some(ColumnAddress::MemorySubtree(offset)) => self.read_memory_subtree(*offset),
+                other => Err(anyhow!(
+                    "variable {variable:?} is not exposed to @compute (column {other:?})"
+                )),
+            }
         }
     }
 
@@ -842,40 +862,18 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         self.append_call_no_results(location, WRITE_TO_MEMORY_SUBTREE_EXTERN, &[offset, value])
     }
 
-    /// Try to resolve one placeholder limb through the explicit `@compute` inputs.
-    ///
-    /// Many executor-state placeholders in the legacy witness path are just alternate names for
-    /// the same logical values that LLZK already models as `@compute` arguments. Reading those
-    /// arguments directly keeps the dataflow consistent between `@compute` and `@constrain`.
-    ///
-    /// We only redirect placeholders to inputs here, not to struct members. That distinction is
-    /// important for output placeholders such as `PcFin`: they may be exposed as LLZK members, but
-    /// reading the member before it is assigned would be incorrect. Those cases still fall back to
-    /// the runtime oracle path until the SSA itself computes the output value.
-    ///
-    /// In the current circuit set this means placeholders like `PcInit`, decoded instruction
-    /// fields, `ExecuteOpcodeFamilyCycle`, and the legacy read-side shuffle aliases such as
-    /// `FirstRegMem` come from `%argN`, while non-boundary values such as shuffle timestamps still
-    /// come from `@read_oracle_*`.
+    /// Try to resolve one placeholder limb through `@compute` arguments. If the placeholder has
+    /// no recorded substitution, returns None.
     fn try_read_placeholder_input_limb(
         &self,
         placeholder: Placeholder,
         subindex: usize,
     ) -> Result<Option<Value<'ctx, 'sco>>> {
-        let Some(variable) = self.substitutions.get(&(placeholder, subindex)).copied() else {
-            return Ok(None);
-        };
-
-        self.vars.try_get_compute_input_val(self.builder, &variable)
-    }
-
-    /// Try to read a field placeholder from the existing LLZK inputs before using an oracle hook.
-    fn try_read_field_placeholder_input(
-        &self,
-        placeholder: Placeholder,
-        subindex: usize,
-    ) -> Result<Option<Value<'ctx, 'sco>>> {
-        self.try_read_placeholder_input_limb(placeholder, subindex)
+        if let Some(variable) = self.substitutions.get(&(placeholder, subindex)) {
+            self.vars.try_get_compute_input_val(self.builder, variable)
+        } else {
+            Ok(None)
+        }
     }
 
     /// Try to read a boolean placeholder from the existing LLZK inputs before using an oracle
@@ -887,24 +885,6 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         self.try_read_placeholder_input_limb(placeholder, 0)?
             .map(|value| self.append_field_is_nonzero(value))
             .transpose()
-    }
-
-    /// Try to read an 8-bit placeholder from the existing LLZK inputs before using an oracle
-    /// hook.
-    fn try_read_u8_placeholder_input(
-        &self,
-        placeholder: Placeholder,
-    ) -> Result<Option<Value<'ctx, 'sco>>> {
-        self.try_read_placeholder_input_limb(placeholder, 0)
-    }
-
-    /// Try to read a 16-bit placeholder from the existing LLZK inputs before using an oracle
-    /// hook.
-    fn try_read_u16_placeholder_input(
-        &self,
-        placeholder: Placeholder,
-    ) -> Result<Option<Value<'ctx, 'sco>>> {
-        self.try_read_placeholder_input_limb(placeholder, 0)
     }
 
     /// Try to read a 32-bit placeholder from the existing LLZK inputs before using an oracle
@@ -967,7 +947,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         placeholder: Placeholder,
         subindex: usize,
     ) -> Result<Value<'ctx, 'sco>> {
-        if let Some(value) = self.try_read_field_placeholder_input(placeholder, subindex)? {
+        if let Some(value) = self.try_read_placeholder_input_limb(placeholder, subindex)? {
             return Ok(value);
         }
 
@@ -1000,7 +980,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
 
     /// Read an 8-bit oracle placeholder through the LLZK runtime hook.
     fn read_u8_oracle(&self, placeholder: Placeholder) -> Result<Value<'ctx, 'sco>> {
-        if let Some(value) = self.try_read_u8_placeholder_input(placeholder)? {
+        if let Some(value) = self.try_read_placeholder_input_limb(placeholder, 0)? {
             return Ok(value);
         }
 
@@ -1016,7 +996,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
 
     /// Read a 16-bit oracle placeholder through the LLZK runtime hook.
     fn read_u16_oracle(&self, placeholder: Placeholder) -> Result<Value<'ctx, 'sco>> {
-        if let Some(value) = self.try_read_u16_placeholder_input(placeholder)? {
+        if let Some(value) = self.try_read_placeholder_input_limb(placeholder, 0)? {
             return Ok(value);
         }
 
