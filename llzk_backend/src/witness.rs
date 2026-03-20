@@ -1635,6 +1635,11 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
                 TableType::MemStoreClearWrittenValueLimb,
             ],
             2 => &[TableType::ConditionalJmpBranchSlt],
+            3 => &[
+                TableType::MemoryLoadHalfwordOrByte,
+                TableType::MemStoreClearOriginalRamValueLimb,
+                TableType::MemStoreClearWrittenValueLimb,
+            ],
             n => todo!("table {:?} with {} inputs is not supported", table_id, n),
         };
 
@@ -1643,9 +1648,12 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             unreachable!("dynamic lookup dispatch requires at least one supported table");
         };
 
-        let mut outputs = self.compute_lookup_for_table(first_table, inputs, num_outputs)?;
+        let first_inputs = self.repack_dynamic_lookup_inputs(first_table, inputs)?;
+        let mut outputs = self.compute_lookup_for_table(first_table, &first_inputs, num_outputs)?;
         for table in tables {
-            let candidate_outputs = self.compute_lookup_for_table(table, inputs, num_outputs)?;
+            let candidate_inputs = self.repack_dynamic_lookup_inputs(table, inputs)?;
+            let candidate_outputs =
+                self.compute_lookup_for_table(table, &candidate_inputs, num_outputs)?;
             let is_selected =
                 self.append_field_eq_constant(table_id, u64::from(table.to_table_id()))?;
             outputs = candidate_outputs
@@ -1658,6 +1666,38 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         }
 
         Ok(outputs)
+    }
+
+    /// Repack unpacked dynamic-lookup inputs into the single felt key expected by the
+    /// deterministic table lowerings that mirror the existing subword load/store helper tables.
+    fn repack_dynamic_lookup_inputs(
+        &self,
+        table: TableType,
+        inputs: &[Value<'ctx, 'sco>],
+    ) -> Result<Vec<Value<'ctx, 'sco>>> {
+        match (table, inputs) {
+            (
+                TableType::MemoryLoadHalfwordOrByte
+                | TableType::MemStoreClearOriginalRamValueLimb
+                | TableType::MemStoreClearWrittenValueLimb,
+                [limb, offset, funct3],
+            ) => {
+                let location = self.unknown_location();
+                let offset_scale = self.get_felt_constant_from_start(1u64 << 16)?;
+                let funct3_scale = self.get_felt_constant_from_start(1u64 << 18)?;
+                let packed = self.append_op_with_result(felt::add(
+                    location,
+                    *limb,
+                    self.append_op_with_result(felt::add(
+                        location,
+                        self.append_op_with_result(felt::mul(location, *offset, offset_scale)?)?,
+                        self.append_op_with_result(felt::mul(location, *funct3, funct3_scale)?)?,
+                    )?)?,
+                )?)?;
+                Ok(vec![packed])
+            }
+            _ => Ok(inputs.to_vec()),
+        }
     }
 
     /// Materialize the all-zero lookup row used by `maybe_lookup` and by padded table outputs.
