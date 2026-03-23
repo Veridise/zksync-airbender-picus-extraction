@@ -128,12 +128,15 @@ impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInConstrain<'ctx, 'sco, F> for Term
             Term::Constant(c) => {
                 let coeff = c.as_u64_reduced();
                 let coeff_opp = F::CHARACTERISTICS - coeff;
-                let coeff_val = builder.get_constant_from_start(builder.felt_type(), coeff)?;
                 Ok(if coeff < coeff_opp {
-                    coeff_val
+                    builder.get_constant_from_start(builder.felt_type(), coeff)?
                 } else {
-                    builder
-                        .append_op_with_result(felt::neg(builder.unknown_location(), coeff_val)?)?
+                    let coeff_opp_val =
+                        builder.get_constant_from_start(builder.felt_type(), coeff_opp)?;
+                    builder.append_op_with_result(felt::neg(
+                        builder.unknown_location(),
+                        coeff_opp_val,
+                    )?)?
                 })
             }
             Term::Expression {
@@ -355,6 +358,25 @@ mod tests {
                 assert_eq!(inputs.len(), 1);
                 assert!(members.is_empty());
                 let term = Term::from((neg_one, inputs[0]));
+                let _ = term.emit_constrain(ops, vars)?;
+                Ok(())
+            },
+        );
+    }
+
+    #[test]
+    fn negative_constant_term_emits_negated_small_constant() {
+        let neg_one = field(Mersenne31Field::CHARACTERISTICS - 1);
+        assert_constrain_fixture(
+            0,
+            0,
+            include_str!(
+                "../testdata/constraints/negative_constant_term_emits_negated_small_constant.mlir"
+            ),
+            |ops, vars, inputs, members| {
+                assert!(inputs.is_empty());
+                assert!(members.is_empty());
+                let term = Term::Constant(neg_one);
                 let _ = term.emit_constrain(ops, vars)?;
                 Ok(())
             },
