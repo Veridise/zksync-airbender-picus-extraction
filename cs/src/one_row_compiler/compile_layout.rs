@@ -24,7 +24,7 @@ impl<F: PrimeField> OneRowCompiler<F> {
         circuit_output: CircuitOutput<F>,
         trace_len_log2: usize,
     ) -> CompiledCircuitArtifact<F> {
-        Self::compile_inner::<false>(self, circuit_output, trace_len_log2)
+        Self::compile_inner::<false>(self, circuit_output, trace_len_log2).0
     }
 
     pub fn compile_to_evaluate_delegations(
@@ -32,6 +32,24 @@ impl<F: PrimeField> OneRowCompiler<F> {
         circuit_output: CircuitOutput<F>,
         trace_len_log2: usize,
     ) -> CompiledCircuitArtifact<F> {
+        Self::compile_inner::<true>(self, circuit_output, trace_len_log2).0
+    }
+
+    #[cfg(test)]
+    pub fn compile_output_for_chunked_memory_argument_and_protected_constraints(
+        &self,
+        circuit_output: CircuitOutput<F>,
+        trace_len_log2: usize,
+    ) -> (CompiledCircuitArtifact<F>, ProtectedConstraintSnapshot<F>) {
+        Self::compile_inner::<false>(self, circuit_output, trace_len_log2)
+    }
+
+    #[cfg(test)]
+    pub fn compile_to_evaluate_delegations_and_protected_constraints(
+        &self,
+        circuit_output: CircuitOutput<F>,
+        trace_len_log2: usize,
+    ) -> (CompiledCircuitArtifact<F>, ProtectedConstraintSnapshot<F>) {
         Self::compile_inner::<true>(self, circuit_output, trace_len_log2)
     }
 
@@ -39,7 +57,7 @@ impl<F: PrimeField> OneRowCompiler<F> {
         &self,
         circuit_output: CircuitOutput<F>,
         trace_len_log2: usize,
-    ) -> CompiledCircuitArtifact<F> {
+    ) -> (CompiledCircuitArtifact<F>, ProtectedConstraintSnapshot<F>) {
         // our main purposes are:
         // - place variables in particular grid places
         // - select whether they go into witness subtree or memory subtree
@@ -942,6 +960,17 @@ impl<F: PrimeField> OneRowCompiler<F> {
         // - can be expressed via linear constraint
         // - can be substituted into other places
 
+        let protected_constraints_before_optimization: Vec<_> = constraints
+            .iter()
+            .filter_map(|(constraint, prevent_optimizations)| {
+                if *prevent_optimizations {
+                    Some(constraint.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         let (optimized_out_variables, constraints) = optimize_out_linear_constraints(
             &state_input,
             &state_output,
@@ -961,6 +990,9 @@ impl<F: PrimeField> OneRowCompiler<F> {
             all_variables_to_place,
             &mut layout,
         );
+
+        let (protected_degree_2_constraints, protected_degree_1_constraints) =
+            compile_constraints_using_layout(protected_constraints_before_optimization, &layout);
 
         // we need only the following public inputs
         // - initial state variable at FIRST row
@@ -1177,6 +1209,11 @@ impl<F: PrimeField> OneRowCompiler<F> {
             total_tables_size,
         };
 
-        result
+        let protected_constraints = ProtectedConstraintSnapshot {
+            degree_2_constraints: protected_degree_2_constraints,
+            degree_1_constraints: protected_degree_1_constraints,
+        };
+
+        (result, protected_constraints)
     }
 }

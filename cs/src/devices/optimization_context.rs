@@ -109,6 +109,24 @@ pub struct OptimizationContext<F: PrimeField, C: Circuit<F>> {
 }
 
 impl<F: PrimeField, CS: Circuit<F>> OptimizationContext<F, CS> {
+    #[inline(always)]
+    fn picus_from_term(term: Term<F>) -> PicusExpr<F> {
+        match term {
+            Term::Constant(c) => PicusExpr::Constant(c),
+            Term::Expression {
+                coeff,
+                inner,
+                degree,
+            } => {
+                let mut expr = PicusExpr::Constant(coeff);
+                for var in inner.iter().take(degree) {
+                    expr = expr * PicusExpr::Variable(*var);
+                }
+                expr
+            }
+        }
+    }
+
     pub fn save_indexers(&self) -> OptCtxIndexers {
         self.indexers
     }
@@ -929,6 +947,28 @@ impl<F: PrimeField, CS: Circuit<F>> OptimizationContext<F, CS> {
             cnstr -= Term::from((F::from_u64_unchecked(1 << 24), bit.get_variable().unwrap()));
 
             cs.add_constraint(cnstr);
+            let mut parallel_cnstr = PicusExpr::Constant(F::ZERO);
+            parallel_cnstr =
+                parallel_cnstr + Self::picus_from_term(op1_t[0]) * Self::picus_from_term(op2_t[0]);
+            parallel_cnstr = parallel_cnstr
+                + Self::picus_from_term(op1_t[0])
+                    * Self::picus_from_term(op2_t[1])
+                    * Self::picus_from_term(byte_shift_t);
+            parallel_cnstr = parallel_cnstr
+                + Self::picus_from_term(op1_t[1])
+                    * Self::picus_from_term(op2_t[0])
+                    * Self::picus_from_term(byte_shift_t);
+            parallel_cnstr = parallel_cnstr + Self::picus_from_term(add_term_t[0]);
+            parallel_cnstr = parallel_cnstr - Self::picus_from_term(mul_low_t[0]);
+            parallel_cnstr = parallel_cnstr
+                - PicusExpr::Constant(F::from_u64_unchecked(1 << 16)) * PicusExpr::Variable(byte);
+            parallel_cnstr = parallel_cnstr
+                - PicusExpr::Constant(F::from_u64_unchecked(1 << 24))
+                    * PicusExpr::Variable(bit.get_variable().unwrap());
+            cs.add_picus_parallel_constraint(PicusStructuredConstraint::Eq {
+                lhs: parallel_cnstr,
+                rhs: PicusExpr::Constant(F::ZERO),
+            });
 
             [(byte, 0), (bit.get_variable().unwrap(), 8)]
         };
@@ -1037,6 +1077,49 @@ impl<F: PrimeField, CS: Circuit<F>> OptimizationContext<F, CS> {
             ));
 
             cs.add_constraint(cnstr);
+            let mut parallel_cnstr = PicusExpr::Constant(F::ZERO);
+            parallel_cnstr = parallel_cnstr
+                + PicusExpr::Constant(F::from_u64_unchecked(1u64 << carry[0].1))
+                    * PicusExpr::Variable(carry[0].0);
+            parallel_cnstr = parallel_cnstr
+                + PicusExpr::Constant(F::from_u64_unchecked(1u64 << carry[1].1))
+                    * PicusExpr::Variable(carry[1].0);
+            parallel_cnstr =
+                parallel_cnstr + Self::picus_from_term(op1_t[0]) * Self::picus_from_term(op2_t[2]);
+            parallel_cnstr = parallel_cnstr
+                + Self::picus_from_term(op1_t[0])
+                    * Self::picus_from_term(op2_t[3])
+                    * Self::picus_from_term(byte_shift_t);
+            parallel_cnstr =
+                parallel_cnstr + Self::picus_from_term(op1_t[1]) * Self::picus_from_term(op2_t[1]);
+            parallel_cnstr = parallel_cnstr
+                + Self::picus_from_term(op1_t[1])
+                    * Self::picus_from_term(op2_t[2])
+                    * Self::picus_from_term(byte_shift_t);
+            parallel_cnstr =
+                parallel_cnstr + Self::picus_from_term(op1_t[2]) * Self::picus_from_term(op2_t[0]);
+            parallel_cnstr = parallel_cnstr
+                + Self::picus_from_term(op1_t[2])
+                    * Self::picus_from_term(op2_t[1])
+                    * Self::picus_from_term(byte_shift_t);
+            parallel_cnstr = parallel_cnstr
+                + Self::picus_from_term(op1_t[3])
+                    * Self::picus_from_term(op2_t[0])
+                    * Self::picus_from_term(byte_shift_t);
+            parallel_cnstr = parallel_cnstr + Self::picus_from_term(add_term_t[1]);
+            parallel_cnstr = parallel_cnstr - Self::picus_from_term(mul_low_t[1]);
+            parallel_cnstr = parallel_cnstr
+                - PicusExpr::Constant(F::from_u64_unchecked(1 << 16)) * PicusExpr::Variable(byte);
+            parallel_cnstr = parallel_cnstr
+                - PicusExpr::Constant(F::from_u64_unchecked(1 << 24))
+                    * PicusExpr::Variable(bit_0.get_variable().unwrap());
+            parallel_cnstr = parallel_cnstr
+                - PicusExpr::Constant(F::from_u64_unchecked(1 << 25))
+                    * PicusExpr::Variable(bit_1.get_variable().unwrap());
+            cs.add_picus_parallel_constraint(PicusStructuredConstraint::Eq {
+                lhs: parallel_cnstr,
+                rhs: PicusExpr::Constant(F::ZERO),
+            });
 
             [
                 (byte, 0),
@@ -1214,6 +1297,68 @@ impl<F: PrimeField, CS: Circuit<F>> OptimizationContext<F, CS> {
                     ));
 
                     cs.add_constraint(cnstr);
+                    let mut parallel_cnstr = PicusExpr::Constant(F::ZERO);
+                    parallel_cnstr = parallel_cnstr
+                        + PicusExpr::Constant(F::from_u64_unchecked(1u64 << carry[0].1))
+                            * PicusExpr::Variable(carry[0].0);
+                    parallel_cnstr = parallel_cnstr
+                        + PicusExpr::Constant(F::from_u64_unchecked(1u64 << carry[1].1))
+                            * PicusExpr::Variable(carry[1].0);
+                    parallel_cnstr = parallel_cnstr
+                        + PicusExpr::Constant(F::from_u64_unchecked(1u64 << carry[2].1))
+                            * PicusExpr::Variable(carry[2].0);
+                    parallel_cnstr = parallel_cnstr
+                        + Self::picus_from_term(op1_t[0]) * Self::picus_from_term(op2_t[4]);
+                    parallel_cnstr = parallel_cnstr
+                        + Self::picus_from_term(op1_t[0])
+                            * Self::picus_from_term(op2_t[5])
+                            * Self::picus_from_term(byte_shift_t);
+                    parallel_cnstr = parallel_cnstr
+                        + Self::picus_from_term(op1_t[1]) * Self::picus_from_term(op2_t[3]);
+                    parallel_cnstr = parallel_cnstr
+                        + Self::picus_from_term(op1_t[1])
+                            * Self::picus_from_term(op2_t[4])
+                            * Self::picus_from_term(byte_shift_t);
+                    parallel_cnstr = parallel_cnstr
+                        + Self::picus_from_term(op1_t[2]) * Self::picus_from_term(op2_t[2]);
+                    parallel_cnstr = parallel_cnstr
+                        + Self::picus_from_term(op1_t[2])
+                            * Self::picus_from_term(op2_t[3])
+                            * Self::picus_from_term(byte_shift_t);
+                    parallel_cnstr = parallel_cnstr
+                        + Self::picus_from_term(op1_t[3]) * Self::picus_from_term(op2_t[1]);
+                    parallel_cnstr = parallel_cnstr
+                        + Self::picus_from_term(op1_t[3])
+                            * Self::picus_from_term(op2_t[2])
+                            * Self::picus_from_term(byte_shift_t);
+                    parallel_cnstr = parallel_cnstr
+                        + Self::picus_from_term(op1_t[4]) * Self::picus_from_term(op2_t[0]);
+                    parallel_cnstr = parallel_cnstr
+                        + Self::picus_from_term(op1_t[4])
+                            * Self::picus_from_term(op2_t[1])
+                            * Self::picus_from_term(byte_shift_t);
+                    parallel_cnstr = parallel_cnstr
+                        + Self::picus_from_term(op1_t[5])
+                            * Self::picus_from_term(op2_t[0])
+                            * Self::picus_from_term(byte_shift_t);
+                    parallel_cnstr = parallel_cnstr + Self::picus_from_term(sign_term);
+                    parallel_cnstr = parallel_cnstr - Self::picus_from_term(mul_high_t[0]);
+                    parallel_cnstr = parallel_cnstr
+                        - PicusExpr::Constant(F::from_u64_unchecked(1 << 16))
+                            * PicusExpr::Variable(byte);
+                    parallel_cnstr = parallel_cnstr
+                        - PicusExpr::Constant(F::from_u64_unchecked(1 << 24))
+                            * PicusExpr::Variable(bit_0.get_variable().unwrap());
+                    parallel_cnstr = parallel_cnstr
+                        - PicusExpr::Constant(F::from_u64_unchecked(1 << 25))
+                            * PicusExpr::Variable(bit_1.get_variable().unwrap());
+                    parallel_cnstr = parallel_cnstr
+                        - PicusExpr::Constant(F::from_u64_unchecked(1 << 26))
+                            * PicusExpr::Variable(bit_2.get_variable().unwrap());
+                    cs.add_picus_parallel_constraint(PicusStructuredConstraint::Eq {
+                        lhs: parallel_cnstr,
+                        rhs: PicusExpr::Constant(F::ZERO),
+                    });
 
                     [
                         (byte, 0),
@@ -1402,6 +1547,83 @@ impl<F: PrimeField, CS: Circuit<F>> OptimizationContext<F, CS> {
                     ));
 
                     cs.add_constraint(cnstr);
+                    let mut parallel_cnstr = PicusExpr::Constant(F::ZERO);
+                    parallel_cnstr = parallel_cnstr
+                        + PicusExpr::Constant(F::from_u64_unchecked(1u64 << carry[0].1))
+                            * PicusExpr::Variable(carry[0].0);
+                    parallel_cnstr = parallel_cnstr
+                        + PicusExpr::Constant(F::from_u64_unchecked(1u64 << carry[1].1))
+                            * PicusExpr::Variable(carry[1].0);
+                    parallel_cnstr = parallel_cnstr
+                        + PicusExpr::Constant(F::from_u64_unchecked(1u64 << carry[2].1))
+                            * PicusExpr::Variable(carry[2].0);
+                    parallel_cnstr = parallel_cnstr
+                        + PicusExpr::Constant(F::from_u64_unchecked(1u64 << carry[3].1))
+                            * PicusExpr::Variable(carry[3].0);
+                    parallel_cnstr = parallel_cnstr
+                        + Self::picus_from_term(op1_t[0]) * Self::picus_from_term(op2_t[6]);
+                    parallel_cnstr = parallel_cnstr
+                        + Self::picus_from_term(op1_t[0])
+                            * Self::picus_from_term(op2_t[7])
+                            * Self::picus_from_term(byte_shift_t);
+                    parallel_cnstr = parallel_cnstr
+                        + Self::picus_from_term(op1_t[1]) * Self::picus_from_term(op2_t[5]);
+                    parallel_cnstr = parallel_cnstr
+                        + Self::picus_from_term(op1_t[1])
+                            * Self::picus_from_term(op2_t[6])
+                            * Self::picus_from_term(byte_shift_t);
+                    parallel_cnstr = parallel_cnstr
+                        + Self::picus_from_term(op1_t[2]) * Self::picus_from_term(op2_t[4]);
+                    parallel_cnstr = parallel_cnstr
+                        + Self::picus_from_term(op1_t[2])
+                            * Self::picus_from_term(op2_t[5])
+                            * Self::picus_from_term(byte_shift_t);
+                    parallel_cnstr = parallel_cnstr
+                        + Self::picus_from_term(op1_t[3]) * Self::picus_from_term(op2_t[3]);
+                    parallel_cnstr = parallel_cnstr
+                        + Self::picus_from_term(op1_t[3])
+                            * Self::picus_from_term(op2_t[4])
+                            * Self::picus_from_term(byte_shift_t);
+                    parallel_cnstr = parallel_cnstr
+                        + Self::picus_from_term(op1_t[4]) * Self::picus_from_term(op2_t[2]);
+                    parallel_cnstr = parallel_cnstr
+                        + Self::picus_from_term(op1_t[4])
+                            * Self::picus_from_term(op2_t[3])
+                            * Self::picus_from_term(byte_shift_t);
+                    parallel_cnstr = parallel_cnstr
+                        + Self::picus_from_term(op1_t[5]) * Self::picus_from_term(op2_t[1]);
+                    parallel_cnstr = parallel_cnstr
+                        + Self::picus_from_term(op1_t[5])
+                            * Self::picus_from_term(op2_t[2])
+                            * Self::picus_from_term(byte_shift_t);
+                    parallel_cnstr = parallel_cnstr
+                        + Self::picus_from_term(op1_t[6]) * Self::picus_from_term(op2_t[0]);
+                    parallel_cnstr = parallel_cnstr
+                        + Self::picus_from_term(op1_t[6])
+                            * Self::picus_from_term(op2_t[1])
+                            * Self::picus_from_term(byte_shift_t);
+                    parallel_cnstr = parallel_cnstr
+                        + Self::picus_from_term(op1_t[7])
+                            * Self::picus_from_term(op2_t[0])
+                            * Self::picus_from_term(byte_shift_t);
+                    parallel_cnstr = parallel_cnstr + Self::picus_from_term(sign_term);
+                    parallel_cnstr = parallel_cnstr - Self::picus_from_term(mul_high_t[1]);
+                    parallel_cnstr = parallel_cnstr
+                        - PicusExpr::Constant(F::from_u64_unchecked(1 << 16))
+                            * PicusExpr::Variable(byte);
+                    parallel_cnstr = parallel_cnstr
+                        - PicusExpr::Constant(F::from_u64_unchecked(1 << 24))
+                            * PicusExpr::Variable(bit_0.get_variable().unwrap());
+                    parallel_cnstr = parallel_cnstr
+                        - PicusExpr::Constant(F::from_u64_unchecked(1 << 25))
+                            * PicusExpr::Variable(bit_1.get_variable().unwrap());
+                    parallel_cnstr = parallel_cnstr
+                        - PicusExpr::Constant(F::from_u64_unchecked(1 << 26))
+                            * PicusExpr::Variable(bit_2.get_variable().unwrap());
+                    cs.add_picus_parallel_constraint(PicusStructuredConstraint::Eq {
+                        lhs: parallel_cnstr,
+                        rhs: PicusExpr::Constant(F::ZERO),
+                    });
                 }
             }
             (Num::Constant(a), Num::Constant(b), Num::Constant(c))
@@ -1506,6 +1728,41 @@ impl<F: PrimeField, CS: Circuit<F>> OptimizationContext<F, CS> {
                     ));
 
                     cs.add_constraint(cnstr);
+                    let mut parallel_cnstr = PicusExpr::Constant(F::ZERO);
+                    parallel_cnstr = parallel_cnstr
+                        + PicusExpr::Constant(F::from_u64_unchecked(1u64 << carry[0].1))
+                            * PicusExpr::Variable(carry[0].0);
+                    parallel_cnstr = parallel_cnstr
+                        + PicusExpr::Constant(F::from_u64_unchecked(1u64 << carry[1].1))
+                            * PicusExpr::Variable(carry[1].0);
+                    parallel_cnstr = parallel_cnstr
+                        + PicusExpr::Constant(F::from_u64_unchecked(1u64 << carry[2].1))
+                            * PicusExpr::Variable(carry[2].0);
+                    parallel_cnstr = parallel_cnstr
+                        + Self::picus_from_term(op1_t[1]) * Self::picus_from_term(op2_t[3]);
+                    parallel_cnstr = parallel_cnstr
+                        + Self::picus_from_term(op1_t[2]) * Self::picus_from_term(op2_t[2]);
+                    parallel_cnstr = parallel_cnstr
+                        + Self::picus_from_term(op1_t[2])
+                            * Self::picus_from_term(op2_t[3])
+                            * Self::picus_from_term(byte_shift_t);
+                    parallel_cnstr = parallel_cnstr
+                        + Self::picus_from_term(op1_t[3]) * Self::picus_from_term(op2_t[1]);
+                    parallel_cnstr = parallel_cnstr
+                        + Self::picus_from_term(op1_t[3])
+                            * Self::picus_from_term(op2_t[2])
+                            * Self::picus_from_term(byte_shift_t);
+                    parallel_cnstr = parallel_cnstr - Self::picus_from_term(mul_high_t[0]);
+                    parallel_cnstr = parallel_cnstr
+                        - PicusExpr::Constant(F::from_u64_unchecked(1 << 16))
+                            * PicusExpr::Variable(byte);
+                    parallel_cnstr = parallel_cnstr
+                        - PicusExpr::Constant(F::from_u64_unchecked(1 << 24))
+                            * PicusExpr::Variable(bit_0.get_variable().unwrap());
+                    cs.add_picus_parallel_constraint(PicusStructuredConstraint::Eq {
+                        lhs: parallel_cnstr,
+                        rhs: PicusExpr::Constant(F::ZERO),
+                    });
 
                     [(byte, 0), (bit_0.get_variable().unwrap(), 8)]
                 };
@@ -1521,6 +1778,20 @@ impl<F: PrimeField, CS: Circuit<F>> OptimizationContext<F, CS> {
                     cnstr -= mul_high_t[1];
 
                     cs.add_constraint(cnstr);
+                    let mut parallel_cnstr = PicusExpr::Constant(F::ZERO);
+                    parallel_cnstr = parallel_cnstr
+                        + PicusExpr::Constant(F::from_u64_unchecked(1u64 << carry[0].1))
+                            * PicusExpr::Variable(carry[0].0);
+                    parallel_cnstr = parallel_cnstr
+                        + PicusExpr::Constant(F::from_u64_unchecked(1u64 << carry[1].1))
+                            * PicusExpr::Variable(carry[1].0);
+                    parallel_cnstr = parallel_cnstr
+                        + Self::picus_from_term(op1_t[3]) * Self::picus_from_term(op2_t[3]);
+                    parallel_cnstr = parallel_cnstr - Self::picus_from_term(mul_high_t[1]);
+                    cs.add_picus_parallel_constraint(PicusStructuredConstraint::Eq {
+                        lhs: parallel_cnstr,
+                        rhs: PicusExpr::Constant(F::ZERO),
+                    });
                 }
             }
             a @ _ => {
@@ -1602,6 +1873,14 @@ impl<F: PrimeField, CS: Circuit<F>> OptimizationContext<F, CS> {
             let constraint =
                 Term::from(high) * Term::from(1 << 8) + Term::from(low) - Term::from(x);
             cs.add_constraint_allow_explicit_linear(constraint);
+            let parallel_cnstr =
+                Self::picus_from_term(Term::from(high)) * PicusExpr::Constant(F::from_u64_unchecked(1 << 8))
+                    + Self::picus_from_term(Term::from(low))
+                    - Self::picus_from_term(Term::from(x));
+            cs.add_picus_parallel_constraint(PicusStructuredConstraint::Eq {
+                lhs: parallel_cnstr,
+                rhs: PicusExpr::Constant(F::ZERO),
+            });
 
             cur_index += 1;
         }
@@ -1698,7 +1977,12 @@ impl<F: PrimeField, CS: Circuit<F>> OptimizationContext<F, CS> {
                 .cloned()
                 .zip(var_arrays.iter().cloned())
                 .zip(table_ids.iter().cloned())
-                .map(|((flag, row), table)| DisjunctiveLookupCase { flag, row, table })
+                .map(|((flag, row), table)| DisjunctiveLookupCase {
+                    flag,
+                    row,
+                    table,
+                    guard: None,
+                })
                 .collect();
 
             // NOTE: here we must select such that in case if particular opcode doesn't use a table all available

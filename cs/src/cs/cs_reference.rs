@@ -44,6 +44,7 @@ pub struct BasicAssembly<F: PrimeField, W: WitnessPlacer<F> = CSDebugWitnessEval
 
     logger: Vec<(&'static str, u64, OptCtxIndexers)>,
     picus_extraction_metadata: PicusExtractionMetadata<F>,
+    picus_parallel_constraints_enabled: bool,
 }
 
 impl<F: PrimeField, W: WitnessPlacer<F>> Circuit<F> for BasicAssembly<F, W> {
@@ -73,6 +74,7 @@ impl<F: PrimeField, W: WitnessPlacer<F>> Circuit<F> for BasicAssembly<F, W> {
 
             logger: vec![],
             picus_extraction_metadata: PicusExtractionMetadata::default(),
+            picus_parallel_constraints_enabled: false,
         }
     }
 
@@ -132,6 +134,19 @@ impl<F: PrimeField, W: WitnessPlacer<F>> Circuit<F> for BasicAssembly<F, W> {
         self.picus_extraction_metadata
             .disjunctive_lookups
             .push(hint);
+    }
+
+    fn set_picus_parallel_constraints_enabled(&mut self, enabled: bool) {
+        self.picus_parallel_constraints_enabled = enabled;
+        self.picus_extraction_metadata.parallel_constraints_enabled = enabled;
+    }
+
+    fn add_picus_parallel_constraint(&mut self, constraint: PicusStructuredConstraint<F>) {
+        if self.picus_parallel_constraints_enabled {
+            self.picus_extraction_metadata
+                .parallel_constraints
+                .push(constraint);
+        }
     }
 
     #[track_caller]
