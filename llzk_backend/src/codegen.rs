@@ -150,12 +150,17 @@ impl<F: PrimeField> VariableExtractor for CircuitOutput<F> {
         // Inputs are:
         // - Inputs from the executor machine state
         // - Shuffle-RAM read query values
+        // - Shuffle-RAM write query values
         // - Shuffle-RAM address payloads for `RegisterOrRam` queries
         // - Shuffle-RAM `is_register` discriminators when they are real circuit variables
         //
         // The address payloads are explicit circuit variables in `ShuffleRamMemQuery`. We expose
         // them as LLZK inputs so witness lowering can canonicalize `ShuffleRamAddress(i)`
         // placeholders back to the same boundary values instead of issuing runtime oracle calls.
+        //
+        // Shuffle write values are also modeled as ordinary inputs. The witness SSA needs a
+        // stable boundary source for those placeholder-backed values, but it does not need the
+        // backend to mirror them through public struct outputs first.
         //
         // `RegisterOrRam` also carries an `is_register` boolean. That discriminator is separate
         // from the address payload: the same 32-bit address limbs may mean either a register index
@@ -169,6 +174,9 @@ impl<F: PrimeField> VariableExtractor for CircuitOutput<F> {
 
         for query in &self.shuffle_ram_queries {
             inputs.push(ExtractedVariable::register(query.read_value));
+            if !query.is_readonly() {
+                inputs.push(ExtractedVariable::register(query.write_value));
+            }
             if let ShuffleRamQueryType::RegisterOrRam {
                 is_register,
                 address,
@@ -189,18 +197,14 @@ impl<F: PrimeField> VariableExtractor for CircuitOutput<F> {
     }
 
     fn get_outputs(&self) -> Result<Vec<ExtractedVariable>> {
-        // Outputs are:
-        // - RAM write queries
-        // - end state from the executor_machine_state
+        // Outputs are the executor end state only.
+        //
+        // Shuffle write values are treated as boundary inputs instead of outputs so `@compute`
+        // can read them directly without the extra compatibility-argument round trip.
         let exec_state = &self
             .executor_machine_state
             .ok_or_else(|| anyhow!("executor_machine_state not initialized"))?;
         let mut outputs = exec_state.get_outputs()?;
-        for query in &self.shuffle_ram_queries {
-            if !query.is_readonly() {
-                outputs.push(ExtractedVariable::register(query.write_value));
-            }
-        }
         outputs.sort();
         Ok(outputs)
     }
@@ -230,29 +234,6 @@ impl<F: PrimeField> VariableExtractor for CircuitOutput<F> {
         intermediates.sort();
         Ok(intermediates)
     }
-}
-
-/// Extra boundary values added to the LLZK method signatures for compatibility with witness SSA.
-///
-/// Today this is limited to shuffle write values. They are already exposed as public LLZK struct
-/// members, but some witness SSA nodes still refer to them through placeholder reads before the
-/// matching `struct.writem` occurs in `@compute`. That means the member alone is not always a
-/// usable source during witness lowering: reading it first would be circular.
-///
-/// To break that cycle, we duplicate the same boundary value in the method signatures. LLZK
-/// requires `@compute` and `@constrain` to share the same argument types (modulo the leading
-/// `self`), so these aliases appear in both methods. Constraint lowering immediately ties them
-/// back to the corresponding public members, while witness lowering may read them directly to
-/// avoid a second runtime oracle source for the same logical value.
-fn get_compute_compatibility_inputs<F: PrimeField>(
-    circuit_output: &CircuitOutput<F>,
-) -> Vec<ExtractedVariable> {
-    circuit_output
-        .shuffle_ram_queries
-        .iter()
-        .filter(|query| !query.is_readonly())
-        .map(|query| ExtractedVariable::register(query.write_value))
-        .collect()
 }
 
 fn num_vars(vars: impl IntoIterator<Item = ExtractedVariable>) -> usize {
@@ -390,7 +371,6 @@ impl<'ctx, F: FieldInfo> EmitLlzkInModule<'ctx, F> for CircuitBundle<F> {
                     builder.insert_constant_at_start(builder.index_type(), 0)?;
                     builder.insert_constant_at_start(builder.felt_type(), 1)?;
                     builder.insert_constant_at_start(builder.felt_type(), 0)?;
-                    vars.constrain_compute_compatibility_inputs(builder)?;
                     // Add boolean constraints.
                     for bool_var in self.boolean_vars.iter() {
                         let val = vars.get_constrain_val(builder, bool_var)?;
@@ -439,12 +419,6 @@ pub struct StructVars<F: FieldInfo> {
     /// lowering adds one when reading from `@constrain` because argument 0 is the struct `self`
     /// value, while witness lowering uses the arg number directly in `@compute`.
     arg_map: HashMap<Variable, (usize, Option<u64>)>,
-    /// Additional compatibility arguments appended after the shared logical inputs.
-    ///
-    /// These are duplicated aliases of public output members. They remain visible in both
-    /// `@compute` and `@constrain`, but constraint lowering treats them only as aliases that must
-    /// equal the corresponding struct members.
-    compatibility_arg_map: HashMap<Variable, (usize, Option<u64>)>,
     /// Exact support/delegation policy for `SpecialCSRProperties`, if this circuit uses that
     /// table.
     special_csr_properties: Option<SpecialCsrPropertiesMetadata>,
@@ -474,22 +448,6 @@ impl<F: FieldInfo> StructVars<F> {
                 ExtractedVariable::Scalar(variable) => {
                     arg_map.insert(*variable, (input_num, None));
                     struct_builder.with_input(felt_type);
-                }
-            };
-        }
-
-        let mut compatibility_arg_map: HashMap<Variable, (usize, Option<u64>)> = HashMap::new();
-        let compute_input_base = co.get_inputs()?.len();
-        for (input_num, input) in get_compute_compatibility_inputs(co).iter().enumerate() {
-            match input {
-                ExtractedVariable::Register { low, high } => {
-                    compatibility_arg_map.insert(*low, (compute_input_base + input_num, Some(0)));
-                    compatibility_arg_map.insert(*high, (compute_input_base + input_num, Some(1)));
-                    struct_builder.with_compatibility_input(register_type);
-                }
-                ExtractedVariable::Scalar(variable) => {
-                    compatibility_arg_map.insert(*variable, (compute_input_base + input_num, None));
-                    struct_builder.with_compatibility_input(felt_type);
                 }
             };
         }
@@ -534,7 +492,6 @@ impl<F: FieldInfo> StructVars<F> {
             _field: PhantomData,
             member_map,
             arg_map,
-            compatibility_arg_map,
             special_csr_properties,
         })
     }
@@ -573,7 +530,6 @@ impl<F: FieldInfo> StructVars<F> {
     ) -> Result<Option<Value<'ctx, 'sco>>> {
         // `@compute` does not receive a `self` argument. Its public inputs begin at argument 0 and
         // the partially constructed witness struct is the result of the leading `struct.new`.
-        // Some circuits also expose compatibility args here after the shared logical input list.
         self.get_compute_arg_val(builder, var)
     }
 
@@ -607,41 +563,7 @@ impl<F: FieldInfo> StructVars<F> {
 
     /// Return `true` when `var` is one of the explicit `@compute` arguments.
     pub fn has_compute_input(&self, var: &Variable) -> bool {
-        self.arg_map.contains_key(var) || self.compatibility_arg_map.contains_key(var)
-    }
-
-    /// Add equality constraints tying compatibility args back to the corresponding struct
-    /// members.
-    ///
-    /// These values exist to give `@compute` a canonical boundary source for output-backed
-    /// placeholders before the matching `struct.writem` occurs. `@constrain` should still treat
-    /// the struct member as the semantic output, so emitting `compat_arg == member` keeps the
-    /// duplicate boundary args from becoming unconstrained.
-    pub fn constrain_compute_compatibility_inputs<'ctx, 'sco>(
-        &self,
-        builder: &OpsBuilder<'ctx, 'sco, F>,
-    ) -> Result<()> {
-        let mut vars = self
-            .compatibility_arg_map
-            .keys()
-            .copied()
-            .collect::<Vec<_>>();
-        vars.sort();
-        vars.dedup();
-
-        for var in vars {
-            let Some(input) =
-                self.get_input_from_map::<1>(builder, &var, &self.compatibility_arg_map)?
-            else {
-                continue;
-            };
-            let Some(member) = self.get_constrain_member_val(builder, &var)? else {
-                continue;
-            };
-            builder.append_constrain_eq(builder.unknown_location(), input, member)?;
-        }
-
-        Ok(())
+        self.arg_map.contains_key(var)
     }
 
     /// Return `true` when `var` is represented by a struct member.
@@ -743,11 +665,7 @@ impl<F: FieldInfo> StructVars<F> {
         builder: &OpsBuilder<'ctx, 'sco, F>,
         var: &Variable,
     ) -> Result<Option<Value<'ctx, 'sco>>> {
-        if let Some(value) = self.get_input_from_map::<0>(builder, var, &self.arg_map)? {
-            Ok(Some(value))
-        } else {
-            self.get_input_from_map::<0>(builder, var, &self.compatibility_arg_map)
-        }
+        self.get_input_from_map::<0>(builder, var, &self.arg_map)
     }
 
     fn get_constrain_member_val<'ctx, 'sco>(
@@ -815,7 +733,6 @@ impl<F: FieldInfo> StructVars<F> {
         Self {
             member_map,
             arg_map,
-            compatibility_arg_map: HashMap::new(),
             _field: PhantomData,
             special_csr_properties,
         }

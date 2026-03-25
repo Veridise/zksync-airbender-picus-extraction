@@ -720,6 +720,14 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         source_subexpr: &Expression<F>,
         condition_subexpr_idx: Option<usize>,
     ) -> Result<()> {
+        if self.vars.has_compute_input(into_variable) && !self.vars.has_member(into_variable) {
+            // Input-backed boundary values do not need a second storage location inside the
+            // returned struct. Once witness lowering has canonicalized a placeholder/oracle read
+            // back to the LLZK input, later SSA writes to that same logical variable are
+            // redundant and can be skipped.
+            return Ok(());
+        }
+
         if self.vars.has_member(into_variable) {
             let mut value = self.expression_to_store_value(source_subexpr)?;
             if let Some(condition_idx) = condition_subexpr_idx {
@@ -875,8 +883,8 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
 
     /// Try to resolve one placeholder limb through the explicit `@compute` boundary arguments.
     ///
-    /// This includes both the shared LLZK inputs and the compute-only compatibility args used for
-    /// output-backed shuffle placeholders.
+    /// This uses the shared LLZK inputs, including shuffle write values that are modeled as
+    /// ordinary boundary inputs instead of output-member aliases.
     fn try_read_placeholder_input_limb(
         &self,
         placeholder: Placeholder,

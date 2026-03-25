@@ -1295,15 +1295,6 @@ pub struct StructBuilder<'ctx, 'str, F: FieldInfo> {
     name: &'str str,
     /// Inputs shared by both `@compute` and `@constrain` (excluding `self` in `@constrain`).
     inputs: Vec<Type<'ctx>>,
-    /// Additional compatibility arguments appended after the shared logical inputs.
-    ///
-    /// These values are duplicated boundary aliases of public struct members, not new semantic
-    /// inputs to the circuit. We thread them through both method signatures because some witness
-    /// SSA nodes still read the corresponding placeholder-backed value before `@compute` performs
-    /// the `struct.writem` that materializes the member. LLZK requires `@compute` and
-    /// `@constrain` to share the same argument list (modulo `self`), so the duplicate boundary
-    /// value has to be visible in both methods.
-    compatibility_inputs: Vec<Type<'ctx>>,
     /// List of members. Contains the name, type and whether is marked public or not.
     members: Vec<(String, Type<'ctx>, bool)>,
 }
@@ -1316,7 +1307,6 @@ impl<'ctx, 'str, F: FieldInfo> StructBuilder<'ctx, 'str, F> {
             location: None,
             name,
             inputs: vec![],
-            compatibility_inputs: vec![],
             members: vec![],
         }
     }
@@ -1324,16 +1314,6 @@ impl<'ctx, 'str, F: FieldInfo> StructBuilder<'ctx, 'str, F> {
     /// Adds an input to the list.
     pub fn with_input(&mut self, input: Type<'ctx>) -> &mut Self {
         self.inputs.push(input);
-        self
-    }
-
-    /// Adds an extra compatibility argument shared by `@compute` and `@constrain`.
-    ///
-    /// The caller is responsible for ensuring this argument is only a duplicated alias of an
-    /// existing public member. `@constrain` will tie it back to that member with equality
-    /// constraints, while `@compute` may read it before the member is written.
-    pub fn with_compatibility_input(&mut self, input: Type<'ctx>) -> &mut Self {
-        self.compatibility_inputs.push(input);
         self
     }
 
@@ -1365,13 +1345,11 @@ impl<'ctx, 'str, F: FieldInfo> StructBuilder<'ctx, 'str, F> {
         let constrain_inputs = self
             .inputs
             .iter()
-            .chain(self.compatibility_inputs.iter())
             .map(|arg| (*arg, self.location()))
             .collect::<Vec<_>>();
         let compute_inputs = self
             .inputs
             .iter()
-            .chain(self.compatibility_inputs.iter())
             .map(|arg| (*arg, self.location()))
             .collect::<Vec<_>>();
 
