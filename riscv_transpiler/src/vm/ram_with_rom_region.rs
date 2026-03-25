@@ -42,45 +42,44 @@ impl<const ROM_BOUND_SECOND_WORD_BITS: usize> RamWithRomRegion<ROM_BOUND_SECOND_
 
     /// Prints to stderr a hexdump the last 20 bytes of RAM + the extra amount of words.
     pub fn dump_beyond(&self, extra: usize) {
-        let backing_end = unsafe { self.backing.as_ptr().add(self.backing.len()) };
-        let last_5_ptr = self.backing[(self.backing.len() - 5)..].as_ptr();
-        let raw = unsafe {
-            std::slice::from_raw_parts(
-                last_5_ptr as *const u8,
-                (5 + extra) * std::mem::size_of::<Register>(),
-            )
-        };
-
-        for chunk in raw.chunks(16) {
-            eprint!("{:?}: ", chunk.as_ptr());
-            for byte in &chunk[0..8] {
-                eprint!("{byte:02x}");
-                if std::ptr::from_ref(byte) < backing_end as *const u8 {
-                    eprint!("* ");
-                } else {
-                    eprint!("  ");
-                }
-            }
-            eprint!(" ");
-            for byte in &chunk[8..16] {
-                eprint!("{byte:02x}");
-                if std::ptr::from_ref(byte) < backing_end as *const u8 {
-                    eprint!("* ");
-                } else {
-                    eprint!("  ");
-                }
-            }
-            eprint!("|");
-            for byte in chunk {
-                let c = char::from(*byte);
-                if c.is_ascii() && !c.is_ascii_control() {
-                    eprint!("{c}");
-                } else {
-                    eprint!(".");
-                }
-            }
-            eprintln!("|");
-        }
+        // let backing_end = unsafe { self.backing.as_ptr().add(self.backing.len()) };
+        // let last_5_ptr = self.backing[(self.backing.len() - 5)..].as_ptr();
+        // let raw = unsafe {
+        //    std::slice::from_raw_parts(
+        //        last_5_ptr as *const u8,
+        //        (5 + extra) * std::mem::size_of::<Register>(),
+        //    )
+        //};
+        // for chunk in raw.chunks(16) {
+        //    eprint!("{:?}: ", chunk.as_ptr());
+        //    for byte in &chunk[0..8] {
+        //        eprint!("{byte:02x}");
+        //        if std::ptr::from_ref(byte) < backing_end as *const u8 {
+        //            eprint!("* ");
+        //        } else {
+        //            eprint!("  ");
+        //        }
+        //    }
+        //    eprint!(" ");
+        //    for byte in &chunk[8..16] {
+        //        eprint!("{byte:02x}");
+        //        if std::ptr::from_ref(byte) < backing_end as *const u8 {
+        //            eprint!("* ");
+        //        } else {
+        //            eprint!("  ");
+        //        }
+        //    }
+        //    eprint!("|");
+        //    for byte in chunk {
+        //        let c = char::from(*byte);
+        //        if c.is_ascii() && !c.is_ascii_control() {
+        //            eprint!("{c}");
+        //        } else {
+        //            eprint!(".");
+        //        }
+        //    }
+        //    eprintln!("|");
+        //}
     }
 }
 

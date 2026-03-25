@@ -268,6 +268,7 @@ impl<C: Counters> VM<C> {
         use crate::vm::instructions::*;
         unsafe {
             let pc = state.pc;
+            // eprintln!("PC = 0x{pc:08x}");
             let instr = instruction_tape.read_instruction(pc);
             debug_assert_eq!(state.timestamp % TIMESTAMP_STEP, 0);
             match instr.name {

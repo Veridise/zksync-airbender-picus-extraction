@@ -7,10 +7,12 @@ use cs::definitions::*;
 use cs::machine::machine_configurations::*;
 use cs::one_row_compiler::*;
 use cs::tables::LookupWrapper;
-use cs::tables::{TableDriver, TableType};
+use cs::tables::TableDriver;
+use cs::tables::TableType;
 use fft::*;
 use mem_utils::produce_register_contribution_into_memory_accumulator;
-use prover_stages::{prove, ProverData};
+use prover_stages::prove;
+use prover_stages::ProverData;
 use std::alloc::Global;
 use trace_holder::RowMajorTrace;
 use worker::Worker;
@@ -20,12 +22,15 @@ pub mod full_machine_with_gpu_tracer {
     use crate::witness_evaluator::SimpleWitnessProxy;
     use crate::witness_proxy::WitnessProxy;
     use ::cs::cs::placeholder::Placeholder;
+    use ::cs::cs::witness_placer::WitnessComputationCore;
+    use ::cs::cs::witness_placer::WitnessComputationalField;
+    use ::cs::cs::witness_placer::WitnessComputationalI32;
+    use ::cs::cs::witness_placer::WitnessComputationalInteger;
+    use ::cs::cs::witness_placer::WitnessComputationalU16;
+    use ::cs::cs::witness_placer::WitnessComputationalU32;
+    use ::cs::cs::witness_placer::WitnessComputationalU8;
+    use ::cs::cs::witness_placer::WitnessMask;
     use ::cs::cs::witness_placer::WitnessTypeSet;
-    use ::cs::cs::witness_placer::{
-        WitnessComputationCore, WitnessComputationalField, WitnessComputationalI32,
-        WitnessComputationalInteger, WitnessComputationalU16, WitnessComputationalU32,
-        WitnessComputationalU8, WitnessMask,
-    };
     use ::field::Mersenne31Field;
     use cs::cs::witness_placer::scalar_witness_type_set::ScalarWitnessTypeSet;
     use risc_v_simulator::cycle::IMStandardIsaConfig;
@@ -48,11 +53,13 @@ pub(crate) mod reduced_machine {
     use crate::witness_evaluator::SimpleWitnessProxy;
     use crate::witness_proxy::WitnessProxy;
     use ::cs::cs::placeholder::Placeholder;
+    use ::cs::cs::witness_placer::WitnessComputationCore;
+    use ::cs::cs::witness_placer::WitnessComputationalField;
+    use ::cs::cs::witness_placer::WitnessComputationalInteger;
+    use ::cs::cs::witness_placer::WitnessComputationalU16;
+    use ::cs::cs::witness_placer::WitnessComputationalU32;
+    use ::cs::cs::witness_placer::WitnessMask;
     use ::cs::cs::witness_placer::WitnessTypeSet;
-    use ::cs::cs::witness_placer::{
-        WitnessComputationCore, WitnessComputationalField, WitnessComputationalInteger,
-        WitnessComputationalU16, WitnessComputationalU32, WitnessMask,
-    };
     use ::field::Mersenne31Field;
     use cs::cs::witness_placer::scalar_witness_type_set::ScalarWitnessTypeSet;
     use risc_v_simulator::cycle::IWithoutByteAccessIsaConfigWithDelegation;
@@ -80,11 +87,12 @@ pub mod blake2s_delegation_with_gpu_tracer {
     use crate::witness_evaluator::SimpleWitnessProxy;
     use crate::witness_proxy::WitnessProxy;
 
+    use ::cs::cs::witness_placer::WitnessComputationCore;
+    use ::cs::cs::witness_placer::WitnessComputationalField;
+    use ::cs::cs::witness_placer::WitnessComputationalInteger;
+    use ::cs::cs::witness_placer::WitnessComputationalU16;
+    use ::cs::cs::witness_placer::WitnessComputationalU32;
     use ::cs::cs::witness_placer::WitnessTypeSet;
-    use ::cs::cs::witness_placer::{
-        WitnessComputationCore, WitnessComputationalField, WitnessComputationalInteger,
-        WitnessComputationalU16, WitnessComputationalU32,
-    };
     use ::field::Mersenne31Field;
     use cs::cs::witness_placer::scalar_witness_type_set::ScalarWitnessTypeSet;
 
@@ -106,11 +114,12 @@ pub mod blake2s_delegation_with_transpiler {
     use crate::witness_evaluator::SimpleWitnessProxy;
     use crate::witness_proxy::WitnessProxy;
 
+    use ::cs::cs::witness_placer::WitnessComputationCore;
+    use ::cs::cs::witness_placer::WitnessComputationalField;
+    use ::cs::cs::witness_placer::WitnessComputationalInteger;
+    use ::cs::cs::witness_placer::WitnessComputationalU16;
+    use ::cs::cs::witness_placer::WitnessComputationalU32;
     use ::cs::cs::witness_placer::WitnessTypeSet;
-    use ::cs::cs::witness_placer::{
-        WitnessComputationCore, WitnessComputationalField, WitnessComputationalInteger,
-        WitnessComputationalU16, WitnessComputationalU32,
-    };
     use ::field::Mersenne31Field;
     use cs::cs::witness_placer::scalar_witness_type_set::ScalarWitnessTypeSet;
 
@@ -132,11 +141,14 @@ pub mod keccak_special5_delegation_with_gpu_tracer {
     use crate::witness_evaluator::SimpleWitnessProxy;
     use crate::witness_proxy::WitnessProxy;
 
+    use ::cs::cs::witness_placer::WitnessComputationCore;
+    use ::cs::cs::witness_placer::WitnessComputationalField;
+    use ::cs::cs::witness_placer::WitnessComputationalInteger;
+    use ::cs::cs::witness_placer::WitnessComputationalU16;
+    use ::cs::cs::witness_placer::WitnessComputationalU32;
+    use ::cs::cs::witness_placer::WitnessComputationalU8;
+    use ::cs::cs::witness_placer::WitnessMask;
     use ::cs::cs::witness_placer::WitnessTypeSet;
-    use ::cs::cs::witness_placer::{
-        WitnessComputationCore, WitnessComputationalField, WitnessComputationalInteger,
-        WitnessComputationalU16, WitnessComputationalU32, WitnessComputationalU8, WitnessMask,
-    };
     use ::field::Mersenne31Field;
     use cs::cs::witness_placer::scalar_witness_type_set::ScalarWitnessTypeSet;
 
@@ -158,11 +170,14 @@ pub mod keccak_special5_delegation_with_transpiler {
     use crate::witness_evaluator::SimpleWitnessProxy;
     use crate::witness_proxy::WitnessProxy;
 
+    use ::cs::cs::witness_placer::WitnessComputationCore;
+    use ::cs::cs::witness_placer::WitnessComputationalField;
+    use ::cs::cs::witness_placer::WitnessComputationalInteger;
+    use ::cs::cs::witness_placer::WitnessComputationalU16;
+    use ::cs::cs::witness_placer::WitnessComputationalU32;
+    use ::cs::cs::witness_placer::WitnessComputationalU8;
+    use ::cs::cs::witness_placer::WitnessMask;
     use ::cs::cs::witness_placer::WitnessTypeSet;
-    use ::cs::cs::witness_placer::{
-        WitnessComputationCore, WitnessComputationalField, WitnessComputationalInteger,
-        WitnessComputationalU16, WitnessComputationalU32, WitnessComputationalU8, WitnessMask,
-    };
     use ::field::Mersenne31Field;
     use cs::cs::witness_placer::scalar_witness_type_set::ScalarWitnessTypeSet;
 
@@ -182,7 +197,7 @@ use std::collections::HashMap;
 
 mod delegation_test;
 mod keccak_test;
-mod unrolled;
+pub mod unrolled;
 
 #[cfg(test)]
 mod lde_tests;
@@ -192,9 +207,9 @@ pub use keccak_test::run_keccak_test_impl;
 
 pub use unrolled::with_transpiler::run_basic_unrolled_test_in_transpiler_with_word_specialization_impl;
 
-// NOTE: For some reason tryint to add generic tree constructor to GPU arguments just makes resolver crazy,
-// it starts to complaint about `ROM_ADDRESS_SPACE_SECOND_WORD_BITS` being not a constant but unconstraint const generic,
-// so we live with default config for now
+// NOTE: For some reason tryint to add generic tree constructor to GPU arguments just makes resolver
+// crazy, it starts to complaint about `ROM_ADDRESS_SPACE_SECOND_WORD_BITS` being not a constant but
+// unconstraint const generic, so we live with default config for now
 
 #[allow(unused)]
 pub struct GpuComparisonArgs<'a> {
@@ -257,10 +272,10 @@ pub struct GpuComparisonArgs<'a> {
 //         default_compile_machine(machine, rom_table.clone(), Some(csr_table.clone()), 20);
 
 //     // recreate table driver for witness evaluation
-//     let mut table_driver = create_table_driver::<_, _, ROM_ADDRESS_SPACE_SECOND_WORD_BITS>(machine);
-//     // add preimage into table driver
-//     table_driver.add_table_with_content(TableType::RomRead, LookupWrapper::Dimensional3(rom_table));
-//     table_driver.add_table_with_content(
+//     let mut table_driver = create_table_driver::<_, _,
+// ROM_ADDRESS_SPACE_SECOND_WORD_BITS>(machine);     // add preimage into table driver
+//     table_driver.add_table_with_content(TableType::RomRead,
+// LookupWrapper::Dimensional3(rom_table));     table_driver.add_table_with_content(
 //         TableType::SpecialCSRProperties,
 //         LookupWrapper::Dimensional3(csr_table.clone()),
 //     );
@@ -333,8 +348,8 @@ pub struct GpuComparisonArgs<'a> {
 //     // tau == 1 here
 //     let tau = Mersenne31Quartic::ONE;
 
-//     // TODO: properly adjust challenges by tau^H/2, so we can move similar powers to compiled constraint without
-//     // touching quadratic coefficients
+//     // TODO: properly adjust challenges by tau^H/2, so we can move similar powers to compiled
+// constraint without     // touching quadratic coefficients
 //     current_challenge.mul_assign_by_base(&tau);
 //     current_challenge.mul_assign_by_base(&tau);
 
@@ -384,7 +399,8 @@ pub struct GpuComparisonArgs<'a> {
 
 //     let memory_argument_alpha = Mersenne31Quartic::from_base(Mersenne31Field(42));
 //     let memory_argument_gamma =
-//         Mersenne31Quartic::from_coeffs_in_base(&[Mersenne31Complex::ZERO, Mersenne31Complex::ONE]);
+//         Mersenne31Quartic::from_coeffs_in_base(&[Mersenne31Complex::ZERO,
+// Mersenne31Complex::ONE]);
 
 //     let memory_argument_linearization_challenges_powers: [Mersenne31Quartic;
 //         NUM_MEM_ARGUMENT_KEY_PARTS - 1] =
@@ -399,7 +415,8 @@ pub struct GpuComparisonArgs<'a> {
 
 //     let delegation_argument_alpha = Mersenne31Quartic::from_base(Mersenne31Field(11));
 //     let delegation_argument_gamma =
-//         Mersenne31Quartic::from_coeffs_in_base(&[Mersenne31Complex::ONE, Mersenne31Complex::ONE]);
+//         Mersenne31Quartic::from_coeffs_in_base(&[Mersenne31Complex::ONE,
+// Mersenne31Complex::ONE]);
 
 //     let delegation_argument_linearization_challenges: [Mersenne31Quartic;
 //         NUM_DELEGATION_ARGUMENT_KEY_PARTS - 1] =
@@ -427,9 +444,9 @@ pub struct GpuComparisonArgs<'a> {
 //             teardown_value_first_row: witness.aux_data.teardown_value_first_row,
 //             teardown_timestamp_first_row: witness.aux_data.teardown_timestamp_first_row,
 //             lazy_init_one_before_last_row: witness.aux_data.lazy_init_one_before_last_row,
-//             teardown_value_one_before_last_row: witness.aux_data.teardown_value_one_before_last_row,
-//             teardown_timestamp_one_before_last_row: witness
-//                 .aux_data
+//             teardown_value_one_before_last_row:
+// witness.aux_data.teardown_value_one_before_last_row,
+// teardown_timestamp_one_before_last_row: witness                 .aux_data
 //                 .teardown_timestamp_one_before_last_row,
 //         },
 //     };
@@ -584,7 +601,8 @@ fn test_bigint_with_control_call() {
         //     // println!("result[{}] = 0x{:08x}", _i, el.write_value);
         //     expected_state.push(el.write_value);
         // }
-        // println!("Op bitmask = 0b{:032b}", oracle_input[round].register_and_indirect_accesses[2].read_value);
+        // println!("Op bitmask = 0b{:032b}",
+        // oracle_input[round].register_and_indirect_accesses[2].read_value);
 
         // let expected_x12 = oracle_input[round].register_and_indirect_accesses[2].written_value;
 
@@ -626,9 +644,9 @@ fn test_bigint_with_control_call() {
 //     use cs::delegation::poseidon2::define_poseidon2_compression_delegation_circuit;
 
 //     let input: [u32; 16] = [
-//         894848333, 1437655012, 1200606629, 1690012884, 71131202, 1749206695, 1717947831, 120589055,
-//         19776022, 42382981, 1831865506, 724844064, 171220207, 1299207443, 227047920, 1783754913,
-//     ];
+//         894848333, 1437655012, 1200606629, 1690012884, 71131202, 1749206695, 1717947831,
+// 120589055,         19776022, 42382981, 1831865506, 724844064, 171220207, 1299207443, 227047920,
+// 1783754913,     ];
 
 //     let expected: [u32; 16] = [
 //         1124552602, 2127602268, 1834113265, 1207687593, 1891161485, 245915620, 981277919,
@@ -682,9 +700,9 @@ fn test_bigint_with_control_call() {
 //     // use cs::delegation::poseidon2::define_poseidon2_compression_delegation_circuit;
 
 //     let input: [u32; 16] = [
-//         894848333, 1437655012, 1200606629, 1690012884, 71131202, 1749206695, 1717947831, 120589055,
-//         19776022, 42382981, 1831865506, 724844064, 171220207, 1299207443, 227047920, 1783754913,
-//     ];
+//         894848333, 1437655012, 1200606629, 1690012884, 71131202, 1749206695, 1717947831,
+// 120589055,         19776022, 42382981, 1831865506, 724844064, 171220207, 1299207443, 227047920,
+// 1783754913,     ];
 
 //     let expected: [u32; 16] = [
 //         1124552602, 2127602268, 1834113265, 1207687593, 1891161485, 245915620, 981277919,
@@ -748,7 +766,9 @@ fn test_bigint_with_control_call() {
 //         );
 
 //         serialize_to_file(&circuit, "poseidon2_layout");
-//         use risc_v_simulator::delegations::poseidon2_provide_witness_and_compress::POSEIDON2_WITNESS_AND_COMPRESS_ACCESS_ID;
+//         use
+// risc_v_simulator::delegations::poseidon2_provide_witness_and_compress::POSEIDON2_WITNESS_AND_COMPRESS_ACCESS_ID;
+//
 
 //         let delegation_type = POSEIDON2_WITNESS_AND_COMPRESS_ACCESS_ID;
 //         let description = DelegationProcessorDescription {

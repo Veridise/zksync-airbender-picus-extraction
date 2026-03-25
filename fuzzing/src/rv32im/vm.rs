@@ -17,63 +17,88 @@ use crate::rv32im::DEFAULT_CYCLES;
 
 /// Either returns `None` if the string matches the one emitted by the panic raised if the
 /// simulator encounters an exception or aborts the whole process.
-fn check_panic_string(s: impl AsRef<str>) -> Option<GuestResult> {
-    if s.as_ref()
-        .starts_with("Illegal instruction encounteted at PC =")
+fn check_panic_string<const ABORT: bool>(s: impl AsRef<str>) -> Option<GuestResult> {
+    let s = s.as_ref();
+    log::debug!("Panic string: {s:?}");
+    if s.starts_with("Illegal instruction encounteted at PC =")
+        || s.starts_with("Unaligned memory access at PC =")
     {
         return None;
     }
 
-    log::error!("Target raised error: {}", s.as_ref());
-    std::process::abort()
+    if ABORT {
+        log::error!("Target raised unhandled error: {s}");
+        std::process::abort()
+    } else {
+        panic!("Target raised unhandled error: {s}")
+    }
 }
-
-// We are assuming that the whole binary is just the .text section, which could be not.
-// If the compiled binary has other sections of data that are part of the ROM we are going to miss
-// them.
-// For now, and until we see that's actually an issue, we are going to roll with the assumption
-// since we are going to generate random programs anyway.
 
 struct Binary<'d> {
     data: Cow<'d, [u8]>,
+    text: Option<Cow<'d, [u8]>>,
 }
 
-type DecoderConfig = FullUnsignedMachineDecoderConfig;
-type CountersT = DelegationsAndFamiliesCounters;
+pub(super) type DecoderConfig = FullUnsignedMachineDecoderConfig;
+pub(super) type CountersT = DelegationsAndFamiliesCounters;
+
+fn align<'d>(data: &'d [u8]) -> Cow<'d, [u8]> {
+    let mult = data.len().next_multiple_of(4);
+
+    if mult != data.len() {
+        // Pad the data with 0 to keep alignment.
+        let mut vec = Vec::with_capacity(mult);
+        vec.extend_from_slice(data);
+        vec.extend(std::iter::repeat_n(0u8, mult - data.len()));
+        assert_eq!(vec.len() % 4, 0);
+        Cow::Owned(vec)
+    } else {
+        Cow::Borrowed(data)
+    }
+}
+
+fn assert_text_is_beginning_of_data(data: &[u8], text: &[u8]) {
+    assert!(data.len() >= text.len());
+    assert_eq!(&data[0..text.len()], text);
+}
+
+fn into_chunks(data: &[u8]) -> Vec<u32> {
+    let (chunks, tail) = data.as_chunks::<4>();
+    assert_eq!(tail.len(), 0);
+    chunks.iter().copied().map(u32::from_le_bytes).collect()
+}
 
 impl<'d> Binary<'d> {
-    fn new(data: &'d [u8]) -> Self {
-        let delta = data.len() % 4;
-        let data = if delta != 0 {
-            // Pad the data with 0 to keep alignment.
-            let mut vec = Vec::with_capacity(data.len() + delta);
-            vec.extend_from_slice(data);
-            vec.extend(std::iter::repeat_n(0u8, delta));
-            assert_eq!(vec.len() % 4, 0);
-            Cow::Owned(vec)
-        } else {
-            Cow::Borrowed(data)
-        };
-        Self { data }
+    fn new(data: &'d [u8], text: Option<&'d [u8]>) -> Self {
+        let data = align(data);
+        let text = text.map(align);
+        Self { data, text }
     }
 
     fn data(&self) -> &[u8] {
         self.data.as_ref()
     }
 
+    fn text(&self) -> Option<&[u8]> {
+        self.text.as_deref()
+    }
+
     fn data_chunks(&self) -> Vec<u32> {
-        let (chunks, tail) = self.data().as_chunks::<4>();
-        assert_eq!(tail.len(), 0);
-        chunks.iter().copied().map(u32::from_le_bytes).collect()
+        into_chunks(self.data())
+    }
+
+    fn text_chunks(&self) -> Option<Vec<u32>> {
+        self.text().map(into_chunks)
     }
 
     fn instructions(&self) -> Vec<Instruction> {
-        preprocess_bytecode::<DecoderConfig>(&self.data_chunks())
+        let chunks = self.text_chunks().unwrap_or_else(|| self.data_chunks());
+        preprocess_bytecode::<DecoderConfig>(&chunks)
     }
 }
 
-fn run_vm_impl(data: &[u8]) -> Option<GuestResult> {
-    let binary = Binary::new(data);
+fn run_vm_impl(data: &[u8], text: Option<&[u8]>) -> Option<GuestResult> {
+    let binary = Binary::new(data, text);
 
     let instructions = binary.instructions();
     let tape = SimpleTape::new(&instructions);
@@ -85,36 +110,57 @@ fn run_vm_impl(data: &[u8]) -> Option<GuestResult> {
     let mut snapshotter = SimpleSnapshotter::<CountersT, {common_constants::ROM_SECOND_WORD_BITS}>::new_with_cycle_limit(DEFAULT_CYCLES, state);
     let mut non_determinism = QuasiUARTSource::default();
 
+    let cycles_bound = DEFAULT_CYCLES;
+    log::debug!("Starting target VM...");
     let is_program_finished = VM::<CountersT>::run_basic_unrolled(
         &mut state,
         &mut ram,
         &mut snapshotter,
         &tape,
-        DEFAULT_CYCLES,
+        cycles_bound,
         &mut non_determinism,
     );
+    log::debug!("VM stopped. Program finished? {is_program_finished}");
 
-    ram.dump_beyond(15);
-
-    is_program_finished.then(|| {
+    let registers = is_program_finished.then(|| {
         std::array::from_fn(|idx| {
             // We want registers A0-7, which are aliases to registers X10-17
             let reg_idx = idx + 10;
             state.registers[reg_idx].value
         })
-    })
+    });
+
+    #[cfg(feature = "prover")]
+    {
+        let chunks = binary.data_chunks();
+        let text = binary.text_chunks();
+        crate::rv32im::prover::prove_vm_result(
+            &mut snapshotter,
+            &mut state,
+            &mut ram,
+            text.as_deref().unwrap_or(&chunks),
+            &tape,
+            &chunks,
+            cycles_bound,
+        );
+    }
+    registers
 }
 
-pub fn run_vm(data: &[u8]) -> Option<GuestResult> {
-    match std::panic::catch_unwind(|| run_vm_impl(data)) {
+pub fn run_vm<const ABORT: bool>(data: &[u8], text: Option<&[u8]>) -> Option<GuestResult> {
+    match std::panic::catch_unwind(|| run_vm_impl(data, text)) {
         Ok(tr) => tr,
         Err(err) => match err.downcast::<String>() {
-            Ok(s) => check_panic_string(*s),
+            Ok(s) => check_panic_string::<ABORT>(*s),
             Err(err) => match err.downcast::<&'static str>() {
-                Ok(s) => check_panic_string(*s),
+                Ok(s) => check_panic_string::<ABORT>(*s),
                 Err(_) => {
-                    log::error!("Unknown error type");
-                    std::process::abort();
+                    if ABORT {
+                        log::error!("Unknown error type");
+                        std::process::abort();
+                    } else {
+                        panic!("Unknown error type");
+                    }
                 }
             },
         },

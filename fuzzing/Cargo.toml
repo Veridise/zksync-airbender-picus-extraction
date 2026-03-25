@@ -32,3 +32,14 @@ afl = "0.17"
 riscv_transpiler = { path = "../riscv_transpiler/" }
 # risc_v_simulator = { path = "../risc_v_simulator" }
 unicorn-engine = "2.1.5"
+
+[dev-dependencies]
+rstest = "0.26"
+simplelog = {version = "0.12", features = ["test"] }
+
+[features]
+# default = ["prover"]
+default = []
+prover = ["prover/test"]
+
+

@@ -102,20 +102,33 @@ pub fn preprocess_bytecode<OPT: DecodingOptions>(bytecode: &[u32]) -> Vec<Instru
                 let mut imm = BTypeOpcode::imm(opcode);
                 sign_extend(&mut imm, 13);
 
-                // NOTE: branch instructions do not write, and we always model it as RD = 0 and write of 0 for tracing purposes.
-                // And we will put funct3 into rd here to reduce struct size
+                // NOTE: branch instructions do not write, and we always model it as RD = 0 and
+                // write of 0 for tracing purposes. And we will put funct3 into rd
+                // here to reduce struct size
+
+                // Reorganized to avoid the panic in the compliance tests.
                 match funct3 {
-                    0 | 1 | 4 | 5 | 6 | 7 => {}
+                    0 | 1 | 4 | 5 | 6 | 7 => Instruction::from_imm(
+                        InstructionName::Branch,
+                        formal_rs1,
+                        formal_rs2,
+                        funct3,
+                        imm,
+                    ),
                     _ => {
-                        panic!(
-                            "Unknown BRANCH-like opcode 0x{:08x} at PC = 0x{:08x}",
+                        eprintln!(
+                            "ERROR: Unknown BRANCH-like opcode 0x{:08x} at PC = 0x{:08x}",
                             opcode,
                             i * 4
                         );
+                        illegal_instr
+                        // panic!(
+                        //    "Unknown BRANCH-like opcode 0x{:08x} at PC = 0x{:08x}",
+                        //    opcode,
+                        //    i * 4
+                        //);
                     }
-                };
-
-                Instruction::from_imm(InstructionName::Branch, formal_rs1, formal_rs2, funct3, imm)
+                }
             }
             OP_IMM_SUBMASK => {
                 let mut imm = ITypeOpcode::imm(opcode);
@@ -164,7 +177,14 @@ pub fn preprocess_bytecode<OPT: DecodingOptions>(bytecode: &[u32]) -> Vec<Instru
                         Instruction::from_imm(InstructionName::Andi, formal_rs1, 0, rd, imm)
                     }
                     _ => {
-                        panic!("Unknown opcode 0x{:08x}", opcode);
+                        // Commented out the panic for the compliance tests.
+                        // panic!("Unknown opcode 0x{:08x}", opcode);
+                        eprintln!(
+                            "ERROR: Unknown opcode 0x{:08x} at PC = 0x{:08x}",
+                            opcode,
+                            i * 4
+                        );
+                        illegal_instr
                     }
                 };
 
@@ -307,7 +327,8 @@ pub fn preprocess_bytecode<OPT: DecodingOptions>(bytecode: &[u32]) -> Vec<Instru
                         ),
                         0b001 if funct7 == ROT_FUNCT7 => {
                             panic!("ROL is not supported");
-                            // Instruction::from_imm(InstructionName::Rol, formal_rs1, formal_rs2, rd, 0)
+                            // Instruction::from_imm(InstructionName::Rol, formal_rs1, formal_rs2,
+                            // rd, 0)
                         }
                         0b101 if funct7 == SRL_FUNCT7 => Instruction::from_imm(
                             InstructionName::Srl,
@@ -325,7 +346,8 @@ pub fn preprocess_bytecode<OPT: DecodingOptions>(bytecode: &[u32]) -> Vec<Instru
                         ),
                         0b101 if funct7 == ROT_FUNCT7 => {
                             panic!("ROR is not supported");
-                            // Instruction::from_imm(InstructionName::Ror, formal_rs1, formal_rs2, rd, 0)
+                            // Instruction::from_imm(InstructionName::Ror, formal_rs1, formal_rs2,
+                            // rd, 0)
                         }
                         0b010 => Instruction::from_imm(
                             InstructionName::Slt,
@@ -363,7 +385,14 @@ pub fn preprocess_bytecode<OPT: DecodingOptions>(bytecode: &[u32]) -> Vec<Instru
                             0,
                         ),
                         _ => {
-                            panic!("Unknown opcode 0x{:08x}", opcode);
+                            // Commented out the panic for the compliance tests.
+                            // panic!("Unknown opcode 0x{:08x}", opcode);
+                            eprintln!(
+                                "ERROR: Unknown opcode 0x{:08x} at PC = 0x{:08x}",
+                                opcode,
+                                i * 4
+                            );
+                            illegal_instr
                         }
                     }
                 }
@@ -434,7 +463,14 @@ pub fn preprocess_bytecode<OPT: DecodingOptions>(bytecode: &[u32]) -> Vec<Instru
                         instr
                     }
                     _ => {
-                        panic!("Unknown opcode 0x{:08x}", opcode);
+                        // Commented out the panic for the compliance tests.
+                        // panic!("Unknown opcode 0x{:08x} at PC = 0x{:08x}", opcode, i*4);
+                        eprintln!(
+                            "ERROR: Unknown opcode 0x{:08x} at PC = 0x{:08x}",
+                            opcode,
+                            i * 4
+                        );
+                        illegal_instr
                     }
                 }
             }
@@ -488,7 +524,14 @@ pub fn preprocess_bytecode<OPT: DecodingOptions>(bytecode: &[u32]) -> Vec<Instru
                         }
                     }
                     _ => {
-                        panic!("Unknown opcode 0x{:08x}", opcode);
+                        // Commented out the panic for the compliance tests.
+                        // panic!("Unknown opcode 0x{:08x} at PC = 0x{:08x}", opcode);
+                        eprintln!(
+                            "ERROR: Unknown opcode 0x{:08x} at PC = 0x{:08x}",
+                            opcode,
+                            i * 4
+                        );
+                        illegal_instr
                     }
                 }
             }
@@ -544,11 +587,22 @@ pub fn preprocess_bytecode<OPT: DecodingOptions>(bytecode: &[u32]) -> Vec<Instru
                                 }
                             }
                             _ => {
-                                panic!("Unknown MOP number {}", mop_number);
+                                // Commented out the panic for the compliance tests.
+                                // panic!("ERROR: Unknown MOP number {} at PC = 0x{:08x}",
+                                // mop_number, i*4);
+                                eprintln!(
+                                    "ERROR: Unknown MOP number {} at PC = 0x{:08x}",
+                                    mop_number,
+                                    i * 4
+                                );
+                                illegal_instr
                             }
                         }
                     } else {
-                        panic!();
+                        // Commented out the panic for the compliance tests.
+                        // panic!("ERROR: Around line 597 panic at PC = 0x{:08x}", i*4);
+                        eprintln!("ERROR: Around line 597 panic at PC = 0x{:08x}", i * 4);
+                        illegal_instr
                     }
                 } else if funct3 & ZICSR_MASK != 0 {
                     let csr_number = ITypeOpcode::imm(opcode);
@@ -653,24 +707,50 @@ pub fn preprocess_bytecode<OPT: DecodingOptions>(bytecode: &[u32]) -> Vec<Instru
                             illegal_instr
                         }
                         _ => {
-                            panic!("Unknown CSR number 0x{:04x}", csr_number);
+                            // Return an illegal instruction.
+                            // Commented out the panic for the compliance tests
+                            // panic!(
+                            //    "ERROR: Unknown CSR number 0x{:04x} (instruction no = {i}, offset
+                            // = 0x{:08x})",    csr_number, i * 4
+                            //);
+                            eprintln!(
+                                "ERROR: Unknown CSR number 0x{:04x} (instruction no = {i}, offset = 0x{:08x})",
+                                csr_number,
+                                i * 4
+                            );
+                            illegal_instr
                         }
                     };
 
                     if funct3 != 0b001 {
                         // not CSRRW
-                        panic!("Unknown opcode 0x{:08x}", opcode);
+                        // Commented out the panic for the compliance tests
+                        // panic!("ERROR: Unknown opcode 0x{:08x} at PC = 0x{:08x}", opcode, i*4);
+                        eprintln!(
+                            "ERROR: Unknown opcode 0x{:08x} at PC = 0x{:08x}",
+                            opcode,
+                            i * 4
+                        );
+                        illegal_instr
+                    } else {
+                        instr
                     }
-
-                    instr
                 } else {
-                    panic!("Unknown system funct3 enc 0x{:08x}", funct3);
+                    // Commented out the panic for the compliance tests
+                    // panic!("Unknown system funct3 enc 0x{:08x} at PC = 0x{:08x}", funct3, i*4);
+                    eprintln!(
+                        "Unknown system funct3 enc 0x{:08x} at PC = 0x{:08x}",
+                        funct3,
+                        i * 4
+                    );
+                    illegal_instr
                 };
 
                 instr
             }
             _ => {
                 // just some opcode of unknown nature, may be padding or whatever. Just invalid
+                eprintln!("ERROR: Unrecognized instruction at PC = 0x{:08x}", i * 4);
                 illegal_instr
             }
         };

@@ -13,7 +13,8 @@ use cs::cs::circuit::Circuit;
 use cs::machine::ops::unrolled::*;
 use cs::machine::NON_DETERMINISM_CSR;
 use risc_v_simulator::abstractions::non_determinism::QuasiUARTSource;
-use risc_v_simulator::{cycle::*, delegations::DelegationsCSRProcessor};
+use risc_v_simulator::cycle::*;
+use risc_v_simulator::delegations::DelegationsCSRProcessor;
 use riscv_transpiler::witness::delegation::bigint::BigintDelegationWitness;
 use std::alloc::Allocator;
 use std::collections::BTreeSet;
@@ -29,12 +30,15 @@ pub mod add_sub_lui_auipc_mod {
     use crate::witness_evaluator::SimpleWitnessProxy;
     use crate::witness_proxy::WitnessProxy;
     use ::cs::cs::placeholder::Placeholder;
+    use ::cs::cs::witness_placer::WitnessComputationCore;
+    use ::cs::cs::witness_placer::WitnessComputationalField;
+    use ::cs::cs::witness_placer::WitnessComputationalI32;
+    use ::cs::cs::witness_placer::WitnessComputationalInteger;
+    use ::cs::cs::witness_placer::WitnessComputationalU16;
+    use ::cs::cs::witness_placer::WitnessComputationalU32;
+    use ::cs::cs::witness_placer::WitnessComputationalU8;
+    use ::cs::cs::witness_placer::WitnessMask;
     use ::cs::cs::witness_placer::WitnessTypeSet;
-    use ::cs::cs::witness_placer::{
-        WitnessComputationCore, WitnessComputationalField, WitnessComputationalI32,
-        WitnessComputationalInteger, WitnessComputationalU16, WitnessComputationalU32,
-        WitnessComputationalU8, WitnessMask,
-    };
     use ::field::Mersenne31Field;
     use cs::cs::witness_placer::scalar_witness_type_set::ScalarWitnessTypeSet;
 
@@ -56,12 +60,15 @@ pub mod jump_branch_slt {
     use crate::witness_evaluator::SimpleWitnessProxy;
     use crate::witness_proxy::WitnessProxy;
     use ::cs::cs::placeholder::Placeholder;
+    use ::cs::cs::witness_placer::WitnessComputationCore;
+    use ::cs::cs::witness_placer::WitnessComputationalField;
+    use ::cs::cs::witness_placer::WitnessComputationalI32;
+    use ::cs::cs::witness_placer::WitnessComputationalInteger;
+    use ::cs::cs::witness_placer::WitnessComputationalU16;
+    use ::cs::cs::witness_placer::WitnessComputationalU32;
+    use ::cs::cs::witness_placer::WitnessComputationalU8;
+    use ::cs::cs::witness_placer::WitnessMask;
     use ::cs::cs::witness_placer::WitnessTypeSet;
-    use ::cs::cs::witness_placer::{
-        WitnessComputationCore, WitnessComputationalField, WitnessComputationalI32,
-        WitnessComputationalInteger, WitnessComputationalU16, WitnessComputationalU32,
-        WitnessComputationalU8, WitnessMask,
-    };
     use ::field::Mersenne31Field;
     use cs::cs::witness_placer::scalar_witness_type_set::ScalarWitnessTypeSet;
 
@@ -83,12 +90,15 @@ pub mod shift_binop_csrrw {
     use crate::witness_evaluator::SimpleWitnessProxy;
     use crate::witness_proxy::WitnessProxy;
     use ::cs::cs::placeholder::Placeholder;
+    use ::cs::cs::witness_placer::WitnessComputationCore;
+    use ::cs::cs::witness_placer::WitnessComputationalField;
+    use ::cs::cs::witness_placer::WitnessComputationalI32;
+    use ::cs::cs::witness_placer::WitnessComputationalInteger;
+    use ::cs::cs::witness_placer::WitnessComputationalU16;
+    use ::cs::cs::witness_placer::WitnessComputationalU32;
+    use ::cs::cs::witness_placer::WitnessComputationalU8;
+    use ::cs::cs::witness_placer::WitnessMask;
     use ::cs::cs::witness_placer::WitnessTypeSet;
-    use ::cs::cs::witness_placer::{
-        WitnessComputationCore, WitnessComputationalField, WitnessComputationalI32,
-        WitnessComputationalInteger, WitnessComputationalU16, WitnessComputationalU32,
-        WitnessComputationalU8, WitnessMask,
-    };
     use ::field::Mersenne31Field;
     use cs::cs::witness_placer::scalar_witness_type_set::ScalarWitnessTypeSet;
 
@@ -110,12 +120,15 @@ pub mod mul_div {
     use crate::witness_evaluator::SimpleWitnessProxy;
     use crate::witness_proxy::WitnessProxy;
     use ::cs::cs::placeholder::Placeholder;
+    use ::cs::cs::witness_placer::WitnessComputationCore;
+    use ::cs::cs::witness_placer::WitnessComputationalField;
+    use ::cs::cs::witness_placer::WitnessComputationalI32;
+    use ::cs::cs::witness_placer::WitnessComputationalInteger;
+    use ::cs::cs::witness_placer::WitnessComputationalU16;
+    use ::cs::cs::witness_placer::WitnessComputationalU32;
+    use ::cs::cs::witness_placer::WitnessComputationalU8;
+    use ::cs::cs::witness_placer::WitnessMask;
     use ::cs::cs::witness_placer::WitnessTypeSet;
-    use ::cs::cs::witness_placer::{
-        WitnessComputationCore, WitnessComputationalField, WitnessComputationalI32,
-        WitnessComputationalInteger, WitnessComputationalU16, WitnessComputationalU32,
-        WitnessComputationalU8, WitnessMask,
-    };
     use ::field::Mersenne31Field;
     use cs::cs::witness_placer::scalar_witness_type_set::ScalarWitnessTypeSet;
 
@@ -137,12 +150,15 @@ pub mod mul_div_unsigned_only {
     use crate::witness_evaluator::SimpleWitnessProxy;
     use crate::witness_proxy::WitnessProxy;
     use ::cs::cs::placeholder::Placeholder;
+    use ::cs::cs::witness_placer::WitnessComputationCore;
+    use ::cs::cs::witness_placer::WitnessComputationalField;
+    use ::cs::cs::witness_placer::WitnessComputationalI32;
+    use ::cs::cs::witness_placer::WitnessComputationalInteger;
+    use ::cs::cs::witness_placer::WitnessComputationalU16;
+    use ::cs::cs::witness_placer::WitnessComputationalU32;
+    use ::cs::cs::witness_placer::WitnessComputationalU8;
+    use ::cs::cs::witness_placer::WitnessMask;
     use ::cs::cs::witness_placer::WitnessTypeSet;
-    use ::cs::cs::witness_placer::{
-        WitnessComputationCore, WitnessComputationalField, WitnessComputationalI32,
-        WitnessComputationalInteger, WitnessComputationalU16, WitnessComputationalU32,
-        WitnessComputationalU8, WitnessMask,
-    };
     use ::field::Mersenne31Field;
     use cs::cs::witness_placer::scalar_witness_type_set::ScalarWitnessTypeSet;
 
@@ -164,12 +180,15 @@ pub mod load_store {
     use crate::witness_evaluator::SimpleWitnessProxy;
     use crate::witness_proxy::WitnessProxy;
     use ::cs::cs::placeholder::Placeholder;
+    use ::cs::cs::witness_placer::WitnessComputationCore;
+    use ::cs::cs::witness_placer::WitnessComputationalField;
+    use ::cs::cs::witness_placer::WitnessComputationalI32;
+    use ::cs::cs::witness_placer::WitnessComputationalInteger;
+    use ::cs::cs::witness_placer::WitnessComputationalU16;
+    use ::cs::cs::witness_placer::WitnessComputationalU32;
+    use ::cs::cs::witness_placer::WitnessComputationalU8;
+    use ::cs::cs::witness_placer::WitnessMask;
     use ::cs::cs::witness_placer::WitnessTypeSet;
-    use ::cs::cs::witness_placer::{
-        WitnessComputationCore, WitnessComputationalField, WitnessComputationalI32,
-        WitnessComputationalInteger, WitnessComputationalU16, WitnessComputationalU32,
-        WitnessComputationalU8, WitnessMask,
-    };
     use ::field::Mersenne31Field;
     use cs::cs::witness_placer::scalar_witness_type_set::ScalarWitnessTypeSet;
 
@@ -189,12 +208,15 @@ pub mod word_load_store {
     use crate::witness_evaluator::SimpleWitnessProxy;
     use crate::witness_proxy::WitnessProxy;
     use ::cs::cs::placeholder::Placeholder;
+    use ::cs::cs::witness_placer::WitnessComputationCore;
+    use ::cs::cs::witness_placer::WitnessComputationalField;
+    use ::cs::cs::witness_placer::WitnessComputationalI32;
+    use ::cs::cs::witness_placer::WitnessComputationalInteger;
+    use ::cs::cs::witness_placer::WitnessComputationalU16;
+    use ::cs::cs::witness_placer::WitnessComputationalU32;
+    use ::cs::cs::witness_placer::WitnessComputationalU8;
+    use ::cs::cs::witness_placer::WitnessMask;
     use ::cs::cs::witness_placer::WitnessTypeSet;
-    use ::cs::cs::witness_placer::{
-        WitnessComputationCore, WitnessComputationalField, WitnessComputationalI32,
-        WitnessComputationalInteger, WitnessComputationalU16, WitnessComputationalU32,
-        WitnessComputationalU8, WitnessMask,
-    };
     use ::field::Mersenne31Field;
     use cs::cs::witness_placer::scalar_witness_type_set::ScalarWitnessTypeSet;
 
@@ -214,12 +236,15 @@ pub mod subword_load_store {
     use crate::witness_evaluator::SimpleWitnessProxy;
     use crate::witness_proxy::WitnessProxy;
     use ::cs::cs::placeholder::Placeholder;
+    use ::cs::cs::witness_placer::WitnessComputationCore;
+    use ::cs::cs::witness_placer::WitnessComputationalField;
+    use ::cs::cs::witness_placer::WitnessComputationalI32;
+    use ::cs::cs::witness_placer::WitnessComputationalInteger;
+    use ::cs::cs::witness_placer::WitnessComputationalU16;
+    use ::cs::cs::witness_placer::WitnessComputationalU32;
+    use ::cs::cs::witness_placer::WitnessComputationalU8;
+    use ::cs::cs::witness_placer::WitnessMask;
     use ::cs::cs::witness_placer::WitnessTypeSet;
-    use ::cs::cs::witness_placer::{
-        WitnessComputationCore, WitnessComputationalField, WitnessComputationalI32,
-        WitnessComputationalInteger, WitnessComputationalU16, WitnessComputationalU32,
-        WitnessComputationalU8, WitnessMask,
-    };
     use ::field::Mersenne31Field;
     use cs::cs::witness_placer::scalar_witness_type_set::ScalarWitnessTypeSet;
 
@@ -341,12 +366,12 @@ pub(crate) unsafe fn parse_shuffle_ram_accesses(
             }
 
             // if _row < 100 {
-            //     println!("Row {}, index {}: read reg = {}, address = {} at ts = {} into value {}", _row, access_idx, is_register, address, read_ts, read_value);
-            // }
+            //     println!("Row {}, index {}: read reg = {}, address = {} at ts = {} into value
+            // {}", _row, access_idx, is_register, address, read_ts, read_value); }
 
             // if _row < 100 {
-            //     println!("Row {}, index {}: write reg = {}, address = {} at ts = {} into value {}", _row, access_idx, is_register, address, write_ts, write_value);
-            // }
+            //     println!("Row {}, index {}: write reg = {}, address = {} at ts = {} into value
+            // {}", _row, access_idx, is_register, address, write_ts, write_value); }
 
             let to_write = (is_register, address, write_ts, write_value);
             let is_unique = write_set.insert(to_write);
@@ -357,6 +382,7 @@ pub(crate) unsafe fn parse_shuffle_ram_accesses(
             }
 
             let to_read = (is_register, address, read_ts, read_value);
+            println!("Inserting {to_read:?}");
             let is_unique = read_set.insert(to_read);
             if is_unique == false {
                 dbg!(trace_row);
@@ -525,7 +551,7 @@ pub(crate) unsafe fn parse_delegation_ram_accesses(
     }
 }
 
-pub(crate) fn parse_state_permutation_elements_from_full_trace<const N: usize>(
+pub fn parse_state_permutation_elements_from_full_trace<const N: usize>(
     compiled_circuit: &CompiledCircuitArtifact<Mersenne31Field>,
     witness: &WitnessEvaluationDataForExecutionFamily<N, Global>,
     write_set: &mut BTreeSet<(u32, TimestampScalar)>,
@@ -544,7 +570,7 @@ pub(crate) fn parse_state_permutation_elements_from_full_trace<const N: usize>(
     }
 }
 
-pub(crate) fn parse_shuffle_ram_accesses_from_full_trace<const N: usize>(
+pub fn parse_shuffle_ram_accesses_from_full_trace<const N: usize>(
     compiled_circuit: &CompiledCircuitArtifact<Mersenne31Field>,
     witness: &WitnessEvaluationDataForExecutionFamily<N, Global>,
     write_set: &mut BTreeSet<(bool, u32, TimestampScalar, u32)>,
@@ -562,7 +588,7 @@ pub(crate) fn parse_shuffle_ram_accesses_from_full_trace<const N: usize>(
     }
 }
 
-pub(crate) fn parse_delegation_ram_accesses_from_full_trace<const N: usize>(
+pub fn parse_delegation_ram_accesses_from_full_trace<const N: usize>(
     compiled_circuit: &CompiledCircuitArtifact<Mersenne31Field>,
     witness: &WitnessEvaluationData<N, Global>,
     write_set: &mut BTreeSet<(bool, u32, TimestampScalar, u32)>,
@@ -580,7 +606,7 @@ pub(crate) fn parse_delegation_ram_accesses_from_full_trace<const N: usize>(
     }
 }
 
-pub(crate) fn ensure_memory_trace_consistency<const N: usize, const M: usize>(
+pub fn ensure_memory_trace_consistency<const N: usize, const M: usize>(
     memory_trace: &MemoryOnlyWitnessEvaluationDataForExecutionFamily<N, impl Allocator + Clone>,
     witness_trace: &WitnessEvaluationDataForExecutionFamily<M, impl Allocator + Clone>,
 ) {
@@ -997,7 +1023,8 @@ pub fn run_basic_unrolled_test_impl(
         let oracle = NonMemoryCircuitOracle {
             inner: &family_data[0].data,
             decoder_table: witness_gen_data,
-            default_pc_value_in_padding: 0, // we conditionally manupulate PC, and if no opcodes are applied in padding - it would end up in 0
+            default_pc_value_in_padding: 0, /* we conditionally manupulate PC, and if no opcodes
+                                             * are applied in padding - it would end up in 0 */
         };
 
         // println!(

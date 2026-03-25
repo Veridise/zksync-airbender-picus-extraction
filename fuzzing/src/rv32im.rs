@@ -1,8 +1,11 @@
 use clap::ValueEnum;
 
-use crate::rv32im::unicorn::run_on_unicorn;
+pub use crate::rv32im::unicorn::run_on_unicorn;
+pub use crate::rv32im::vm::run_vm as run_on_airbender;
 
 mod common;
+#[cfg(feature = "prover")]
+mod prover;
 mod unicorn;
 mod vm;
 
@@ -51,14 +54,14 @@ macro_rules! log_result {
 
 fn dumb_fuzzer(print_result: bool) {
     crate::afl::fuzz!(|data| {
-        let result = vm::run_vm(data);
+        let result = vm::run_vm::<true>(data, None);
         log_result!(print_result, "result = {result:?}");
     })
 }
 
 fn oracle_fuzzer(print_result: bool) {
     crate::afl::fuzz_nohook!(|data| {
-        let oracle_result = match run_on_unicorn(data) {
+        let oracle_result = match run_on_unicorn(data, None) {
             Ok(or) => or,
             Err(err) => {
                 // Stop if the oracle failed.
@@ -70,7 +73,7 @@ fn oracle_fuzzer(print_result: bool) {
             }
         };
         log_result!(print_result, "Oracle: {oracle_result:?}");
-        let target_result = vm::run_vm(data);
+        let target_result = vm::run_vm::<true>(data, None);
         log_result!(print_result, "Target: {target_result:?}");
 
         if oracle_result != target_result {
