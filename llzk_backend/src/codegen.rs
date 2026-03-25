@@ -145,94 +145,129 @@ impl<F: PrimeField> VariableExtractor for OpcodeFamilyCircuitState<F> {
     }
 }
 
-impl<F: PrimeField> VariableExtractor for CircuitOutput<F> {
-    fn get_inputs(&self) -> Result<Vec<ExtractedVariable>> {
-        // Inputs are:
-        // - Inputs from the executor machine state
-        // - Shuffle-RAM read query values
-        // - Shuffle-RAM write query values
-        // - Shuffle-RAM address payloads for `RegisterOrRam` queries
-        // - Shuffle-RAM `is_register` discriminators when they are real circuit variables
-        //
-        // The address payloads are explicit circuit variables in `ShuffleRamMemQuery`. We expose
-        // them as LLZK inputs so witness lowering can canonicalize `ShuffleRamAddress(i)`
-        // placeholders back to the same boundary values instead of issuing runtime oracle calls.
-        //
-        // Shuffle write values are also modeled as ordinary inputs. The witness SSA needs a
-        // stable boundary source for those placeholder-backed values, but it does not need the
-        // backend to mirror them through public struct outputs first.
-        //
-        // `RegisterOrRam` also carries an `is_register` boolean. That discriminator is separate
-        // from the address payload: the same 32-bit address limbs may mean either a register index
-        // or a RAM address, depending on the flag. When the source circuit stores the flag as a
-        // variable instead of a constant, we expose it as a normal LLZK input as well so
-        // `ShuffleRamIsRegisterAccess(i)` can be canonicalized the same way.
-        let exec_state = &self
-            .executor_machine_state
-            .ok_or_else(|| anyhow!("executor_machine_state not initialized"))?;
-        let mut inputs = exec_state.get_inputs()?;
+/// `unified_reduced_machine` still consumes shuffle query 2's write value as a pre-existing
+/// witness input in its generated witness program. Other currently supported circuits can expose
+/// that same logical value as a normal LLZK output member instead.
+fn uses_legacy_query2_write_input(circuit_name: &str) -> bool {
+    circuit_name == "unified_reduced_machine"
+}
 
-        for query in &self.shuffle_ram_queries {
-            inputs.push(ExtractedVariable::register(query.read_value));
-            if !query.is_readonly() {
-                inputs.push(ExtractedVariable::register(query.write_value));
-            }
-            if let ShuffleRamQueryType::RegisterOrRam {
-                is_register,
-                address,
-            } = query.query_type
-            {
-                inputs.push(ExtractedVariable::register(address));
-                if let Some(is_register) = is_register.get_variable() {
-                    inputs.push(ExtractedVariable::scalar(is_register));
-                }
+fn shuffle_write_value_is_input(query_index: usize, use_legacy_query2_input: bool) -> bool {
+    use_legacy_query2_input && query_index == 2
+}
+
+fn extracted_inputs<F: PrimeField>(
+    co: &CircuitOutput<F>,
+    use_legacy_query2_input: bool,
+) -> Result<Vec<ExtractedVariable>> {
+    let exec_state = &co
+        .executor_machine_state
+        .ok_or_else(|| anyhow!("executor_machine_state not initialized"))?;
+    let mut inputs = exec_state.get_inputs()?;
+
+    for (query_index, query) in co.shuffle_ram_queries.iter().enumerate() {
+        inputs.push(ExtractedVariable::register(query.read_value));
+        if !query.is_readonly()
+            && shuffle_write_value_is_input(query_index, use_legacy_query2_input)
+        {
+            inputs.push(ExtractedVariable::register(query.write_value));
+        }
+        if let ShuffleRamQueryType::RegisterOrRam {
+            is_register,
+            address,
+        } = query.query_type
+        {
+            inputs.push(ExtractedVariable::register(address));
+            if let Some(is_register) = is_register.get_variable() {
+                inputs.push(ExtractedVariable::scalar(is_register));
             }
         }
-        inputs.sort();
-        assert!(
-            inputs.windows(2).all(|w| w[0] != w[1]),
-            "found duplicate inputs"
-        );
-        Ok(inputs)
+    }
+    inputs.sort();
+    inputs.dedup();
+    Ok(inputs)
+}
+
+fn extracted_outputs<F: PrimeField>(
+    co: &CircuitOutput<F>,
+    use_legacy_query2_input: bool,
+) -> Result<Vec<ExtractedVariable>> {
+    let exec_state = &co
+        .executor_machine_state
+        .ok_or_else(|| anyhow!("executor_machine_state not initialized"))?;
+    let mut outputs = exec_state.get_outputs()?;
+    for (query_index, query) in co.shuffle_ram_queries.iter().enumerate() {
+        if !query.is_readonly()
+            && !shuffle_write_value_is_input(query_index, use_legacy_query2_input)
+        {
+            outputs.push(ExtractedVariable::register(query.write_value));
+        }
+    }
+    outputs.sort();
+    outputs.dedup();
+    Ok(outputs)
+}
+
+fn extracted_intermediates<F: PrimeField>(
+    co: &CircuitOutput<F>,
+    use_legacy_query2_input: bool,
+) -> Result<Vec<ExtractedVariable>> {
+    let io = [
+        extracted_inputs(co, use_legacy_query2_input)?,
+        extracted_outputs(co, use_legacy_query2_input)?,
+    ]
+    .concat();
+    let mut intermediates = (0u64..u64::try_from(co.num_of_variables)?)
+        .map(Variable)
+        .filter(|v| {
+            let in_ram_reads = co
+                .shuffle_ram_queries
+                .iter()
+                .any(|&q| q.read_value[0] == *v || q.read_value[1] == *v);
+            let in_io = io.iter().any(|x| x.contains(v));
+            !in_io && !in_ram_reads
+        })
+        .map(ExtractedVariable::Scalar)
+        .collect::<Vec<_>>();
+
+    intermediates.sort();
+    Ok(intermediates)
+}
+
+impl<F: PrimeField> VariableExtractor for CircuitOutput<F> {
+    fn get_inputs(&self) -> Result<Vec<ExtractedVariable>> {
+        extracted_inputs(self, false)
     }
 
     fn get_outputs(&self) -> Result<Vec<ExtractedVariable>> {
-        // Outputs are the executor end state only.
-        //
-        // Shuffle write values are treated as boundary inputs instead of outputs so `@compute`
-        // can read them directly without the extra compatibility-argument round trip.
-        let exec_state = &self
-            .executor_machine_state
-            .ok_or_else(|| anyhow!("executor_machine_state not initialized"))?;
-        let mut outputs = exec_state.get_outputs()?;
-        outputs.sort();
-        Ok(outputs)
+        extracted_outputs(self, false)
     }
 
     fn get_intermediates(&self) -> Result<Vec<ExtractedVariable>> {
-        // Intermediates are:
-        // - everything else that isn't an input or output
-        let io = [self.get_inputs()?, self.get_outputs()?].concat();
-        // TODO: the prior values for RAM writes are technically separate variables,
-        // but they don't cleanly fall into the inputs or outputs for now. So we just
-        // ignore them for now, but they will need to be constrained by the shuffle
-        // ram constraints.
-        let mut intermediates = (0u64..u64::try_from(self.num_of_variables)?)
-            .map(Variable)
-            .filter(|v| {
-                // TODO: We check the ram queries explicitly to ignore the prior write values
-                let in_ram_reads = self
-                    .shuffle_ram_queries
-                    .iter()
-                    .any(|&q| q.read_value[0] == *v || q.read_value[1] == *v);
-                let in_io = io.iter().any(|x| x.contains(v));
-                !in_io && !in_ram_reads
-            })
-            .map(ExtractedVariable::Scalar)
-            .collect::<Vec<_>>();
+        extracted_intermediates(self, false)
+    }
+}
 
-        intermediates.sort();
-        Ok(intermediates)
+impl<F: FieldInfo> VariableExtractor for CircuitBundle<F> {
+    fn get_inputs(&self) -> Result<Vec<ExtractedVariable>> {
+        extracted_inputs(
+            &self.circuit_output,
+            uses_legacy_query2_write_input(self.name()),
+        )
+    }
+
+    fn get_outputs(&self) -> Result<Vec<ExtractedVariable>> {
+        extracted_outputs(
+            &self.circuit_output,
+            uses_legacy_query2_write_input(self.name()),
+        )
+    }
+
+    fn get_intermediates(&self) -> Result<Vec<ExtractedVariable>> {
+        extracted_intermediates(
+            &self.circuit_output,
+            uses_legacy_query2_write_input(self.name()),
+        )
     }
 }
 
@@ -359,7 +394,7 @@ impl<'ctx, F: FieldInfo> EmitLlzkInModule<'ctx, F> for CircuitBundle<F> {
         let extracted = num_input_vars + num_output_vars + num_intermediate_vars;
         assert_eq!(self.num_of_variables, extracted);
 
-        let vars = StructVars::new(self, &mut struct_builder)?;
+        let vars = StructVars::new(&self.circuit_output, self, &mut struct_builder)?;
         let struct_op = struct_builder.build_in_module()?;
 
         if !matches!(&self.layout, LlzkStructLayout::ComputeOnly) {
@@ -429,8 +464,9 @@ impl<F: FieldInfo> StructVars<F> {
     /// - Extracting struct inputs/outputs/intermediate variables (into [`ExtractedVariable`]s) from
     ///   the provided [`CircuitOutput`] instance,
     /// - Adding new struct arguments and members based on the [`ExtractedVariable`]s
-    fn new<'ctx>(
+    fn new<'ctx, E: VariableExtractor>(
         co: &CircuitOutput<F>,
+        extractor: &E,
         struct_builder: &mut StructBuilder<'ctx, '_, F>,
     ) -> Result<Self> {
         let special_csr_properties = SpecialCsrPropertiesMetadata::new(co);
@@ -438,7 +474,7 @@ impl<F: FieldInfo> StructVars<F> {
         let register_type = struct_builder.register_type();
         // Add inputs to struct.
         let mut arg_map: HashMap<Variable, (usize, Option<u64>)> = HashMap::new();
-        for (input_num, input) in co.get_inputs()?.iter().enumerate() {
+        for (input_num, input) in extractor.get_inputs()?.iter().enumerate() {
             match input {
                 ExtractedVariable::Register { low, high } => {
                     arg_map.insert(*low, (input_num, Some(0)));
@@ -454,7 +490,7 @@ impl<F: FieldInfo> StructVars<F> {
 
         // Add outputs to struct.
         let mut member_map: HashMap<Variable, (String, Option<u64>)> = HashMap::new();
-        for output in co.get_outputs()?.iter() {
+        for output in extractor.get_outputs()?.iter() {
             // TODO: better naming scheme
             match output {
                 ExtractedVariable::Register { low, high } => {
@@ -472,7 +508,7 @@ impl<F: FieldInfo> StructVars<F> {
         }
 
         // Add intermediates to struct.
-        for output in co.get_intermediates()?.iter() {
+        for output in extractor.get_intermediates()?.iter() {
             match output {
                 ExtractedVariable::Register { low, high } => {
                     let name = format!("internal_reg_{}_{}", low.0, high.0);

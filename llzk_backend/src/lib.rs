@@ -465,9 +465,10 @@ fn merge_llzk_placeholder_aliases<F: prover::field::PrimeField>(
 ///   `rd_or_store_ram_access_query_read_value` limbs that are later added as shuffle-RAM query 2,
 ///   so aliasing it to query 2's `read_value` preserves the existing witness flow.
 /// - Those same families also route `WriteRegMemWriteValue` and `ShuffleRamWriteValue(2)` into
-///   query 2's `write_value`. LLZK now exposes those write values directly as ordinary inputs, so
-///   witness lowering can use the same boundary source without round-tripping through separate
-///   public outputs first.
+///   query 2's `write_value`. `unified_reduced_machine` still consumes that slot as a pre-existing
+///   witness input, so LLZK keeps it input-backed for that circuit only. The alias is recorded here
+///   so witness lowering can canonicalize those legacy placeholders onto the same boundary value
+///   when that mixed policy is active.
 fn derive_shuffle_ram_placeholder_aliases(
     queries: &[ShuffleRamMemQuery],
 ) -> HashMap<(Placeholder, usize), Variable> {

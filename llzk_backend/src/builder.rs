@@ -472,6 +472,28 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
         }
     }
 
+    /// Assert that the given boolean predicate holds inside `@compute`.
+    pub fn append_bool_assert(
+        &self,
+        location: Location<'ctx>,
+        predicate: Value<'ctx, 'sco>,
+        msg: Option<&str>,
+    ) -> Result<()> {
+        self.append_op_with_no_results(bool::assert(location, predicate, msg)?)
+    }
+
+    /// Compare `lhs` and `rhs` and assert that they are equal inside `@compute`.
+    pub fn append_assert_equal(
+        &self,
+        location: Location<'ctx>,
+        lhs: Value<'ctx, 'sco>,
+        rhs: Value<'ctx, 'sco>,
+        msg: Option<&str>,
+    ) -> Result<()> {
+        let predicate = self.append_eq_predicate(location, lhs, rhs)?;
+        self.append_bool_assert(location, predicate, msg)
+    }
+
     /// Compute the inner values used to generate a boolean constraint.
     /// Used so both the conditional and unconditional constraint variants use
     /// the same logic.

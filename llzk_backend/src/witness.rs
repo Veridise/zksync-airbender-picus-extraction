@@ -661,6 +661,7 @@ struct ComputeLowering<'a, 'ctx: 'sco, 'sco, F: FieldInfo> {
     block: &'a [RawExpression<F>],
     slots: Vec<SsaSlot<'ctx, 'sco>>,
     slot_input_origins: Vec<Option<Variable>>,
+    slot_u32_input_origins: Vec<Option<[Variable; 2]>>,
 }
 
 impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> Deref for ComputeLowering<'a, 'ctx, 'sco, F> {
@@ -697,13 +698,20 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             block,
             slots: Vec::new(),
             slot_input_origins: Vec::new(),
+            slot_u32_input_origins: Vec::new(),
         }
     }
 
     /// Append one SSA slot to the block-local cache.
-    fn push_slot(&mut self, slot: SsaSlot<'ctx, 'sco>, input_origin: Option<Variable>) {
+    fn push_slot(
+        &mut self,
+        slot: SsaSlot<'ctx, 'sco>,
+        input_origin: Option<Variable>,
+        u32_input_origin: Option<[Variable; 2]>,
+    ) {
         self.slots.push(slot);
         self.slot_input_origins.push(input_origin);
+        self.slot_u32_input_origins.push(u32_input_origin);
     }
 
     /// Materialize a write-back either into the returned witness struct or into the external
@@ -721,10 +729,55 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         condition_subexpr_idx: Option<usize>,
     ) -> Result<()> {
         if self.vars.has_compute_input(into_variable) && !self.vars.has_member(into_variable) {
+            if self.strict_store_origin_for_expression(source_subexpr) == Some(*into_variable) {
+                // Some witness programs redundantly "write" an input-backed boundary variable back
+                // to itself. That is a no-op regardless of any guard: if the guard is false we do
+                // nothing, and if the guard is true we would still store the exact same boundary
+                // value. Skip those cases entirely so `@compute` does not accumulate vacuous
+                // `bool.assert %arg == %arg` checks.
+                return Ok(());
+            }
+
+            if !self.is_legacy_input_backed_write(*into_variable) {
+                // Outside of the legacy query-2 shuffle write slot, input-backed writes are just
+                // redundant witness-program rematerializations. LLZK models those values as
+                // ordinary inputs and does not need a second proof obligation in `@compute`.
+                return Ok(());
+            }
+
             // Input-backed boundary values do not need a second storage location inside the
-            // returned struct. Once witness lowering has canonicalized a placeholder/oracle read
-            // back to the LLZK input, later SSA writes to that same logical variable are
-            // redundant and can be skipped.
+            // returned struct. Instead of silently dropping the write, assert that the value we
+            // would have written is the same value already exposed on the LLZK boundary. For a
+            // conditional write, the skipped write is valid iff the condition is false or the
+            // candidate written value already equals the existing boundary input.
+            let location = self.unknown_location();
+            let boundary_value =
+                self.vars
+                    .get_compute_val(self.builder, self.self_value, into_variable)?;
+            let written_value = self.expression_to_store_value(source_subexpr)?;
+
+            if let Some(condition_idx) = condition_subexpr_idx {
+                let condition = self.slot_as_bool(condition_idx)?;
+                let values_eq =
+                    self.append_op_with_result(bool::eq(location, written_value, boundary_value)?)?;
+                let skipped_write_is_sound = self.append_op_with_result(bool::or(
+                    location,
+                    self.append_op_with_result(bool::not(location, condition)?)?,
+                    values_eq,
+                )?)?;
+                self.append_bool_assert(
+                    location,
+                    skipped_write_is_sound,
+                    Some("skipped conditional input-backed write must preserve the boundary value"),
+                )?;
+            } else {
+                self.append_assert_equal(
+                    location,
+                    written_value,
+                    boundary_value,
+                    Some("skipped input-backed write must match the boundary value"),
+                )?;
+            }
             return Ok(());
         }
 
@@ -883,15 +936,24 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
 
     /// Try to resolve one placeholder limb through the explicit `@compute` boundary arguments.
     ///
-    /// This uses the shared LLZK inputs, including shuffle write values that are modeled as
-    /// ordinary boundary inputs instead of output-member aliases.
+    /// Only true LLZK inputs may be read through this path. If a placeholder is aliased to a
+    /// struct member/output instead, witness lowering should fail loudly rather than silently
+    /// treating that output-backed value as an input again.
     fn try_read_placeholder_input_limb(
         &self,
         placeholder: Placeholder,
         subindex: usize,
     ) -> Result<Option<Value<'ctx, 'sco>>> {
         if let Some(variable) = self.substitutions.get(&(placeholder, subindex)) {
-            self.vars.try_get_compute_input_val(self.builder, variable)
+            if self.vars.has_compute_input(variable) {
+                self.vars.try_get_compute_input_val(self.builder, variable)
+            } else if self.vars.has_member(variable) {
+                Err(anyhow!(
+                    "placeholder {placeholder:?}[{subindex}] is only exposed as a @compute output/member"
+                ))
+            } else {
+                Ok(None)
+            }
         } else {
             Ok(None)
         }
@@ -922,6 +984,16 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
                 "placeholder {placeholder:?} is missing its high limb substitution"
             ));
         };
+
+        if self.vars.has_member(low_var)
+            || self.vars.has_member(high_var)
+            || !self.vars.has_compute_input(low_var)
+            || !self.vars.has_compute_input(high_var)
+        {
+            return Err(anyhow!(
+                "placeholder {placeholder:?} is only exposed as a @compute output/member"
+            ));
+        }
 
         let low = self.vars.try_get_compute_input_val(self.builder, low_var)?;
         let high = self
@@ -2830,6 +2902,16 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         }
     }
 
+    fn strict_store_origin_for_expression(&self, expr: &Expression<F>) -> Option<Variable> {
+        match expr {
+            Expression::Bool(expr) => self.strict_input_origin_for_bool_expr(expr),
+            Expression::Field(expr) => self.strict_store_origin_for_field_expr(expr),
+            Expression::U8(expr) | Expression::U16(expr) | Expression::U32(expr) => {
+                self.strict_store_origin_for_integer_expr(expr)
+            }
+        }
+    }
+
     fn strict_input_origin_for_field_expr(
         &self,
         expr: &FieldNodeExpression<F>,
@@ -2850,6 +2932,26 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         }
     }
 
+    fn strict_store_origin_for_field_expr(
+        &self,
+        expr: &FieldNodeExpression<F>,
+    ) -> Option<Variable> {
+        match expr {
+            FieldNodeExpression::Place(var) => self.vars.has_compute_input(var).then_some(*var),
+            FieldNodeExpression::SubExpression(idx) => {
+                self.slot_input_origins.get(*idx).copied().flatten()
+            }
+            FieldNodeExpression::FromInteger(inner) => {
+                self.strict_store_origin_for_integer_expr(inner)
+            }
+            FieldNodeExpression::FromMask(inner) => self.strict_input_origin_for_bool_expr(inner),
+            FieldNodeExpression::OracleValue { placeholder, .. } => {
+                self.strict_placeholder_input_limb_origin(*placeholder, 0)
+            }
+            _ => None,
+        }
+    }
+
     fn strict_input_origin_for_bool_expr(&self, expr: &BoolNodeExpression<F>) -> Option<Variable> {
         match expr {
             BoolNodeExpression::Place(var) => self.vars.has_compute_input(var).then_some(*var),
@@ -2864,10 +2966,43 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
     }
 
     fn strict_placeholder_input_origin(&self, placeholder: Placeholder) -> Option<Variable> {
+        self.strict_placeholder_input_limb_origin(placeholder, 0)
+    }
+
+    fn strict_placeholder_input_limb_origin(
+        &self,
+        placeholder: Placeholder,
+        subindex: usize,
+    ) -> Option<Variable> {
         self.substitutions
-            .get(&(placeholder, 0))
+            .get(&(placeholder, subindex))
             .copied()
             .filter(|var| self.vars.has_compute_input(var))
+    }
+
+    fn strict_placeholder_u32_input_origin(
+        &self,
+        placeholder: Placeholder,
+    ) -> Option<[Variable; 2]> {
+        Some([
+            self.strict_placeholder_input_limb_origin(placeholder, 0)?,
+            self.strict_placeholder_input_limb_origin(placeholder, 1)?,
+        ])
+    }
+
+    fn is_legacy_input_backed_write(&self, variable: Variable) -> bool {
+        [
+            (Placeholder::WriteRegMemWriteValue, 0),
+            (Placeholder::WriteRegMemWriteValue, 1),
+            (Placeholder::ShuffleRamWriteValue(2), 0),
+            (Placeholder::ShuffleRamWriteValue(2), 1),
+        ]
+        .into_iter()
+        .any(|key| {
+            self.substitutions
+                .get(&key)
+                .is_some_and(|mapped| *mapped == variable)
+        })
     }
 
     fn strict_input_origin_for_integer_expr(
@@ -2905,6 +3040,79 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             _ => None,
         }
     }
+
+    fn strict_store_origin_for_integer_expr(
+        &self,
+        expr: &FixedWidthIntegerNodeExpression<F>,
+    ) -> Option<Variable> {
+        match expr {
+            FixedWidthIntegerNodeExpression::U8Place(var)
+            | FixedWidthIntegerNodeExpression::U16Place(var) => {
+                self.vars.has_compute_input(var).then_some(*var)
+            }
+            FixedWidthIntegerNodeExpression::U8SubExpression(idx)
+            | FixedWidthIntegerNodeExpression::U16SubExpression(idx) => {
+                self.slot_input_origins.get(*idx).copied().flatten()
+            }
+            FixedWidthIntegerNodeExpression::U8OracleValue { placeholder }
+            | FixedWidthIntegerNodeExpression::U16OracleValue { placeholder } => {
+                self.strict_placeholder_input_limb_origin(*placeholder, 0)
+            }
+            FixedWidthIntegerNodeExpression::WidenFromU8(inner)
+            | FixedWidthIntegerNodeExpression::WidenFromU16(inner)
+            | FixedWidthIntegerNodeExpression::TruncateFromU16(inner) => {
+                self.strict_store_origin_for_integer_expr(inner)
+            }
+            FixedWidthIntegerNodeExpression::TruncateFromU32(inner) => {
+                self.strict_u32_low_limb_origin(inner)
+            }
+            FixedWidthIntegerNodeExpression::WrappingShr { lhs, magnitude } if *magnitude == 0 => {
+                self.strict_store_origin_for_integer_expr(lhs)
+            }
+            FixedWidthIntegerNodeExpression::WrappingShr { lhs, magnitude } if *magnitude == 16 => {
+                self.strict_u32_high_limb_origin(lhs)
+            }
+            _ => None,
+        }
+    }
+
+    fn strict_u32_input_origin_for_integer_expr(
+        &self,
+        expr: &FixedWidthIntegerNodeExpression<F>,
+    ) -> Option<[Variable; 2]> {
+        match expr {
+            FixedWidthIntegerNodeExpression::U32SubExpression(idx) => {
+                self.slot_u32_input_origins.get(*idx).copied().flatten()
+            }
+            FixedWidthIntegerNodeExpression::U32OracleValue { placeholder } => {
+                self.strict_placeholder_u32_input_origin(*placeholder)
+            }
+            FixedWidthIntegerNodeExpression::I32FromU32(inner)
+            | FixedWidthIntegerNodeExpression::U32FromI32(inner) => {
+                self.strict_u32_input_origin_for_integer_expr(inner)
+            }
+            FixedWidthIntegerNodeExpression::WrappingShr { lhs, magnitude } if *magnitude == 0 => {
+                self.strict_u32_input_origin_for_integer_expr(lhs)
+            }
+            _ => None,
+        }
+    }
+
+    fn strict_u32_low_limb_origin(
+        &self,
+        expr: &FixedWidthIntegerNodeExpression<F>,
+    ) -> Option<Variable> {
+        self.strict_u32_input_origin_for_integer_expr(expr)
+            .map(|[low, _]| low)
+    }
+
+    fn strict_u32_high_limb_origin(
+        &self,
+        expr: &FixedWidthIntegerNodeExpression<F>,
+    ) -> Option<Variable> {
+        self.strict_u32_input_origin_for_integer_expr(expr)
+            .map(|[_, high]| high)
+    }
 }
 
 impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInCompute<'a, 'ctx, 'sco, F> for RawExpression<F> {
@@ -2914,19 +3122,28 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInCompute<'a, 'ctx, 'sco, F> fo
         &self,
         lowering: &mut ComputeLowering<'a, 'ctx, 'sco, F>,
     ) -> Result<Self::Output> {
-        let (slot, input_origin) = match self {
+        let (slot, input_origin, u32_input_origin) = match self {
             RawExpression::Bool(expr) => (
                 SsaSlot::Value(ComputedValue::Bool(expr.emit_compute(lowering)?)),
                 lowering.strict_input_origin_for_bool_expr(expr),
+                None,
             ),
             RawExpression::Field(expr) => (
                 SsaSlot::Value(ComputedValue::Field(expr.emit_compute(lowering)?)),
                 lowering.strict_input_origin_for_field_expr(expr),
+                None,
             ),
-            RawExpression::Integer(expr) => (
-                SsaSlot::Value(ComputedValue::Integer(expr.emit_compute(lowering)?)),
-                lowering.strict_input_origin_for_integer_expr(expr),
-            ),
+            RawExpression::Integer(expr) => {
+                let input_origin = lowering
+                    .strict_store_origin_for_integer_expr(expr)
+                    .or_else(|| lowering.strict_input_origin_for_integer_expr(expr));
+                let u32_input_origin = lowering.strict_u32_input_origin_for_integer_expr(expr);
+                (
+                    SsaSlot::Value(ComputedValue::Integer(expr.emit_compute(lowering)?)),
+                    input_origin,
+                    u32_input_origin,
+                )
+            }
             RawExpression::AccessLookup {
                 subindex,
                 output_index,
@@ -2935,7 +3152,11 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInCompute<'a, 'ctx, 'sco, F> fo
                     .slot_as_lookup(*subindex)?
                     .get(*output_index)
                     .ok_or_else(|| anyhow!("lookup output {output_index} is out of bounds"))?;
-                (SsaSlot::Value(ComputedValue::Field(lookup_value)), None)
+                (
+                    SsaSlot::Value(ComputedValue::Field(lookup_value)),
+                    None,
+                    None,
+                )
             }
             RawExpression::PerformLookup {
                 input_subexpr_idxes,
@@ -2950,6 +3171,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInCompute<'a, 'ctx, 'sco, F> fo
                     None,
                     *num_outputs,
                 )?),
+                None,
                 None,
             ),
             RawExpression::MaybePerformLookup {
@@ -2966,6 +3188,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInCompute<'a, 'ctx, 'sco, F> fo
                     *num_outputs,
                 )?),
                 None,
+                None,
             ),
             RawExpression::WriteVariable {
                 into_variable,
@@ -2973,11 +3196,11 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInCompute<'a, 'ctx, 'sco, F> fo
                 condition_subexpr_idx,
             } => {
                 lowering.lower_write(into_variable, source_subexpr, *condition_subexpr_idx)?;
-                (SsaSlot::Unit, None)
+                (SsaSlot::Unit, None, None)
             }
         };
 
-        lowering.push_slot(slot, input_origin);
+        lowering.push_slot(slot, input_origin, u32_input_origin);
         Ok(())
     }
 }
