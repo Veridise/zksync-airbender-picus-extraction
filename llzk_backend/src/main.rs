@@ -7,6 +7,10 @@ use llzk_backend::config::OptLevel;
 use llzk_backend::gen_add_sub_lui_auipc_mop;
 use llzk_backend::gen_jump_branch_slt;
 use llzk_backend::gen_load_store_subword_only;
+use llzk_backend::gen_load_store_word_only;
+use llzk_backend::gen_mul_div;
+use llzk_backend::gen_shift_binary_csr;
+use llzk_backend::gen_unified_reduced_machine;
 use llzk_backend::output_format::OutputFormat;
 
 #[derive(ValueEnum, Clone, Copy, PartialEq, Eq)]
@@ -14,6 +18,10 @@ enum Circuits {
     AddSubLuiAuipcMop,
     JumpBranchSlt,
     LoadStoreSubwordOnly,
+    LoadStoreWordOnly,
+    MulDiv,
+    ShiftBinaryCsr,
+    UnifiedReducedMachine,
 }
 
 type CircuitFnTuple = (
@@ -24,6 +32,10 @@ const CIRCUITS: &[CircuitFnTuple] = &[
     (Circuits::AddSubLuiAuipcMop, gen_add_sub_lui_auipc_mop),
     (Circuits::JumpBranchSlt, gen_jump_branch_slt),
     (Circuits::LoadStoreSubwordOnly, gen_load_store_subword_only),
+    (Circuits::LoadStoreWordOnly, gen_load_store_word_only),
+    (Circuits::MulDiv, gen_mul_div),
+    (Circuits::ShiftBinaryCsr, gen_shift_binary_csr),
+    (Circuits::UnifiedReducedMachine, gen_unified_reduced_machine),
 ];
 
 #[derive(Parser)]

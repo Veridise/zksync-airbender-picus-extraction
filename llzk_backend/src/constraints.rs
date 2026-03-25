@@ -17,6 +17,7 @@ use crate::builder::*;
 use crate::codegen::StructVars;
 use crate::field::FieldInfo;
 use crate::lookups::add_disjunctive_lookup_constraints;
+use crate::lookups::add_dynamic_lookup_constraints;
 use crate::lookups::add_lookup_constraints_for_table;
 
 /// Trait implemented by types that can emit LLZK IR within a struct `@constrain` function.
@@ -231,8 +232,9 @@ impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInConstrain<'ctx, 'sco, F> for Look
         vars: &StructVars<F>,
     ) -> Result<Self::Output> {
         match self.table {
-            // TODO: Currently unsupported, skipped here and in PCL version
-            LookupQueryTableType::Variable(_variable) => Ok(()),
+            LookupQueryTableType::Variable(variable) => {
+                add_dynamic_lookup_constraints(builder, vars, self, variable, None, None)
+            }
             LookupQueryTableType::Constant(table_type) => {
                 add_lookup_constraints_for_table(builder, vars, self, table_type, None, None)
             }

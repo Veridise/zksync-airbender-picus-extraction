@@ -41,6 +41,7 @@ use prover::cs::tables::TableType;
 
 use crate::builder::ModuleEnv;
 use crate::builder::OpsBuilder;
+use crate::codegen::SpecialCsrPropertiesMetadata;
 use crate::codegen::StructVars;
 use crate::field::FieldInfo;
 
@@ -219,6 +220,7 @@ pub(crate) struct WitnessComputation<F: FieldInfo> {
     compiled: CompiledCircuitArtifact<F>,
     ssa: Vec<Vec<RawExpression<F>>>,
     substitutions: HashMap<(Placeholder, usize), Variable>,
+    special_csr_properties: Option<SpecialCsrPropertiesMetadata>,
 }
 
 impl<F: FieldInfo> WitnessComputation<F> {
@@ -233,11 +235,13 @@ impl<F: FieldInfo> WitnessComputation<F> {
         compiled: CompiledCircuitArtifact<F>,
         ssa: Vec<Vec<RawExpression<F>>>,
         substitutions: HashMap<(Placeholder, usize), Variable>,
+        special_csr_properties: Option<SpecialCsrPropertiesMetadata>,
     ) -> Self {
         Self {
             compiled,
             ssa,
             substitutions,
+            special_csr_properties,
         }
     }
 
@@ -285,7 +289,8 @@ impl<F: FieldInfo> WitnessComputation<F> {
             READ_ORACLE_U32_EXTERN,
             &[felt_type, felt_type, felt_type],
             &[felt_type, felt_type],
-        )
+        )?;
+        Ok(())
     }
 
     /// Emit LLZK operations that reconstruct witness columns inside a struct `@compute` function.
@@ -304,10 +309,14 @@ impl<F: FieldInfo> WitnessComputation<F> {
                 &self.compiled.variable_mapping,
                 &self.compiled.witness_layout.width_3_lookups,
                 &self.substitutions,
+                &self.special_csr_properties,
                 has_runtime_memory_reads,
                 block,
             );
-            block.emit_compute(&mut lowering)?;
+
+            for expr in block {
+                expr.emit_compute(&mut lowering)?;
+            }
         }
         Ok(())
     }
@@ -647,6 +656,7 @@ struct ComputeLowering<'a, 'ctx: 'sco, 'sco, F: FieldInfo> {
     variable_mapping: &'a BTreeMap<Variable, ColumnAddress>,
     lookup_sets: &'a [LookupSetDescription<F, COMMON_TABLE_WIDTH>],
     substitutions: &'a HashMap<(Placeholder, usize), Variable>,
+    special_csr_properties: &'a Option<SpecialCsrPropertiesMetadata>,
     has_runtime_memory_reads: bool,
     block: &'a [RawExpression<F>],
     slots: Vec<SsaSlot<'ctx, 'sco>>,
@@ -671,6 +681,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         variable_mapping: &'a BTreeMap<Variable, ColumnAddress>,
         lookup_sets: &'a [LookupSetDescription<F, COMMON_TABLE_WIDTH>],
         substitutions: &'a HashMap<(Placeholder, usize), Variable>,
+        special_csr_properties: &'a Option<SpecialCsrPropertiesMetadata>,
         has_runtime_memory_reads: bool,
         block: &'a [RawExpression<F>],
     ) -> Self {
@@ -681,6 +692,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             variable_mapping,
             lookup_sets,
             substitutions,
+            special_csr_properties,
             has_runtime_memory_reads,
             block,
             slots: Vec::new(),
@@ -861,8 +873,10 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         self.append_call_no_results(location, WRITE_TO_MEMORY_SUBTREE_EXTERN, &[offset, value])
     }
 
-    /// Try to resolve one placeholder limb through `@compute` arguments. If the placeholder has
-    /// no recorded substitution, returns None.
+    /// Try to resolve one placeholder limb through the explicit `@compute` boundary arguments.
+    ///
+    /// This includes both the shared LLZK inputs and the compute-only compatibility args used for
+    /// output-backed shuffle placeholders.
     fn try_read_placeholder_input_limb(
         &self,
         placeholder: Placeholder,
@@ -1218,6 +1232,225 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         let high_rhs = self.append_op_with_result(felt::add(location, rhs.high, borrow_felt)?)?;
         let (high, high_borrow) = self.sub_small(lhs.high, high_rhs, 16)?;
         Ok((U32Parts { low, high }, high_borrow))
+    }
+
+    /// Return the all-zero 32-bit value.
+    fn zero_u32(&self) -> Result<U32Parts<'ctx, 'sco>> {
+        self.u32_constant(0)
+    }
+
+    /// Split a 32-bit value into little-endian bytes.
+    fn u32_to_bytes(&self, value: U32Parts<'ctx, 'sco>) -> Result<[Value<'ctx, 'sco>; 4]> {
+        Ok([
+            self.append_lowest_bits_felt(value.low, 8)?,
+            self.append_shifted_low_bits(value.low, 8, 8)?,
+            self.append_lowest_bits_felt(value.high, 8)?,
+            self.append_shifted_low_bits(value.high, 8, 8)?,
+        ])
+    }
+
+    /// Reassemble a 32-bit value from little-endian bytes.
+    fn bytes_to_u32(&self, bytes: [Value<'ctx, 'sco>; 4]) -> Result<U32Parts<'ctx, 'sco>> {
+        let location = self.unknown_location();
+        let byte_scale = self.get_felt_constant_from_start(1 << 8)?;
+        let low = self.append_op_with_result(felt::add(
+            location,
+            bytes[0],
+            self.append_op_with_result(felt::mul(location, bytes[1], byte_scale)?)?,
+        )?)?;
+        let high = self.append_op_with_result(felt::add(
+            location,
+            bytes[2],
+            self.append_op_with_result(felt::mul(location, bytes[3], byte_scale)?)?,
+        )?)?;
+        Ok(U32Parts { low, high })
+    }
+
+    /// Multiply two 32-bit values using byte-wise convolution.
+    ///
+    /// Each intermediate stays below the field modulus because the computation only multiplies
+    /// 8-bit values and propagates carries base 256.
+    fn multiply_u32_unsigned(
+        &self,
+        lhs: U32Parts<'ctx, 'sco>,
+        rhs: U32Parts<'ctx, 'sco>,
+    ) -> Result<(U32Parts<'ctx, 'sco>, U32Parts<'ctx, 'sco>)> {
+        let location = self.unknown_location();
+        let lhs_bytes = self.u32_to_bytes(lhs)?;
+        let rhs_bytes = self.u32_to_bytes(rhs)?;
+        let zero = self.get_felt_constant_from_start(0)?;
+        let byte_modulus = self.get_felt_constant_from_start(1 << 8)?;
+
+        let mut sums = [zero; 8];
+        for (i, lhs_byte) in lhs_bytes.into_iter().enumerate() {
+            for (j, rhs_byte) in rhs_bytes.into_iter().enumerate() {
+                let product =
+                    self.append_op_with_result(felt::mul(location, lhs_byte, rhs_byte)?)?;
+                sums[i + j] =
+                    self.append_op_with_result(felt::add(location, sums[i + j], product)?)?;
+            }
+        }
+
+        let mut carry = zero;
+        let mut bytes = [zero; 8];
+        for idx in 0..7 {
+            let total = self.append_op_with_result(felt::add(location, sums[idx], carry)?)?;
+            bytes[idx] = self.append_lowest_bits_felt(total, 8)?;
+            carry = self.append_op_with_result(felt::uintdiv(location, total, byte_modulus)?)?;
+        }
+        bytes[7] = self.append_op_with_result(felt::add(location, sums[7], carry)?)?;
+
+        Ok((
+            self.bytes_to_u32([bytes[0], bytes[1], bytes[2], bytes[3]])?,
+            self.bytes_to_u32([bytes[4], bytes[5], bytes[6], bytes[7]])?,
+        ))
+    }
+
+    /// Read the sign bit of a 32-bit two's-complement value.
+    fn u32_sign_bit(&self, value: U32Parts<'ctx, 'sco>) -> Result<Value<'ctx, 'sco>> {
+        self.append_field_is_nonzero(self.append_shifted_low_bits(value.high, 15, 1)?)
+    }
+
+    /// Select between two 32-bit values.
+    fn select_u32(
+        &self,
+        condition: Value<'ctx, 'sco>,
+        if_true: U32Parts<'ctx, 'sco>,
+        if_false: U32Parts<'ctx, 'sco>,
+    ) -> Result<U32Parts<'ctx, 'sco>> {
+        Ok(U32Parts {
+            low: self.append_select_value(condition, if_true.low, if_false.low)?,
+            high: self.append_select_value(condition, if_true.high, if_false.high)?,
+        })
+    }
+
+    /// Multiply two signed 32-bit values and return their low and high 32-bit words.
+    fn multiply_i32(
+        &self,
+        lhs: U32Parts<'ctx, 'sco>,
+        rhs: U32Parts<'ctx, 'sco>,
+    ) -> Result<(U32Parts<'ctx, 'sco>, U32Parts<'ctx, 'sco>)> {
+        let (low, unsigned_high) = self.multiply_u32_unsigned(lhs, rhs)?;
+        let zero = self.zero_u32()?;
+        let lhs_negative = self.u32_sign_bit(lhs)?;
+        let rhs_negative = self.u32_sign_bit(rhs)?;
+        let lhs_correction = self.select_u32(lhs_negative, rhs, zero)?;
+        let rhs_correction = self.select_u32(rhs_negative, lhs, zero)?;
+        let (corrected, _) = self.sub_u32(unsigned_high, lhs_correction)?;
+        let (high, _) = self.sub_u32(corrected, rhs_correction)?;
+        Ok((low, high))
+    }
+
+    /// Multiply a signed and an unsigned 32-bit value and return their low and high 32-bit words.
+    fn multiply_i32_u32(
+        &self,
+        lhs: U32Parts<'ctx, 'sco>,
+        rhs: U32Parts<'ctx, 'sco>,
+    ) -> Result<(U32Parts<'ctx, 'sco>, U32Parts<'ctx, 'sco>)> {
+        let (low, unsigned_high) = self.multiply_u32_unsigned(lhs, rhs)?;
+        let zero = self.zero_u32()?;
+        let lhs_negative = self.u32_sign_bit(lhs)?;
+        let lhs_correction = self.select_u32(lhs_negative, rhs, zero)?;
+        let (high, _) = self.sub_u32(unsigned_high, lhs_correction)?;
+        Ok((low, high))
+    }
+
+    /// Read one bit from a 32-bit limb pair as a felt `0`/`1`.
+    fn u32_bit_as_felt(
+        &self,
+        value: U32Parts<'ctx, 'sco>,
+        bit_idx: u32,
+    ) -> Result<Value<'ctx, 'sco>> {
+        if bit_idx < 16 {
+            self.append_shifted_low_bits(value.low, u64::from(bit_idx), 1)
+        } else {
+            self.append_shifted_low_bits(value.high, u64::from(bit_idx - 16), 1)
+        }
+    }
+
+    /// Conditionally set one quotient bit in a 32-bit value.
+    fn set_u32_bit_if(
+        &self,
+        value: U32Parts<'ctx, 'sco>,
+        bit_idx: u32,
+        condition: Value<'ctx, 'sco>,
+    ) -> Result<U32Parts<'ctx, 'sco>> {
+        let zero = self.zero_u32()?;
+        let increment = self.select_u32(condition, self.u32_constant(1u32 << bit_idx)?, zero)?;
+        Ok(self.add_u32(value, increment)?.0)
+    }
+
+    /// Compute unsigned 32-bit division and remainder for a non-zero divisor.
+    ///
+    /// This is a standard restoring long-division loop over the two-limb `u32`
+    /// representation. We cannot use `felt.uintdiv` / `felt.umod` directly here,
+    /// because those integer semantics apply to a single field element, while our
+    /// words are full 32-bit values encoded as two 16-bit felts over Mersenne31.
+    fn div_rem_u32_nonzero(
+        &self,
+        dividend: U32Parts<'ctx, 'sco>,
+        divisor: U32Parts<'ctx, 'sco>,
+    ) -> Result<(U32Parts<'ctx, 'sco>, U32Parts<'ctx, 'sco>)> {
+        let location = self.unknown_location();
+        let mut quotient = self.zero_u32()?;
+        let mut remainder = self.zero_u32()?;
+
+        for bit_idx in (0..32).rev() {
+            let shifted_remainder = self.shift_left_u32(remainder, 1)?;
+            let next_bit = self.u32_bit_as_felt(dividend, bit_idx)?;
+            let trial_remainder = U32Parts {
+                low: self.append_op_with_result(felt::add(
+                    location,
+                    shifted_remainder.low,
+                    next_bit,
+                )?)?,
+                high: shifted_remainder.high,
+            };
+            let (subtracted, borrow) = self.sub_u32(trial_remainder, divisor)?;
+            let take_bit = self.append_op_with_result(bool::not(location, borrow)?)?;
+
+            remainder = self.select_u32(take_bit, subtracted, trial_remainder)?;
+            quotient = self.set_u32_bit_if(quotient, bit_idx, take_bit)?;
+        }
+
+        Ok((quotient, remainder))
+    }
+
+    /// Compute the two's-complement absolute value of a signed 32-bit word.
+    ///
+    /// The signed div/rem SSA nodes that call this helper already exclude the
+    /// `INT_MIN / -1` overflow case, so wrapping negation is sufficient here.
+    fn abs_i32_no_overflow(&self, value: U32Parts<'ctx, 'sco>) -> Result<U32Parts<'ctx, 'sco>> {
+        let zero = self.zero_u32()?;
+        let negative = self.u32_sign_bit(value)?;
+        let (negated, _) = self.sub_u32(zero, value)?;
+        self.select_u32(negative, negated, value)
+    }
+
+    /// Compute signed 32-bit division and remainder for a non-zero divisor in
+    /// the "no overflow bits" case used by the source witness SSA.
+    fn div_rem_i32_nonzero_no_overflow(
+        &self,
+        dividend: U32Parts<'ctx, 'sco>,
+        divisor: U32Parts<'ctx, 'sco>,
+    ) -> Result<(U32Parts<'ctx, 'sco>, U32Parts<'ctx, 'sco>)> {
+        let location = self.unknown_location();
+        let dividend_negative = self.u32_sign_bit(dividend)?;
+        let divisor_negative = self.u32_sign_bit(divisor)?;
+        let dividend_abs = self.abs_i32_no_overflow(dividend)?;
+        let divisor_abs = self.abs_i32_no_overflow(divisor)?;
+        let (quotient_abs, remainder_abs) = self.div_rem_u32_nonzero(dividend_abs, divisor_abs)?;
+
+        let zero = self.zero_u32()?;
+        let quotient_negative =
+            self.append_op_with_result(bool::xor(location, dividend_negative, divisor_negative)?)?;
+        let (negated_quotient, _) = self.sub_u32(zero, quotient_abs)?;
+        let (negated_remainder, _) = self.sub_u32(zero, remainder_abs)?;
+
+        Ok((
+            self.select_u32(quotient_negative, negated_quotient, quotient_abs)?,
+            self.select_u32(dividend_negative, negated_remainder, remainder_abs)?,
+        ))
     }
 
     /// Apply a logical right shift to an integer witness value.
@@ -1584,6 +1817,12 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         num_outputs: usize,
     ) -> Result<Vec<Value<'ctx, 'sco>>> {
         match table {
+            TableType::RangeCheckSmall => {
+                self.compute_range_check_small_lookup(inputs, num_outputs)
+            }
+            TableType::U16GetSignAndHighByte => {
+                self.compute_u16_get_sign_and_high_byte_lookup(inputs, num_outputs)
+            }
             TableType::ConditionalJmpBranchSlt => {
                 self.compute_conditional_jmp_branch_slt_lookup(inputs, num_outputs)
             }
@@ -1596,8 +1835,24 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             TableType::RomAddressSpaceSeparator => {
                 self.compute_rom_address_space_separator_lookup(inputs, num_outputs)
             }
+            TableType::RomRead => self.compute_rom_read_lookup(inputs, num_outputs),
+            TableType::SpecialCSRProperties => {
+                self.compute_special_csr_properties_lookup(inputs, num_outputs)
+            }
+            TableType::MemoryOffsetGetBits => {
+                self.compute_memory_offset_get_bits_lookup(inputs, num_outputs)
+            }
             TableType::MemoryLoadHalfwordOrByte => {
                 self.compute_memory_load_halfword_or_byte_lookup(inputs, num_outputs)
+            }
+            TableType::ExtendLoadedValue => {
+                self.compute_extend_loaded_value_lookup(inputs, num_outputs)
+            }
+            TableType::StoreByteSourceContribution => {
+                self.compute_store_byte_source_contribution_lookup(inputs, num_outputs)
+            }
+            TableType::StoreByteExistingContribution => {
+                self.compute_store_byte_existing_contribution_lookup(inputs, num_outputs)
             }
             TableType::MemStoreClearOriginalRamValueLimb => {
                 self.compute_mem_store_clear_original_ram_value_limb_lookup(inputs, num_outputs)
@@ -1606,10 +1861,41 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
                 self.compute_mem_store_clear_written_value_limb_lookup(inputs, num_outputs)
             }
             TableType::AlignedRomRead => self.compute_aligned_rom_read_lookup(inputs, num_outputs),
+            TableType::TruncateShiftAmount => {
+                self.compute_truncate_shift_amount_lookup(inputs, num_outputs)
+            }
+            TableType::Xor => self.compute_bitwise_byte_lookup(inputs, num_outputs, felt::bit_xor),
+            TableType::Or => self.compute_bitwise_byte_lookup(inputs, num_outputs, felt::bit_or),
+            TableType::And => self.compute_bitwise_byte_lookup(inputs, num_outputs, felt::bit_and),
+            TableType::RangeCheck16WithZeroPads => {
+                self.compute_range_check_16_with_zero_pads_lookup(inputs, num_outputs)
+            }
+            TableType::ShiftImplementation => {
+                self.compute_shift_implementation_lookup(inputs, num_outputs)
+            }
+            TableType::SRASignFiller => self.compute_sra_sign_filler_lookup(inputs, num_outputs),
+            TableType::ConditionalOpAllConditionsResolver => {
+                self.compute_conditional_op_all_conditions_lookup(inputs, num_outputs)
+            }
+            TableType::SllWith16BitInputLow => {
+                self.compute_logical_shift_16_bit_lookup::<false, false>(inputs, num_outputs)
+            }
+            TableType::SllWith16BitInputHigh => {
+                self.compute_logical_shift_16_bit_lookup::<true, false>(inputs, num_outputs)
+            }
+            TableType::SrlWith16BitInputLow => {
+                self.compute_logical_shift_16_bit_lookup::<false, true>(inputs, num_outputs)
+            }
+            TableType::SrlWith16BitInputHigh => {
+                self.compute_logical_shift_16_bit_lookup::<true, true>(inputs, num_outputs)
+            }
+            TableType::Sra16BitInputSignFill => {
+                self.compute_sra_16_bit_input_sign_fill_lookup(inputs, num_outputs)
+            }
             _ => {
                 // TODO: add deterministic lowering for the remaining lookup tables
                 // used by the supported circuits.
-                todo!("add lowering for lookup table {:?}", table)
+                panic!("unsupported lookup table in @compute: {:?}", table)
             }
         }
     }
@@ -1634,13 +1920,13 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
                 TableType::MemStoreClearOriginalRamValueLimb,
                 TableType::MemStoreClearWrittenValueLimb,
             ],
-            2 => &[TableType::ConditionalJmpBranchSlt],
+            2 => &[TableType::Xor, TableType::Or, TableType::And],
             3 => &[
                 TableType::MemoryLoadHalfwordOrByte,
                 TableType::MemStoreClearOriginalRamValueLimb,
                 TableType::MemStoreClearWrittenValueLimb,
             ],
-            n => todo!("table {:?} with {} inputs is not supported", table_id, n),
+            n => panic!("dynamic lookup with {} inputs is not supported", n),
         };
 
         let mut tables = supported_tables.iter().copied();
@@ -1740,6 +2026,316 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         }
 
         Ok(outputs)
+    }
+
+    /// Lower the width-3 two-tuple 8-bit range check table.
+    ///
+    /// This lookup does not produce witness outputs; it only constrains `(a, b, 0)` rows on the
+    /// constrain side.
+    fn compute_range_check_small_lookup(
+        &self,
+        inputs: &[Value<'ctx, 'sco>],
+        num_outputs: usize,
+    ) -> Result<Vec<Value<'ctx, 'sco>>> {
+        if inputs.len() != 3 {
+            bail!("RangeCheckSmall expects 3 inputs, found {}", inputs.len());
+        }
+
+        self.finalize_lookup_outputs(vec![], num_outputs)
+    }
+
+    /// Lower the `U16GetSignAndHighByte` table directly from the input limb.
+    fn compute_u16_get_sign_and_high_byte_lookup(
+        &self,
+        inputs: &[Value<'ctx, 'sco>],
+        num_outputs: usize,
+    ) -> Result<Vec<Value<'ctx, 'sco>>> {
+        if inputs.len() != 1 {
+            bail!(
+                "U16GetSignAndHighByte expects 1 input, found {}",
+                inputs.len()
+            );
+        }
+
+        let input = inputs[0];
+        let sign = self.append_bool_to_field(
+            self.append_field_is_nonzero(self.append_shifted_low_bits(input, 15, 1)?)?,
+        )?;
+        let high_byte = self.append_shifted_low_bits(input, 8, 8)?;
+
+        self.finalize_lookup_outputs(vec![sign, high_byte], num_outputs)
+    }
+
+    /// Lower the ROM word lookup keyed by aligned byte address.
+    ///
+    /// Unlike `AlignedRomRead`, this table is keyed by the byte address itself, so we first shift
+    /// off the alignment bits to recover the ROM word index expected by the external hook.
+    fn compute_rom_read_lookup(
+        &self,
+        inputs: &[Value<'ctx, 'sco>],
+        num_outputs: usize,
+    ) -> Result<Vec<Value<'ctx, 'sco>>> {
+        if inputs.len() != 1 {
+            bail!("RomRead expects 1 input, found {}", inputs.len());
+        }
+
+        let location = self.unknown_location();
+        let word_index = self.append_op_with_result(felt::shr(
+            location,
+            inputs[0],
+            self.get_felt_constant_from_start(2)?,
+        )?)?;
+        let felt_type = self.felt_type();
+        let [low, high] = self.append_call::<2>(
+            location,
+            READ_FROM_ROM_EXTERN,
+            &[word_index],
+            &[felt_type, felt_type],
+        )?;
+        self.finalize_lookup_outputs(vec![low, high], num_outputs)
+    }
+
+    /// Lower the CSR support/delegation table using metadata recovered from the source circuit.
+    fn compute_special_csr_properties_lookup(
+        &self,
+        inputs: &[Value<'ctx, 'sco>],
+        num_outputs: usize,
+    ) -> Result<Vec<Value<'ctx, 'sco>>> {
+        if inputs.len() != 1 {
+            bail!(
+                "SpecialCSRProperties expects 1 input, found {}",
+                inputs.len()
+            );
+        }
+
+        let metadata = self.special_csr_properties.as_ref().ok_or_else(|| {
+            anyhow!("missing SpecialCSRProperties metadata for LLZK witness lowering")
+        })?;
+        let csr_index = inputs[0];
+        let (is_supported, is_for_delegation) =
+            self.append_special_csr_properties_outputs(csr_index, metadata)?;
+
+        self.finalize_lookup_outputs(vec![is_supported, is_for_delegation], num_outputs)
+    }
+
+    /// Lower the `TruncateShiftAmount` table by masking the lower five bits.
+    fn compute_truncate_shift_amount_lookup(
+        &self,
+        inputs: &[Value<'ctx, 'sco>],
+        num_outputs: usize,
+    ) -> Result<Vec<Value<'ctx, 'sco>>> {
+        if inputs.len() != 1 {
+            bail!(
+                "TruncateShiftAmount expects 1 input, found {}",
+                inputs.len()
+            );
+        }
+
+        let truncated = self.append_lowest_bits_felt(inputs[0], 5)?;
+        self.finalize_lookup_outputs(vec![truncated], num_outputs)
+    }
+
+    /// Lower the width-3 `(value, 0, 0)` 16-bit range check table.
+    fn compute_range_check_16_with_zero_pads_lookup(
+        &self,
+        inputs: &[Value<'ctx, 'sco>],
+        num_outputs: usize,
+    ) -> Result<Vec<Value<'ctx, 'sco>>> {
+        if inputs.len() != 3 {
+            bail!(
+                "RangeCheck16WithZeroPads expects 3 inputs, found {}",
+                inputs.len()
+            );
+        }
+
+        self.finalize_lookup_outputs(vec![], num_outputs)
+    }
+
+    /// Lower the generic byte-wise XOR/OR/AND tables.
+    fn compute_bitwise_byte_lookup<FN>(
+        &self,
+        inputs: &[Value<'ctx, 'sco>],
+        num_outputs: usize,
+        op: FN,
+    ) -> Result<Vec<Value<'ctx, 'sco>>>
+    where
+        FN: Copy
+            + Fn(
+                Location<'ctx>,
+                Value<'ctx, 'sco>,
+                Value<'ctx, 'sco>,
+            ) -> Result<Operation<'ctx>, llzk::error::Error>,
+    {
+        if inputs.len() != 2 {
+            bail!(
+                "bitwise byte lookup expects 2 inputs, found {}",
+                inputs.len()
+            );
+        }
+
+        let location = self.unknown_location();
+        let output = self.append_op_with_result(op(location, inputs[0], inputs[1])?)?;
+        self.finalize_lookup_outputs(vec![output], num_outputs)
+    }
+
+    /// Lower `MemoryOffsetGetBits` by reading the lowest two address bits directly.
+    fn compute_memory_offset_get_bits_lookup(
+        &self,
+        inputs: &[Value<'ctx, 'sco>],
+        num_outputs: usize,
+    ) -> Result<Vec<Value<'ctx, 'sco>>> {
+        if inputs.len() != 1 {
+            bail!(
+                "MemoryOffsetGetBits expects 1 input, found {}",
+                inputs.len()
+            );
+        }
+
+        let input = inputs[0];
+        let bit_0 = self.append_lowest_bits_felt(input, 1)?;
+        let bit_1 = self.append_shifted_low_bits(input, 1, 1)?;
+        self.finalize_lookup_outputs(vec![bit_0, bit_1], num_outputs)
+    }
+
+    /// Lower the generic shift implementation table used by reduced-machine shifts.
+    fn compute_shift_implementation_lookup(
+        &self,
+        inputs: &[Value<'ctx, 'sco>],
+        num_outputs: usize,
+    ) -> Result<Vec<Value<'ctx, 'sco>>> {
+        if inputs.len() != 1 {
+            bail!(
+                "ShiftImplementation expects 1 input, found {}",
+                inputs.len()
+            );
+        }
+
+        let (in_place, overflow) = self.append_shift_implementation_outputs(inputs[0])?;
+
+        self.finalize_lookup_outputs(vec![in_place, overflow], num_outputs)
+    }
+
+    /// Lower the generic SRA sign-filler table.
+    fn compute_sra_sign_filler_lookup(
+        &self,
+        inputs: &[Value<'ctx, 'sco>],
+        num_outputs: usize,
+    ) -> Result<Vec<Value<'ctx, 'sco>>> {
+        if inputs.len() != 1 {
+            bail!("SRASignFiller expects 1 input, found {}", inputs.len());
+        }
+
+        let (low, high) = self.append_sra_sign_filler_outputs(inputs[0])?;
+        self.finalize_lookup_outputs(vec![low, high], num_outputs)
+    }
+
+    /// Lower the generic branch/SLT condition resolver used by reduced-machine conditional ops.
+    fn compute_conditional_op_all_conditions_lookup(
+        &self,
+        inputs: &[Value<'ctx, 'sco>],
+        num_outputs: usize,
+    ) -> Result<Vec<Value<'ctx, 'sco>>> {
+        if inputs.len() != 1 {
+            bail!(
+                "ConditionalOpAllConditionsResolver expects 1 input, found {}",
+                inputs.len()
+            );
+        }
+
+        let (should_branch, should_store) =
+            self.append_conditional_op_all_conditions_outputs(inputs[0])?;
+        self.finalize_lookup_outputs(vec![should_branch, should_store], num_outputs)
+    }
+
+    /// Lower the generic 16-bit logical shift helper tables.
+    fn compute_logical_shift_16_bit_lookup<
+        const INPUT_IS_HIGH: bool,
+        const IS_RIGHT_SHIFT: bool,
+    >(
+        &self,
+        inputs: &[Value<'ctx, 'sco>],
+        num_outputs: usize,
+    ) -> Result<Vec<Value<'ctx, 'sco>>> {
+        if inputs.len() != 1 {
+            bail!(
+                "logical 16-bit shift table expects 1 input, found {}",
+                inputs.len()
+            );
+        }
+
+        let (low, high) =
+            self.append_logical_shift_16_bit_outputs::<INPUT_IS_HIGH, IS_RIGHT_SHIFT>(inputs[0])?;
+        self.finalize_lookup_outputs(vec![low, high], num_outputs)
+    }
+
+    /// Lower the special SRA filler mask table keyed by a 16-bit input word and shift amount.
+    fn compute_sra_16_bit_input_sign_fill_lookup(
+        &self,
+        inputs: &[Value<'ctx, 'sco>],
+        num_outputs: usize,
+    ) -> Result<Vec<Value<'ctx, 'sco>>> {
+        if inputs.len() != 1 {
+            bail!(
+                "Sra16BitInputSignFill expects 1 input, found {}",
+                inputs.len()
+            );
+        }
+
+        let (low, high) = self.append_sra_16_bit_input_sign_fill_outputs(inputs[0])?;
+        self.finalize_lookup_outputs(vec![low, high], num_outputs)
+    }
+
+    /// Lower the generic load-extension table used by reduced-machine loads.
+    fn compute_extend_loaded_value_lookup(
+        &self,
+        inputs: &[Value<'ctx, 'sco>],
+        num_outputs: usize,
+    ) -> Result<Vec<Value<'ctx, 'sco>>> {
+        if inputs.len() != 1 {
+            bail!("ExtendLoadedValue expects 1 input, found {}", inputs.len());
+        }
+
+        let (out_low, out_high) = self.append_extend_loaded_value_outputs(inputs[0])?;
+
+        self.finalize_lookup_outputs(vec![out_low, out_high], num_outputs)
+    }
+
+    /// Lower the byte-source contribution table used by reduced-machine stores.
+    fn compute_store_byte_source_contribution_lookup(
+        &self,
+        inputs: &[Value<'ctx, 'sco>],
+        num_outputs: usize,
+    ) -> Result<Vec<Value<'ctx, 'sco>>> {
+        if inputs.len() != 2 {
+            bail!(
+                "StoreByteSourceContribution expects 2 inputs, found {}",
+                inputs.len()
+            );
+        }
+
+        self.finalize_lookup_outputs(
+            vec![self.append_store_byte_source_contribution_output(inputs[0], inputs[1])?],
+            num_outputs,
+        )
+    }
+
+    /// Lower the existing-byte contribution table used by reduced-machine stores.
+    fn compute_store_byte_existing_contribution_lookup(
+        &self,
+        inputs: &[Value<'ctx, 'sco>],
+        num_outputs: usize,
+    ) -> Result<Vec<Value<'ctx, 'sco>>> {
+        if inputs.len() != 2 {
+            bail!(
+                "StoreByteExistingContribution expects 2 inputs, found {}",
+                inputs.len()
+            );
+        }
+
+        self.finalize_lookup_outputs(
+            vec![self.append_store_byte_existing_contribution_output(inputs[0], inputs[1])?],
+            num_outputs,
+        )
     }
 
     /// Lower the branch/jump condition lookup used by `jump_branch_slt`.
@@ -2710,21 +3306,150 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInCompute<'a, 'ctx, 'sco, F>
                 let rhs = rhs.emit_compute(lowering)?;
                 lowering.bitwise_binop(felt::bit_xor, lhs, rhs)
             }
-            FixedWidthIntegerNodeExpression::MulLow { .. }
-            | FixedWidthIntegerNodeExpression::MulHigh { .. }
-            | FixedWidthIntegerNodeExpression::AddProduct { .. }
-            | FixedWidthIntegerNodeExpression::DivAssumeNonzero { .. }
-            | FixedWidthIntegerNodeExpression::RemAssumeNonzero { .. }
-            | FixedWidthIntegerNodeExpression::SignedDivAssumeNonzeroNoOverflowBits { .. }
-            | FixedWidthIntegerNodeExpression::SignedRemAssumeNonzeroNoOverflowBits { .. }
-            | FixedWidthIntegerNodeExpression::SignedMulLowBits { .. }
-            | FixedWidthIntegerNodeExpression::SignedMulHighBits { .. }
-            | FixedWidthIntegerNodeExpression::SignedByUnsignedMulLowBits { .. }
-            | FixedWidthIntegerNodeExpression::SignedByUnsignedMulHighBits { .. } => {
-                todo!(
-                    "integer operation {:?} is not yet supported in @compute",
-                    self
-                )
+            FixedWidthIntegerNodeExpression::MulLow { lhs, rhs } => {
+                let lhs = lhs.emit_compute(lowering)?;
+                let rhs = rhs.emit_compute(lowering)?;
+                match (lhs, rhs) {
+                    (IntegerValue::U8(lhs), IntegerValue::U8(rhs)) => {
+                        Ok(IntegerValue::U8(lowering.append_lowest_bits_felt(
+                            lowering.append_op_with_result(felt::mul(
+                                lowering.unknown_location(),
+                                lhs,
+                                rhs,
+                            )?)?,
+                            8,
+                        )?))
+                    }
+                    (IntegerValue::U16(lhs), IntegerValue::U16(rhs)) => {
+                        Ok(IntegerValue::U16(lowering.append_lowest_bits_felt(
+                            lowering.append_op_with_result(felt::mul(
+                                lowering.unknown_location(),
+                                lhs,
+                                rhs,
+                            )?)?,
+                            16,
+                        )?))
+                    }
+                    (IntegerValue::U32(lhs), IntegerValue::U32(rhs)) => Ok(IntegerValue::U32(
+                        lowering.multiply_u32_unsigned(lhs, rhs)?.0,
+                    )),
+                    _ => bail!("MulLow requires operands of the same width"),
+                }
+            }
+            FixedWidthIntegerNodeExpression::MulHigh { lhs, rhs } => {
+                let lhs = lhs.emit_compute(lowering)?;
+                let rhs = rhs.emit_compute(lowering)?;
+                match (lhs, rhs) {
+                    (IntegerValue::U8(lhs), IntegerValue::U8(rhs)) => {
+                        Ok(IntegerValue::U8(lowering.append_shifted_low_bits(
+                            lowering.append_op_with_result(felt::mul(
+                                lowering.unknown_location(),
+                                lhs,
+                                rhs,
+                            )?)?,
+                            8,
+                            8,
+                        )?))
+                    }
+                    (IntegerValue::U16(lhs), IntegerValue::U16(rhs)) => {
+                        Ok(IntegerValue::U16(lowering.append_shifted_low_bits(
+                            lowering.append_op_with_result(felt::mul(
+                                lowering.unknown_location(),
+                                lhs,
+                                rhs,
+                            )?)?,
+                            16,
+                            16,
+                        )?))
+                    }
+                    (IntegerValue::U32(lhs), IntegerValue::U32(rhs)) => Ok(IntegerValue::U32(
+                        lowering.multiply_u32_unsigned(lhs, rhs)?.1,
+                    )),
+                    _ => bail!("MulHigh requires operands of the same width"),
+                }
+            }
+            FixedWidthIntegerNodeExpression::DivAssumeNonzero { lhs, rhs } => {
+                let lhs = lhs.emit_compute(lowering)?;
+                let rhs = rhs.emit_compute(lowering)?;
+                match (lhs, rhs) {
+                    (IntegerValue::U32(lhs), IntegerValue::U32(rhs)) => {
+                        Ok(IntegerValue::U32(lowering.div_rem_u32_nonzero(lhs, rhs)?.0))
+                    }
+                    _ => bail!("DivAssumeNonzero requires 32-bit operands"),
+                }
+            }
+            FixedWidthIntegerNodeExpression::RemAssumeNonzero { lhs, rhs } => {
+                let lhs = lhs.emit_compute(lowering)?;
+                let rhs = rhs.emit_compute(lowering)?;
+                match (lhs, rhs) {
+                    (IntegerValue::U32(lhs), IntegerValue::U32(rhs)) => {
+                        Ok(IntegerValue::U32(lowering.div_rem_u32_nonzero(lhs, rhs)?.1))
+                    }
+                    _ => bail!("RemAssumeNonzero requires 32-bit operands"),
+                }
+            }
+            FixedWidthIntegerNodeExpression::SignedDivAssumeNonzeroNoOverflowBits { lhs, rhs } => {
+                let lhs = lhs.emit_compute(lowering)?;
+                let rhs = rhs.emit_compute(lowering)?;
+                match (lhs, rhs) {
+                    (IntegerValue::U32(lhs), IntegerValue::U32(rhs)) => Ok(IntegerValue::U32(
+                        lowering.div_rem_i32_nonzero_no_overflow(lhs, rhs)?.0,
+                    )),
+                    _ => bail!("SignedDivAssumeNonzeroNoOverflowBits requires 32-bit operands"),
+                }
+            }
+            FixedWidthIntegerNodeExpression::SignedRemAssumeNonzeroNoOverflowBits { lhs, rhs } => {
+                let lhs = lhs.emit_compute(lowering)?;
+                let rhs = rhs.emit_compute(lowering)?;
+                match (lhs, rhs) {
+                    (IntegerValue::U32(lhs), IntegerValue::U32(rhs)) => Ok(IntegerValue::U32(
+                        lowering.div_rem_i32_nonzero_no_overflow(lhs, rhs)?.1,
+                    )),
+                    _ => bail!("SignedRemAssumeNonzeroNoOverflowBits requires 32-bit operands"),
+                }
+            }
+            FixedWidthIntegerNodeExpression::SignedMulLowBits { lhs, rhs } => {
+                let lhs = lhs.emit_compute(lowering)?;
+                let rhs = rhs.emit_compute(lowering)?;
+                match (lhs, rhs) {
+                    (IntegerValue::U32(lhs), IntegerValue::U32(rhs)) => {
+                        Ok(IntegerValue::U32(lowering.multiply_i32(lhs, rhs)?.0))
+                    }
+                    _ => bail!("SignedMulLowBits requires 32-bit operands"),
+                }
+            }
+            FixedWidthIntegerNodeExpression::SignedMulHighBits { lhs, rhs } => {
+                let lhs = lhs.emit_compute(lowering)?;
+                let rhs = rhs.emit_compute(lowering)?;
+                match (lhs, rhs) {
+                    (IntegerValue::U32(lhs), IntegerValue::U32(rhs)) => {
+                        Ok(IntegerValue::U32(lowering.multiply_i32(lhs, rhs)?.1))
+                    }
+                    _ => bail!("SignedMulHighBits requires 32-bit operands"),
+                }
+            }
+            FixedWidthIntegerNodeExpression::SignedByUnsignedMulLowBits { lhs, rhs } => {
+                let lhs = lhs.emit_compute(lowering)?;
+                let rhs = rhs.emit_compute(lowering)?;
+                match (lhs, rhs) {
+                    (IntegerValue::U32(lhs), IntegerValue::U32(rhs)) => {
+                        Ok(IntegerValue::U32(lowering.multiply_i32_u32(lhs, rhs)?.0))
+                    }
+                    _ => bail!("SignedByUnsignedMulLowBits requires 32-bit operands"),
+                }
+            }
+            FixedWidthIntegerNodeExpression::SignedByUnsignedMulHighBits { lhs, rhs } => {
+                let lhs = lhs.emit_compute(lowering)?;
+                let rhs = rhs.emit_compute(lowering)?;
+                match (lhs, rhs) {
+                    (IntegerValue::U32(lhs), IntegerValue::U32(rhs)) => {
+                        Ok(IntegerValue::U32(lowering.multiply_i32_u32(lhs, rhs)?.1))
+                    }
+                    _ => bail!("SignedByUnsignedMulHighBits requires 32-bit operands"),
+                }
+            }
+            FixedWidthIntegerNodeExpression::AddProduct { .. } => {
+                panic!("unsupported integer operation in @compute: {:?}", self)
             }
         }
     }

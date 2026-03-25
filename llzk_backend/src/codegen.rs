@@ -8,8 +8,11 @@ use anyhow::anyhow;
 use anyhow::Result;
 use llzk::prelude::*;
 use prover::cs::cs::circuit::CircuitOutput;
+use prover::cs::cs::circuit::ShuffleRamQueryType;
 use prover::cs::definitions::OpcodeFamilyCircuitState;
 use prover::cs::definitions::Variable;
+use prover::cs::tables::LookupWrapper;
+use prover::cs::tables::TableType;
 use prover::field::PrimeField;
 
 use crate::builder::*;
@@ -145,9 +148,20 @@ impl<F: PrimeField> VariableExtractor for OpcodeFamilyCircuitState<F> {
 impl<F: PrimeField> VariableExtractor for CircuitOutput<F> {
     fn get_inputs(&self) -> Result<Vec<ExtractedVariable>> {
         // Inputs are:
-        // - RAM read query values
-        // - RAM write query prior values (these will show up in constraints sometimes)
         // - Inputs from the executor machine state
+        // - Shuffle-RAM read query values
+        // - Shuffle-RAM address payloads for `RegisterOrRam` queries
+        // - Shuffle-RAM `is_register` discriminators when they are real circuit variables
+        //
+        // The address payloads are explicit circuit variables in `ShuffleRamMemQuery`. We expose
+        // them as LLZK inputs so witness lowering can canonicalize `ShuffleRamAddress(i)`
+        // placeholders back to the same boundary values instead of issuing runtime oracle calls.
+        //
+        // `RegisterOrRam` also carries an `is_register` boolean. That discriminator is separate
+        // from the address payload: the same 32-bit address limbs may mean either a register index
+        // or a RAM address, depending on the flag. When the source circuit stores the flag as a
+        // variable instead of a constant, we expose it as a normal LLZK input as well so
+        // `ShuffleRamIsRegisterAccess(i)` can be canonicalized the same way.
         let exec_state = &self
             .executor_machine_state
             .ok_or_else(|| anyhow!("executor_machine_state not initialized"))?;
@@ -155,6 +169,16 @@ impl<F: PrimeField> VariableExtractor for CircuitOutput<F> {
 
         for query in &self.shuffle_ram_queries {
             inputs.push(ExtractedVariable::register(query.read_value));
+            if let ShuffleRamQueryType::RegisterOrRam {
+                is_register,
+                address,
+            } = query.query_type
+            {
+                inputs.push(ExtractedVariable::register(address));
+                if let Some(is_register) = is_register.get_variable() {
+                    inputs.push(ExtractedVariable::scalar(is_register));
+                }
+            }
         }
         inputs.sort();
         assert!(
@@ -208,8 +232,74 @@ impl<F: PrimeField> VariableExtractor for CircuitOutput<F> {
     }
 }
 
+/// Extra boundary values added to the LLZK method signatures for compatibility with witness SSA.
+///
+/// Today this is limited to shuffle write values. They are already exposed as public LLZK struct
+/// members, but some witness SSA nodes still refer to them through placeholder reads before the
+/// matching `struct.writem` occurs in `@compute`. That means the member alone is not always a
+/// usable source during witness lowering: reading it first would be circular.
+///
+/// To break that cycle, we duplicate the same boundary value in the method signatures. LLZK
+/// requires `@compute` and `@constrain` to share the same argument types (modulo the leading
+/// `self`), so these aliases appear in both methods. Constraint lowering immediately ties them
+/// back to the corresponding public members, while witness lowering may read them directly to
+/// avoid a second runtime oracle source for the same logical value.
+fn get_compute_compatibility_inputs<F: PrimeField>(
+    circuit_output: &CircuitOutput<F>,
+) -> Vec<ExtractedVariable> {
+    circuit_output
+        .shuffle_ram_queries
+        .iter()
+        .filter(|query| !query.is_readonly())
+        .map(|query| ExtractedVariable::register(query.write_value))
+        .collect()
+}
+
 fn num_vars(vars: impl IntoIterator<Item = ExtractedVariable>) -> usize {
     vars.into_iter().map(|v| v.num_vars()).sum()
+}
+
+/// Metadata related to the circuit's `SpecialCSRProperties` lookup table, extracted
+/// from the [`CircuitOutput`] for lowering convenience.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SpecialCsrPropertiesMetadata {
+    pub supported_only_indices: Vec<u16>,
+    pub delegation_indices: Vec<u16>,
+}
+
+impl SpecialCsrPropertiesMetadata {
+    /// Recover the `SpecialCSRProperties` table semantics from the finalized circuit output.
+    pub(crate) fn new<F: FieldInfo>(circuit_output: &CircuitOutput<F>) -> Option<Self> {
+        let LookupWrapper::Dimensional3(table) = circuit_output
+            .table_driver
+            .get_table(TableType::SpecialCSRProperties)
+        else {
+            return None;
+        };
+
+        let mut metadata = Self::default();
+        for row in table.data.iter() {
+            let csr_index = row[0].as_u64_reduced() as u16;
+            let is_supported = !row[1].is_zero();
+            let is_delegation = !row[2].is_zero();
+
+            if is_delegation {
+                metadata.delegation_indices.push(csr_index);
+            } else if is_supported {
+                metadata.supported_only_indices.push(csr_index);
+            }
+        }
+
+        if metadata.is_empty() {
+            None
+        } else {
+            Some(metadata)
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.supported_only_indices.is_empty() && self.delegation_indices.is_empty()
+    }
 }
 
 /// Holds the circuit artifacts required to emit one LLZK circuit struct.
@@ -300,6 +390,7 @@ impl<'ctx, F: FieldInfo> EmitLlzkInModule<'ctx, F> for CircuitBundle<F> {
                     builder.insert_constant_at_start(builder.index_type(), 0)?;
                     builder.insert_constant_at_start(builder.felt_type(), 1)?;
                     builder.insert_constant_at_start(builder.felt_type(), 0)?;
+                    vars.constrain_compute_compatibility_inputs(builder)?;
                     // Add boolean constraints.
                     for bool_var in self.boolean_vars.iter() {
                         let val = vars.get_constrain_val(builder, bool_var)?;
@@ -334,6 +425,10 @@ impl<'ctx, F: FieldInfo> EmitLlzkInModule<'ctx, F> for CircuitBundle<F> {
 
 /// Holds the information about the variables and their representation in the LLZK struct.
 pub struct StructVars<F: FieldInfo> {
+    /// Ties [`StructVars`] to a specific field. This is prefered to having every member
+    /// take the [`FieldInfo`] struct as a parameter, because mixed-field operations are
+    /// currently not supported.
+    _field: PhantomData<F>,
     /// Maps internal and output Variables to a tuple `(member name, optional index if the member
     /// is an array type)`. All members are assumed to be either felts or "registers", which are
     /// flat, two-element felt arrays.
@@ -344,10 +439,15 @@ pub struct StructVars<F: FieldInfo> {
     /// lowering adds one when reading from `@constrain` because argument 0 is the struct `self`
     /// value, while witness lowering uses the arg number directly in `@compute`.
     arg_map: HashMap<Variable, (usize, Option<u64>)>,
-    /// Ties [`StructVars`] to a specific field. This is prefered to having every member
-    /// take the [`FieldInfo`] struct as a parameter, because mixed-field operations are
-    /// currently not supported.
-    _field: PhantomData<F>,
+    /// Additional compatibility arguments appended after the shared logical inputs.
+    ///
+    /// These are duplicated aliases of public output members. They remain visible in both
+    /// `@compute` and `@constrain`, but constraint lowering treats them only as aliases that must
+    /// equal the corresponding struct members.
+    compatibility_arg_map: HashMap<Variable, (usize, Option<u64>)>,
+    /// Exact support/delegation policy for `SpecialCSRProperties`, if this circuit uses that
+    /// table.
+    special_csr_properties: Option<SpecialCsrPropertiesMetadata>,
 }
 
 impl<F: FieldInfo> StructVars<F> {
@@ -359,6 +459,7 @@ impl<F: FieldInfo> StructVars<F> {
         co: &CircuitOutput<F>,
         struct_builder: &mut StructBuilder<'ctx, '_, F>,
     ) -> Result<Self> {
+        let special_csr_properties = SpecialCsrPropertiesMetadata::new(co);
         let felt_type = struct_builder.felt_type();
         let register_type = struct_builder.register_type();
         // Add inputs to struct.
@@ -373,6 +474,22 @@ impl<F: FieldInfo> StructVars<F> {
                 ExtractedVariable::Scalar(variable) => {
                     arg_map.insert(*variable, (input_num, None));
                     struct_builder.with_input(felt_type);
+                }
+            };
+        }
+
+        let mut compatibility_arg_map: HashMap<Variable, (usize, Option<u64>)> = HashMap::new();
+        let compute_input_base = co.get_inputs()?.len();
+        for (input_num, input) in get_compute_compatibility_inputs(co).iter().enumerate() {
+            match input {
+                ExtractedVariable::Register { low, high } => {
+                    compatibility_arg_map.insert(*low, (compute_input_base + input_num, Some(0)));
+                    compatibility_arg_map.insert(*high, (compute_input_base + input_num, Some(1)));
+                    struct_builder.with_compatibility_input(register_type);
+                }
+                ExtractedVariable::Scalar(variable) => {
+                    compatibility_arg_map.insert(*variable, (compute_input_base + input_num, None));
+                    struct_builder.with_compatibility_input(felt_type);
                 }
             };
         }
@@ -414,9 +531,11 @@ impl<F: FieldInfo> StructVars<F> {
         }
 
         Ok(Self {
+            _field: PhantomData,
             member_map,
             arg_map,
-            _field: PhantomData,
+            compatibility_arg_map,
+            special_csr_properties,
         })
     }
 
@@ -446,7 +565,7 @@ impl<F: FieldInfo> StructVars<F> {
             .ok_or_else(|| anyhow!("Could not find {var:?} in constrain inputs or members"))
     }
 
-    /// Try to read a variable from the `@compute` view of the struct.
+    /// Try to read a variable from the explicit `@compute` argument list.
     pub fn try_get_compute_input_val<'ctx, 'sco>(
         &self,
         builder: &OpsBuilder<'ctx, 'sco, F>,
@@ -454,7 +573,8 @@ impl<F: FieldInfo> StructVars<F> {
     ) -> Result<Option<Value<'ctx, 'sco>>> {
         // `@compute` does not receive a `self` argument. Its public inputs begin at argument 0 and
         // the partially constructed witness struct is the result of the leading `struct.new`.
-        self.get_input_val_at_offset::<0>(builder, var)
+        // Some circuits also expose compatibility args here after the shared logical input list.
+        self.get_compute_arg_val(builder, var)
     }
 
     /// Try to read a variable from the full `@compute` view of the struct.
@@ -485,9 +605,43 @@ impl<F: FieldInfo> StructVars<F> {
             .ok_or_else(|| anyhow!("Could not find {var:?} in compute inputs or members"))
     }
 
-    /// Return `true` when `var` is one of the explicit `@compute` inputs.
+    /// Return `true` when `var` is one of the explicit `@compute` arguments.
     pub fn has_compute_input(&self, var: &Variable) -> bool {
-        self.arg_map.contains_key(var)
+        self.arg_map.contains_key(var) || self.compatibility_arg_map.contains_key(var)
+    }
+
+    /// Add equality constraints tying compatibility args back to the corresponding struct
+    /// members.
+    ///
+    /// These values exist to give `@compute` a canonical boundary source for output-backed
+    /// placeholders before the matching `struct.writem` occurs. `@constrain` should still treat
+    /// the struct member as the semantic output, so emitting `compat_arg == member` keeps the
+    /// duplicate boundary args from becoming unconstrained.
+    pub fn constrain_compute_compatibility_inputs<'ctx, 'sco>(
+        &self,
+        builder: &OpsBuilder<'ctx, 'sco, F>,
+    ) -> Result<()> {
+        let mut vars = self
+            .compatibility_arg_map
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        vars.sort();
+        vars.dedup();
+
+        for var in vars {
+            let Some(input) =
+                self.get_input_from_map::<1>(builder, &var, &self.compatibility_arg_map)?
+            else {
+                continue;
+            };
+            let Some(member) = self.get_constrain_member_val(builder, &var)? else {
+                continue;
+            };
+            builder.append_constrain_eq(builder.unknown_location(), input, member)?;
+        }
+
+        Ok(())
     }
 
     /// Return `true` when `var` is represented by a struct member.
@@ -499,6 +653,11 @@ impl<F: FieldInfo> StructVars<F> {
     /// struct.
     pub fn is_compute_exposed(&self, var: &Variable) -> bool {
         self.has_compute_input(var) || self.has_member(var)
+    }
+
+    /// Return metadata for the circuit's `SpecialCSRProperties` table when present.
+    pub fn special_csr_properties(&self) -> Option<&SpecialCsrPropertiesMetadata> {
+        self.special_csr_properties.as_ref()
     }
 
     /// Update `var` with `value` by creating a `struct.writem` operation in `@compute` targeting
@@ -556,6 +715,41 @@ impl<F: FieldInfo> StructVars<F> {
         }
     }
 
+    fn get_input_from_map<'ctx, 'sco, const ARG_OFFSET: usize>(
+        &self,
+        builder: &OpsBuilder<'ctx, 'sco, F>,
+        var: &Variable,
+        arg_map: &HashMap<Variable, (usize, Option<u64>)>,
+    ) -> Result<Option<Value<'ctx, 'sco>>> {
+        match arg_map.get(var) {
+            None => Ok(None),
+            Some((arg_no, index)) => {
+                let arg_val = builder.get_arg_value(*arg_no + ARG_OFFSET)?;
+                let val = match index {
+                    None => arg_val,
+                    Some(index) => {
+                        let indices =
+                            &[builder.get_constant_from_start(builder.index_type(), *index)?];
+                        builder.append_array_read(builder.unknown_location(), arg_val, indices)?
+                    }
+                };
+                Ok(Some(val))
+            }
+        }
+    }
+
+    fn get_compute_arg_val<'ctx, 'sco>(
+        &self,
+        builder: &OpsBuilder<'ctx, 'sco, F>,
+        var: &Variable,
+    ) -> Result<Option<Value<'ctx, 'sco>>> {
+        if let Some(value) = self.get_input_from_map::<0>(builder, var, &self.arg_map)? {
+            Ok(Some(value))
+        } else {
+            self.get_input_from_map::<0>(builder, var, &self.compatibility_arg_map)
+        }
+    }
+
     fn get_constrain_member_val<'ctx, 'sco>(
         &self,
         builder: &OpsBuilder<'ctx, 'sco, F>,
@@ -610,18 +804,20 @@ impl<F: FieldInfo> StructVars<F> {
         }
     }
 
-    /// A test-only function that allows direct construction of [`StructVars`]
-    /// using synthetic struct members and arguments rather than parsing them
-    /// from the [`CircuitOutput`] object.
+    /// A test-only function that allows direct construction of [`StructVars`] with synthetic
+    /// struct members, arguments, and optional `SpecialCSRProperties` metadata.
     #[cfg(test)]
-    pub(crate) fn from_test_maps(
+    pub(crate) fn from_test_maps_with_special_csr_properties(
         member_map: HashMap<Variable, (String, Option<u64>)>,
         arg_map: HashMap<Variable, (usize, Option<u64>)>,
+        special_csr_properties: Option<SpecialCsrPropertiesMetadata>,
     ) -> Self {
         Self {
             member_map,
             arg_map,
+            compatibility_arg_map: HashMap::new(),
             _field: PhantomData,
+            special_csr_properties,
         }
     }
 }

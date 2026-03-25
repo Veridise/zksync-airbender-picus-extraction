@@ -1,6 +1,7 @@
 //! Shared helpers for LLZK backend unit tests.
 
 use std::collections::HashMap;
+use std::env;
 
 use anyhow::Result;
 use llzk::prelude::*;
@@ -10,6 +11,7 @@ use prover::field::Mersenne31Field;
 use crate::builder::ModuleEnv;
 use crate::builder::OpsBuilder;
 use crate::builder::StructBuilder;
+use crate::codegen::SpecialCsrPropertiesMetadata;
 use crate::codegen::StructVars;
 use crate::constraints::AddConstraints;
 
@@ -30,6 +32,15 @@ pub(crate) fn assert_full_ir_eq(actual: &str, expected: &str) {
     assert_eq!(normalize_ir(actual), normalize_ir(expected));
 }
 
+/// Dump test IR to stdout when `LLZK_DUMP_TEST_IR` is set.
+pub(crate) fn maybe_dump_test_ir(name: &str, ir: &str) {
+    if env::var_os("LLZK_DUMP_TEST_IR").is_some() {
+        println!("=== {name} ===");
+        println!("{ir}");
+        println!("=== end {name} ===");
+    }
+}
+
 /// Emit a synthetic `@constrain` body for unit tests.
 ///
 /// The helper exposes each `input_var` as a felt input, each `member_var` as a felt
@@ -38,6 +49,24 @@ pub(crate) fn emit_test_constrain_ir(
     struct_name: &str,
     input_vars: &[Variable],
     member_vars: &[(Variable, &str)],
+    emit: impl FnOnce(&OpsBuilder<'_, '_, Mersenne31Field>, &StructVars<Mersenne31Field>) -> Result<()>,
+) -> String {
+    emit_test_constrain_ir_with_special_csr_properties(
+        struct_name,
+        input_vars,
+        member_vars,
+        None,
+        emit,
+    )
+}
+
+/// Emit a synthetic `@constrain` body for unit tests, optionally seeding
+/// `SpecialCSRProperties` metadata on the synthetic [`StructVars`].
+pub(crate) fn emit_test_constrain_ir_with_special_csr_properties(
+    struct_name: &str,
+    input_vars: &[Variable],
+    member_vars: &[(Variable, &str)],
+    special_csr_properties: Option<SpecialCsrPropertiesMetadata>,
     emit: impl FnOnce(&OpsBuilder<'_, '_, Mersenne31Field>, &StructVars<Mersenne31Field>) -> Result<()>,
 ) -> String {
     let ctx = LlzkContext::new();
@@ -61,7 +90,11 @@ pub(crate) fn emit_test_constrain_ir(
         .iter()
         .map(|(var, name)| (*var, ((*name).to_string(), None)))
         .collect::<HashMap<_, _>>();
-    let vars = StructVars::from_test_maps(member_map, arg_map);
+    let vars = StructVars::from_test_maps_with_special_csr_properties(
+        member_map,
+        arg_map,
+        special_csr_properties,
+    );
 
     let struct_op = struct_builder.build_in_module().unwrap();
     struct_op

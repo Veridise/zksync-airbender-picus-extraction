@@ -25,6 +25,7 @@ use llzk::utils::IsA;
 use melior::ir::Identifier;
 use prover::cs::definitions::REGISTER_SIZE;
 
+use crate::codegen::SpecialCsrPropertiesMetadata;
 use crate::field::FieldInfo;
 
 /// Module-scoped helper with convenience factory methods and access to the root LLZK module.
@@ -827,6 +828,55 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
         )?)
     }
 
+    /// Sum one-hot equality checks for `value` against a fixed set of small constants.
+    pub fn append_field_eq_any_constant(
+        &self,
+        value: Value<'ctx, 'sco>,
+        constants: &[u16],
+    ) -> Result<Value<'ctx, 'sco>> {
+        let location = self.unknown_location();
+        let matches = constants
+            .iter()
+            .map(|constant| {
+                self.append_bool_to_field(
+                    self.append_field_eq_constant(value, u64::from(*constant))?,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        if matches.is_empty() {
+            self.get_felt_constant_from_start(0)
+        } else if matches.len() == 1 {
+            Ok(matches[0])
+        } else {
+            self.append_sum(location, &matches)
+        }
+    }
+
+    /// Compute the `(is_supported, is_for_delegation)` outputs for the
+    /// `SpecialCSRProperties` table.
+    pub fn append_special_csr_properties_outputs(
+        &self,
+        csr_index: Value<'ctx, 'sco>,
+        metadata: &SpecialCsrPropertiesMetadata,
+    ) -> Result<(Value<'ctx, 'sco>, Value<'ctx, 'sco>)> {
+        let location = self.unknown_location();
+        let is_for_delegation =
+            self.append_field_eq_any_constant(csr_index, &metadata.delegation_indices)?;
+        let is_supported = if metadata.supported_only_indices.is_empty() {
+            is_for_delegation
+        } else {
+            self.append_sum(
+                location,
+                &[
+                    self.append_field_eq_any_constant(csr_index, &metadata.supported_only_indices)?,
+                    is_for_delegation,
+                ],
+            )?
+        };
+        Ok((is_supported, is_for_delegation))
+    }
+
     /// Extract a small bit-slice from a felt-encoded value.
     pub fn append_shifted_low_bits(
         &self,
@@ -844,6 +894,310 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
             )?)?
         };
         self.append_lowest_bits_felt(shifted, bits)
+    }
+
+    /// Compute the `(out_low, out_high)` outputs for the `ExtendLoadedValue` table.
+    pub fn append_extend_loaded_value_outputs(
+        &self,
+        input: Value<'ctx, 'sco>,
+    ) -> Result<(Value<'ctx, 'sco>, Value<'ctx, 'sco>)> {
+        let location = self.unknown_location();
+        let word = self.append_lowest_bits_felt(input, 16)?;
+        let use_high_half =
+            self.append_field_is_nonzero(self.append_shifted_low_bits(input, 16, 1)?)?;
+        let funct3 = self.append_shifted_low_bits(input, 17, 3)?;
+        let low_byte = self.append_lowest_bits_felt(word, 8)?;
+        let high_byte = self.append_shifted_low_bits(word, 8, 8)?;
+        let selected_byte = self.append_select_value(use_high_half, high_byte, low_byte)?;
+        let byte_sign =
+            self.append_field_is_nonzero(self.append_shifted_low_bits(selected_byte, 7, 1)?)?;
+        let word_sign = self.append_field_is_nonzero(self.append_shifted_low_bits(word, 15, 1)?)?;
+        let zero = self.get_felt_constant_from_start(0)?;
+        let full_sign = self.get_felt_constant_from_start(0xffff)?;
+        let byte_high_fill = self.get_felt_constant_from_start(0xff00)?;
+
+        let out_low = self.append_select_value(
+            self.append_field_eq_constant(funct3, 0b000)?,
+            self.append_select_value(
+                byte_sign,
+                self.append_sum(location, &[selected_byte, byte_high_fill])?,
+                selected_byte,
+            )?,
+            self.append_select_value(
+                self.append_field_eq_constant(funct3, 0b100)?,
+                selected_byte,
+                self.append_select_value(
+                    self.append_field_eq_constant(funct3, 0b001)?,
+                    word,
+                    self.append_select_value(
+                        self.append_field_eq_constant(funct3, 0b101)?,
+                        word,
+                        zero,
+                    )?,
+                )?,
+            )?,
+        )?;
+        let out_high = self.append_select_value(
+            self.append_field_eq_constant(funct3, 0b000)?,
+            self.append_select_value(byte_sign, full_sign, zero)?,
+            self.append_select_value(
+                self.append_field_eq_constant(funct3, 0b001)?,
+                self.append_select_value(word_sign, full_sign, zero)?,
+                zero,
+            )?,
+        )?;
+
+        Ok((out_low, out_high))
+    }
+
+    /// Compute the output for the `StoreByteSourceContribution` table.
+    pub fn append_store_byte_source_contribution_output(
+        &self,
+        byte: Value<'ctx, 'sco>,
+        bit_0: Value<'ctx, 'sco>,
+    ) -> Result<Value<'ctx, 'sco>> {
+        let location = self.unknown_location();
+        let shifted = self.append_op_with_result(felt::shl(
+            location,
+            byte,
+            self.get_felt_constant_from_start(8)?,
+        )?)?;
+        let bit_0_bool = self.append_field_is_nonzero(bit_0)?;
+        self.append_select_value(bit_0_bool, shifted, byte)
+    }
+
+    /// Compute the output for the `StoreByteExistingContribution` table.
+    pub fn append_store_byte_existing_contribution_output(
+        &self,
+        word: Value<'ctx, 'sco>,
+        bit_0: Value<'ctx, 'sco>,
+    ) -> Result<Value<'ctx, 'sco>> {
+        let location = self.unknown_location();
+        let keep_low = self.append_op_with_result(felt::bit_and(
+            location,
+            word,
+            self.get_felt_constant_from_start(0x00ff)?,
+        )?)?;
+        let keep_high = self.append_op_with_result(felt::bit_and(
+            location,
+            word,
+            self.get_felt_constant_from_start(0xff00)?,
+        )?)?;
+        let bit_0_bool = self.append_field_is_nonzero(bit_0)?;
+        self.append_select_value(bit_0_bool, keep_low, keep_high)
+    }
+
+    /// Compute the `(in_place, overflow)` outputs for the `ShiftImplementation` table.
+    pub fn append_shift_implementation_outputs(
+        &self,
+        input: Value<'ctx, 'sco>,
+    ) -> Result<(Value<'ctx, 'sco>, Value<'ctx, 'sco>)> {
+        let location = self.unknown_location();
+        let word = self.append_lowest_bits_felt(input, 16)?;
+        let shift_amount = self.append_shifted_low_bits(input, 16, 5)?;
+        let is_right = self.append_field_is_nonzero(self.append_shifted_low_bits(input, 21, 1)?)?;
+        let input_high = self.append_op_with_result(felt::shl(
+            location,
+            word,
+            self.get_felt_constant_from_start(16)?,
+        )?)?;
+        let right_shifted =
+            self.append_op_with_result(felt::shr(location, input_high, shift_amount)?)?;
+        let left_shifted = self.append_op_with_result(felt::shl(location, word, shift_amount)?)?;
+        let in_place = self.append_select_value(
+            is_right,
+            self.append_shifted_low_bits(right_shifted, 16, 16)?,
+            self.append_lowest_bits_felt(left_shifted, 16)?,
+        )?;
+        let overflow = self.append_select_value(
+            is_right,
+            self.append_lowest_bits_felt(right_shifted, 16)?,
+            self.append_shifted_low_bits(left_shifted, 16, 16)?,
+        )?;
+        Ok((in_place, overflow))
+    }
+
+    /// Select the 32-bit sign-fill mask for a five-bit shift amount.
+    pub fn append_u32_mask_from_shift_amount(
+        &self,
+        shift_amount: Value<'ctx, 'sco>,
+    ) -> Result<(Value<'ctx, 'sco>, Value<'ctx, 'sco>)> {
+        let mut selected_low = self.get_felt_constant_from_start(0)?;
+        let mut selected_high = self.get_felt_constant_from_start(0)?;
+
+        for shift in 1u32..32 {
+            let mask = u32::MAX << (32 - shift);
+            let case = self.append_field_eq_constant(shift_amount, u64::from(shift))?;
+            selected_low = self.append_select_value(
+                case,
+                self.get_felt_constant_from_start(u64::from(mask & 0xffff))?,
+                selected_low,
+            )?;
+            selected_high = self.append_select_value(
+                case,
+                self.get_felt_constant_from_start(u64::from(mask >> 16))?,
+                selected_high,
+            )?;
+        }
+
+        Ok((selected_low, selected_high))
+    }
+
+    /// Compute the `(low, high)` outputs for the `SRASignFiller` table.
+    pub fn append_sra_sign_filler_outputs(
+        &self,
+        input: Value<'ctx, 'sco>,
+    ) -> Result<(Value<'ctx, 'sco>, Value<'ctx, 'sco>)> {
+        let location = self.unknown_location();
+        let sign = self.append_field_is_nonzero(self.append_lowest_bits_felt(input, 1)?)?;
+        let is_sra = self.append_field_is_nonzero(self.append_shifted_low_bits(input, 1, 1)?)?;
+        let shift_amount = self.append_shifted_low_bits(input, 2, 5)?;
+        let apply_fill = self.append_op_with_result(bool::and(
+            location,
+            sign,
+            self.append_op_with_result(bool::and(
+                location,
+                is_sra,
+                self.append_field_is_nonzero(shift_amount)?,
+            )?)?,
+        )?)?;
+        let (mask_low, mask_high) = self.append_u32_mask_from_shift_amount(shift_amount)?;
+
+        Ok((
+            self.append_select_value(apply_fill, mask_low, self.get_felt_constant_from_start(0)?)?,
+            self.append_select_value(apply_fill, mask_high, self.get_felt_constant_from_start(0)?)?,
+        ))
+    }
+
+    /// Compute the `(should_branch, should_store)` outputs for the
+    /// `ConditionalOpAllConditionsResolver` table.
+    pub fn append_conditional_op_all_conditions_outputs(
+        &self,
+        input: Value<'ctx, 'sco>,
+    ) -> Result<(Value<'ctx, 'sco>, Value<'ctx, 'sco>)> {
+        let location = self.unknown_location();
+        let funct3 = self.append_lowest_bits_felt(input, 3)?;
+        let unsigned_lt =
+            self.append_field_is_nonzero(self.append_shifted_low_bits(input, 3, 1)?)?;
+        let eq = self.append_field_is_nonzero(self.append_shifted_low_bits(input, 4, 1)?)?;
+        let src1_sign = self.append_field_is_nonzero(self.append_shifted_low_bits(input, 5, 1)?)?;
+        let src2_sign = self.append_field_is_nonzero(self.append_shifted_low_bits(input, 6, 1)?)?;
+        let sign_diff = self.append_op_with_result(bool::or(
+            location,
+            self.append_op_with_result(bool::and(
+                location,
+                src1_sign,
+                self.append_op_with_result(bool::not(location, src2_sign)?)?,
+            )?)?,
+            self.append_op_with_result(bool::and(
+                location,
+                self.append_op_with_result(bool::not(location, src1_sign)?)?,
+                src2_sign,
+            )?)?,
+        )?)?;
+        let signed_lt = self.append_select_value(sign_diff, src1_sign, unsigned_lt)?;
+        let false_bool = self.get_bool_constant_from_start(false)?;
+        let expected_branch = self.append_select_value(
+            self.append_field_eq_constant(funct3, 0b000)?,
+            eq,
+            self.append_select_value(
+                self.append_field_eq_constant(funct3, 0b001)?,
+                self.append_op_with_result(bool::not(location, eq)?)?,
+                self.append_select_value(
+                    self.append_field_eq_constant(funct3, 0b100)?,
+                    signed_lt,
+                    self.append_select_value(
+                        self.append_field_eq_constant(funct3, 0b101)?,
+                        self.append_op_with_result(bool::not(location, signed_lt)?)?,
+                        self.append_select_value(
+                            self.append_field_eq_constant(funct3, 0b110)?,
+                            unsigned_lt,
+                            self.append_select_value(
+                                self.append_field_eq_constant(funct3, 0b111)?,
+                                self.append_op_with_result(bool::not(location, unsigned_lt)?)?,
+                                false_bool,
+                            )?,
+                        )?,
+                    )?,
+                )?,
+            )?,
+        )?;
+        let expected_store = self.append_select_value(
+            self.append_field_eq_constant(funct3, 0b010)?,
+            signed_lt,
+            self.append_select_value(
+                self.append_field_eq_constant(funct3, 0b011)?,
+                unsigned_lt,
+                false_bool,
+            )?,
+        )?;
+
+        Ok((
+            self.append_bool_to_field(expected_branch)?,
+            self.append_bool_to_field(expected_store)?,
+        ))
+    }
+
+    /// Compute the `(low, high)` outputs for the generic 16-bit logical shift tables.
+    pub fn append_logical_shift_16_bit_outputs<
+        const INPUT_IS_HIGH: bool,
+        const IS_RIGHT_SHIFT: bool,
+    >(
+        &self,
+        input: Value<'ctx, 'sco>,
+    ) -> Result<(Value<'ctx, 'sco>, Value<'ctx, 'sco>)> {
+        let location = self.unknown_location();
+        let word = self.append_lowest_bits_felt(input, 16)?;
+        let shift_amount = self.append_shifted_low_bits(input, 16, 5)?;
+        let reconstructed = if INPUT_IS_HIGH {
+            self.append_op_with_result(felt::shl(
+                location,
+                word,
+                self.get_felt_constant_from_start(16)?,
+            )?)?
+        } else {
+            word
+        };
+        let shifted = if IS_RIGHT_SHIFT {
+            self.append_op_with_result(felt::shr(location, reconstructed, shift_amount)?)?
+        } else {
+            self.append_op_with_result(felt::shl(location, word, shift_amount)?)?
+        };
+
+        Ok((
+            self.append_lowest_bits_felt(shifted, 16)?,
+            self.append_shifted_low_bits(shifted, 16, 16)?,
+        ))
+    }
+
+    /// Compute the `(low, high)` outputs for the `Sra16BitInputSignFill` table.
+    pub fn append_sra_16_bit_input_sign_fill_outputs(
+        &self,
+        input: Value<'ctx, 'sco>,
+    ) -> Result<(Value<'ctx, 'sco>, Value<'ctx, 'sco>)> {
+        let location = self.unknown_location();
+        let word = self.append_lowest_bits_felt(input, 16)?;
+        let shift_amount = self.append_shifted_low_bits(input, 16, 5)?;
+        let sign = self.append_field_is_nonzero(self.append_shifted_low_bits(word, 15, 1)?)?;
+        let apply_fill = self.append_op_with_result(bool::and(
+            location,
+            sign,
+            self.append_field_is_nonzero(shift_amount)?,
+        )?)?;
+        let (expected_low, expected_high) = self.append_u32_mask_from_shift_amount(shift_amount)?;
+
+        Ok((
+            self.append_select_value(
+                apply_fill,
+                expected_low,
+                self.get_felt_constant_from_start(0)?,
+            )?,
+            self.append_select_value(
+                apply_fill,
+                expected_high,
+                self.get_felt_constant_from_start(0)?,
+            )?,
+        ))
     }
 
     /// Append a multiplication by the given constant felt value using `felt.mul`.
@@ -939,8 +1293,17 @@ pub struct StructBuilder<'ctx, 'str, F: FieldInfo> {
     location: Option<Location<'ctx>>,
     /// Name of the struct.
     name: &'str str,
-    /// Inputs of the struct (excluding self in @constrain).
+    /// Inputs shared by both `@compute` and `@constrain` (excluding `self` in `@constrain`).
     inputs: Vec<Type<'ctx>>,
+    /// Additional compatibility arguments appended after the shared logical inputs.
+    ///
+    /// These values are duplicated boundary aliases of public struct members, not new semantic
+    /// inputs to the circuit. We thread them through both method signatures because some witness
+    /// SSA nodes still read the corresponding placeholder-backed value before `@compute` performs
+    /// the `struct.writem` that materializes the member. LLZK requires `@compute` and
+    /// `@constrain` to share the same argument list (modulo `self`), so the duplicate boundary
+    /// value has to be visible in both methods.
+    compatibility_inputs: Vec<Type<'ctx>>,
     /// List of members. Contains the name, type and whether is marked public or not.
     members: Vec<(String, Type<'ctx>, bool)>,
 }
@@ -953,6 +1316,7 @@ impl<'ctx, 'str, F: FieldInfo> StructBuilder<'ctx, 'str, F> {
             location: None,
             name,
             inputs: vec![],
+            compatibility_inputs: vec![],
             members: vec![],
         }
     }
@@ -960,6 +1324,16 @@ impl<'ctx, 'str, F: FieldInfo> StructBuilder<'ctx, 'str, F> {
     /// Adds an input to the list.
     pub fn with_input(&mut self, input: Type<'ctx>) -> &mut Self {
         self.inputs.push(input);
+        self
+    }
+
+    /// Adds an extra compatibility argument shared by `@compute` and `@constrain`.
+    ///
+    /// The caller is responsible for ensuring this argument is only a duplicated alias of an
+    /// existing public member. `@constrain` will tie it back to that member with equality
+    /// constraints, while `@compute` may read it before the member is written.
+    pub fn with_compatibility_input(&mut self, input: Type<'ctx>) -> &mut Self {
+        self.compatibility_inputs.push(input);
         self
     }
 
@@ -988,9 +1362,16 @@ impl<'ctx, 'str, F: FieldInfo> StructBuilder<'ctx, 'str, F> {
 
     /// Creates a struct using the build data.
     pub fn build(&self) -> Result<StructDefOp<'ctx>, LlzkError> {
-        let inputs = self
+        let constrain_inputs = self
             .inputs
             .iter()
+            .chain(self.compatibility_inputs.iter())
+            .map(|arg| (*arg, self.location()))
+            .collect::<Vec<_>>();
+        let compute_inputs = self
+            .inputs
+            .iter()
+            .chain(self.compatibility_inputs.iter())
             .map(|arg| (*arg, self.location()))
             .collect::<Vec<_>>();
 
@@ -1007,13 +1388,13 @@ impl<'ctx, 'str, F: FieldInfo> StructBuilder<'ctx, 'str, F> {
         let compute = as_op!(dialect::r#struct::helpers::compute_fn(
             self.location(),
             self.struct_type(),
-            &inputs,
+            &compute_inputs,
             None,
         ));
         let constrain = as_op!(dialect::r#struct::helpers::constrain_fn(
             self.location(),
             self.struct_type(),
-            &inputs,
+            &constrain_inputs,
             None,
         ));
 

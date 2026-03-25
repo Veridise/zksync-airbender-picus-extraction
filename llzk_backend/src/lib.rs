@@ -4,6 +4,7 @@ use prover::common_constants;
 use prover::cs::cs::circuit::Circuit as _;
 use prover::cs::cs::circuit::CircuitOutput;
 use prover::cs::cs::circuit::ShuffleRamMemQuery;
+use prover::cs::cs::circuit::ShuffleRamQueryType;
 use prover::cs::cs::cs_reference::BasicAssembly;
 use prover::cs::cs::placeholder::Placeholder;
 use prover::cs::cs::witness_placer::graph_description::RawExpression;
@@ -19,6 +20,7 @@ use std::path::Path;
 use crate::builder::ModuleEnv;
 use crate::codegen::CircuitBundle;
 use crate::codegen::EmitLlzkInModule as _;
+use crate::codegen::SpecialCsrPropertiesMetadata;
 use crate::config::LlzkStructLayout;
 use crate::config::OptLevel;
 use crate::output_format::OutputFormat;
@@ -32,11 +34,10 @@ pub mod config;
 mod constraints;
 mod field;
 mod lookups;
+pub mod output_format;
 #[cfg(test)]
 mod test_helpers;
 mod witness;
-// mod expr;
-pub mod output_format;
 
 /// Generate the `add_sub_lui_auipc_mop` circuit.
 pub fn gen_add_sub_lui_auipc_mop(
@@ -123,7 +124,175 @@ pub fn gen_load_store_subword_only(
         TRACE_LEN_LOG2 as usize,
         |cs| {
             subword_only_load_store_table_addition_fn(cs);
+            // TODO: Requires real bytecode, not placeholder bytecode
+            // let extra_tables = create_load_store_special_tables::<
+            //     _,
+            //     { common_constants::ROM_SECOND_WORD_BITS },
+            // >(bytecode);
+            // for (table_type, table) in extra_tables {
+            //     cs.add_table_with_content(table_type, table);
+            // }
             subword_only_load_store_circuit_with_preprocessed_bytecode::<
+                _,
+                _,
+                { common_constants::ROM_SECOND_WORD_BITS },
+            >(cs);
+        },
+        dump_ssa_form,
+    )
+}
+
+/// Generate the `load_store_word_only` circuit.
+pub fn gen_load_store_word_only(
+    output: &str,
+    format: OutputFormat,
+    opt_level: OptLevel,
+    layout: LlzkStructLayout,
+) -> Result<()> {
+    use load_store_word_only::dump_ssa_form;
+    use load_store_word_only::ROM_ADDRESS_SPACE_SECOND_WORD_BITS;
+    use load_store_word_only::TRACE_LEN_LOG2;
+    use prover::cs::machine::ops::unrolled::load_store_word_only::word_only_load_store_circuit_with_preprocessed_bytecode;
+    use prover::cs::machine::ops::unrolled::load_store_word_only::word_only_load_store_table_addition_fn;
+    let bytecode_size = (1 << (16 + ROM_ADDRESS_SPACE_SECOND_WORD_BITS)) / 4;
+
+    generate_circuit_command(
+        "load_store_word_only",
+        output,
+        format,
+        opt_level,
+        layout,
+        bytecode_size,
+        TRACE_LEN_LOG2 as usize,
+        |cs| {
+            word_only_load_store_table_addition_fn(cs);
+            // TODO: `RomRead` / `RomAddressSpaceSeparator` table contents depend on the concrete
+            // bytecode image. Do not synthesize those tables from the mock bytecode.
+            word_only_load_store_circuit_with_preprocessed_bytecode::<
+                _,
+                _,
+                { common_constants::ROM_SECOND_WORD_BITS },
+            >(cs);
+        },
+        dump_ssa_form,
+    )
+}
+
+/// Generate the signed `mul_div` circuit.
+pub fn gen_mul_div(
+    output: &str,
+    format: OutputFormat,
+    opt_level: OptLevel,
+    layout: LlzkStructLayout,
+) -> Result<()> {
+    use mul_div::dump_ssa_form;
+    use mul_div::ROM_ADDRESS_SPACE_SECOND_WORD_BITS;
+    use mul_div::TRACE_LEN_LOG2;
+    use prover::cs::machine::ops::unrolled::mul_div::mul_div_circuit_with_preprocessed_bytecode;
+    use prover::cs::machine::ops::unrolled::mul_div::mul_div_table_addition_fn;
+    let bytecode_size = (1 << (16 + ROM_ADDRESS_SPACE_SECOND_WORD_BITS)) / 4;
+
+    generate_circuit_command(
+        "mul_div",
+        output,
+        format,
+        opt_level,
+        layout,
+        bytecode_size,
+        TRACE_LEN_LOG2 as usize,
+        |cs| {
+            mul_div_table_addition_fn(cs);
+            // SUPPORT_SIGNED = true is the usage in the frontend
+            mul_div_circuit_with_preprocessed_bytecode::<_, _, true>(cs);
+        },
+        dump_ssa_form,
+    )
+}
+
+/// Generate the `shift_binary_csr` circuit.
+pub fn gen_shift_binary_csr(
+    output: &str,
+    format: OutputFormat,
+    opt_level: OptLevel,
+    layout: LlzkStructLayout,
+) -> Result<()> {
+    use prover::cs::machine::machine_configurations::create_csr_table_for_delegation;
+    use prover::cs::machine::ops::unrolled::shift_binary_csr::shift_binop_csrrw_circuit_with_preprocessed_bytecode;
+    use prover::cs::machine::ops::unrolled::shift_binary_csr::shift_binop_csrrw_table_addition_fn;
+    use prover::cs::tables::LookupWrapper;
+    use prover::cs::tables::TableType;
+    use shift_binary_csr::dump_ssa_form;
+    use shift_binary_csr::ALLOWED_DELEGATION_CSRS;
+    use shift_binary_csr::ROM_ADDRESS_SPACE_SECOND_WORD_BITS;
+    use shift_binary_csr::TRACE_LEN_LOG2;
+    let bytecode_size = (1 << (16 + ROM_ADDRESS_SPACE_SECOND_WORD_BITS)) / 4;
+
+    generate_circuit_command(
+        "shift_binary_csr",
+        output,
+        format,
+        opt_level,
+        layout,
+        bytecode_size,
+        TRACE_LEN_LOG2 as usize,
+        |cs| {
+            let csr_table = create_csr_table_for_delegation::<Mersenne31Field>(
+                true,
+                ALLOWED_DELEGATION_CSRS,
+                TableType::SpecialCSRProperties.to_table_id(),
+            );
+            shift_binop_csrrw_table_addition_fn(cs);
+            cs.add_table_with_content(
+                TableType::SpecialCSRProperties,
+                LookupWrapper::Dimensional3(csr_table),
+            );
+            shift_binop_csrrw_circuit_with_preprocessed_bytecode(cs);
+        },
+        dump_ssa_form,
+    )
+}
+
+/// Generate the `unified_reduced_machine` circuit.
+pub fn gen_unified_reduced_machine(
+    output: &str,
+    format: OutputFormat,
+    opt_level: OptLevel,
+    layout: LlzkStructLayout,
+) -> Result<()> {
+    use prover::cs::machine::machine_configurations::create_csr_table_for_delegation;
+    use prover::cs::machine::ops::unrolled::reduced_machine_ops::reduced_machine_circuit_with_preprocessed_bytecode;
+    use prover::cs::machine::ops::unrolled::reduced_machine_ops::reduced_machine_table_addition_fn;
+    use prover::cs::tables::LookupWrapper;
+    use prover::cs::tables::TableType;
+    use unified_reduced_machine::dump_ssa_form;
+    use unified_reduced_machine::ALLOWED_DELEGATION_CSRS;
+    use unified_reduced_machine::ROM_ADDRESS_SPACE_SECOND_WORD_BITS;
+    use unified_reduced_machine::TRACE_LEN_LOG2;
+    let bytecode_size = (1 << (16 + ROM_ADDRESS_SPACE_SECOND_WORD_BITS)) / 4;
+
+    generate_circuit_command(
+        "unified_reduced_machine",
+        output,
+        format,
+        opt_level,
+        layout,
+        bytecode_size,
+        TRACE_LEN_LOG2 as usize,
+        |cs| {
+            let csr_table = create_csr_table_for_delegation::<Mersenne31Field>(
+                true,
+                ALLOWED_DELEGATION_CSRS,
+                TableType::SpecialCSRProperties.to_table_id(),
+            );
+            reduced_machine_table_addition_fn(cs);
+            cs.add_table_with_content(
+                TableType::SpecialCSRProperties,
+                LookupWrapper::Dimensional3(csr_table),
+            );
+            // TODO: the reduced-machine ROM-backed setup tables depend on the actual bytecode
+            // image. Keep the family generic for now instead of materializing them from the mock
+            // bytecode used for LLZK extraction.
+            reduced_machine_circuit_with_preprocessed_bytecode::<
                 _,
                 _,
                 { common_constants::ROM_SECOND_WORD_BITS },
@@ -178,18 +347,15 @@ fn generate_circuit_command(
     // Placeholder ROM image used during LLZK extraction.
     //
     // The LLZK backend currently emits circuit-family IR rather than program-specific IR, so it
-    // does not receive a concrete bytecode image from the CLI. Some unrolled circuit helpers
-    // still require a fixed-size ROM slice during setup because they build bytecode-dependent
-    // lookup tables such as `AlignedRomRead`. We use an all-zeroes one because:
-    // - circuits that only care about ROM size use it only to satisfy their length checks; and
-    // - circuits with bytecode-backed lookup tables will call external functions as placeholders
-    //   for the real lookups, so they will still not use the all-zero image contents.
+    // does not receive a concrete bytecode image from the CLI. The zero-filled slice here is only
+    // for APIs that require a ROM-sized input to finish circuit construction or SSA extraction.
     let bytecode = vec![0u32; bytecode_size];
 
     synthesis_fn(&mut cs);
 
     let (circuit_output, _maybe_wit_placer) = cs.finalize();
     let substitutions = merge_llzk_placeholder_aliases(&circuit_output);
+    let special_csr_properties = SpecialCsrPropertiesMetadata::new(&circuit_output);
 
     // From this point we intentionally build two different artifacts from the same circuit:
     // - `compiled_artifact` is the column-layout view with constraint expressions over logical
@@ -216,6 +382,7 @@ fn generate_circuit_command(
             compiled_artifact.clone(),
             witness_ssa_fn(&bytecode),
             substitutions,
+            special_csr_properties,
         )),
         LlzkStructLayout::ConstrainOnly => None,
     };
@@ -286,9 +453,22 @@ fn merge_llzk_placeholder_aliases<F: prover::field::PrimeField>(
 ///   `reduced_machine_ops.rs`), the placeholders `ShuffleRamReadValue(0)`,
 ///   `ShuffleRamReadValue(1)`, and `ShuffleRamReadValue(2)` are each allocated first and then
 ///   written directly into `ShuffleRamMemQuery.read_value`.
+/// - Those same paths also allocate `ShuffleRamAddress(1)` and `ShuffleRamAddress(2)` first and
+///   then store the resulting registers directly in `ShuffleRamQueryType::RegisterOrRam.address`.
+///   LLZK now exposes those query addresses as ordinary inputs, so witness lowering can read the
+///   existing boundary value instead of issuing a second oracle call.
+/// - `ShuffleRamQueryType::RegisterOrRam` also stores a separate `is_register` discriminator. When
+///   that flag is a real circuit variable, it is exposed as an LLZK input and can safely alias
+///   `ShuffleRamIsRegisterAccess(i)`. We intentionally do not synthesize aliases for constant
+///   discriminators because there is no boundary variable to map them to.
 /// - In the unrolled load/store families, `WriteRegMemReadWitness` is assigned into the same
 ///   `rd_or_store_ram_access_query_read_value` limbs that are later added as shuffle-RAM query 2,
 ///   so aliasing it to query 2's `read_value` preserves the existing witness flow.
+/// - Those same families also route `WriteRegMemWriteValue` and `ShuffleRamWriteValue(2)` into
+///   query 2's `write_value`. LLZK already exposes those write values as public output members. The
+///   extra compatibility args do not replace those members; they duplicate the same boundary value
+///   so `@compute` can read it before the later `struct.writem` that materializes the member.
+///   `@constrain` then adds equality constraints tying the duplicate arg back to the public member.
 fn derive_shuffle_ram_placeholder_aliases(
     queries: &[ShuffleRamMemQuery],
 ) -> HashMap<(Placeholder, usize), Variable> {
@@ -310,9 +490,16 @@ fn derive_shuffle_ram_placeholder_aliases(
     // query 1 is the RS2 read slot (`SecondRegMem` / `ShuffleRamReadValue(1)`)
     if let Some(query) = queries.get(1) {
         insert_register_alias(&mut aliases, Placeholder::SecondRegMem, query.read_value);
+        insert_query_address_alias(&mut aliases, Placeholder::ShuffleRamAddress(1), query);
+        insert_query_is_register_alias(
+            &mut aliases,
+            Placeholder::ShuffleRamIsRegisterAccess(1),
+            query,
+        );
     }
     // query 2 is the destination prior-value slot (`WriteRdReadSetWitness`,
-    //   `WriteRegMemReadWitness`, and `ShuffleRamReadValue(2)`)
+    //   `WriteRegMemReadWitness`, `ShuffleRamReadValue(2)`, `ShuffleRamAddress(2)`, and
+    //   `ShuffleRamIsRegisterAccess(2)`)
     if let Some(query) = queries.get(2) {
         insert_register_alias(
             &mut aliases,
@@ -324,9 +511,50 @@ fn derive_shuffle_ram_placeholder_aliases(
             Placeholder::WriteRegMemReadWitness,
             query.read_value,
         );
+        insert_register_alias(
+            &mut aliases,
+            Placeholder::WriteRegMemWriteValue,
+            query.write_value,
+        );
+        insert_register_alias(
+            &mut aliases,
+            Placeholder::ShuffleRamWriteValue(2),
+            query.write_value,
+        );
+        insert_query_address_alias(&mut aliases, Placeholder::ShuffleRamAddress(2), query);
+        insert_query_is_register_alias(
+            &mut aliases,
+            Placeholder::ShuffleRamIsRegisterAccess(2),
+            query,
+        );
     }
 
     aliases
+}
+
+/// Insert both limbs of a `RegisterOrRam` query address if the query carries one.
+fn insert_query_address_alias(
+    aliases: &mut HashMap<(Placeholder, usize), Variable>,
+    placeholder: Placeholder,
+    query: &ShuffleRamMemQuery,
+) {
+    if let ShuffleRamQueryType::RegisterOrRam { address, .. } = query.query_type {
+        insert_register_alias(aliases, placeholder, address);
+    }
+}
+
+/// Insert the discriminator variable for a `RegisterOrRam` query when the source circuit stores
+/// it as a real boolean variable rather than a constant.
+fn insert_query_is_register_alias(
+    aliases: &mut HashMap<(Placeholder, usize), Variable>,
+    placeholder: Placeholder,
+    query: &ShuffleRamMemQuery,
+) {
+    if let ShuffleRamQueryType::RegisterOrRam { is_register, .. } = query.query_type {
+        if let Some(variable) = is_register.get_variable() {
+            insert_scalar_alias(aliases, placeholder, variable);
+        }
+    }
 }
 
 /// Insert both limbs of a register-valued placeholder alias.
@@ -338,6 +566,15 @@ fn insert_register_alias(
     for (subindex, variable) in register.into_iter().enumerate() {
         aliases.entry((placeholder, subindex)).or_insert(variable);
     }
+}
+
+/// Insert the single variable backing a scalar-valued placeholder alias.
+fn insert_scalar_alias(
+    aliases: &mut HashMap<(Placeholder, usize), Variable>,
+    placeholder: Placeholder,
+    variable: Variable,
+) {
+    aliases.entry((placeholder, 0)).or_insert(variable);
 }
 
 /// Write `res` to the specified `output` destination.
@@ -433,6 +670,24 @@ mod tests {
         }
     }
 
+    fn register_or_ram_query(
+        local_timestamp_in_cycle: usize,
+        read_value: [u64; 2],
+        write_value: [u64; 2],
+        address: [u64; 2],
+        is_register: prover::cs::types::Boolean,
+    ) -> ShuffleRamMemQuery {
+        ShuffleRamMemQuery {
+            query_type: ShuffleRamQueryType::RegisterOrRam {
+                is_register,
+                address: [Variable(address[0]), Variable(address[1])],
+            },
+            local_timestamp_in_cycle,
+            read_value: [Variable(read_value[0]), Variable(read_value[1])],
+            write_value: [Variable(write_value[0]), Variable(write_value[1])],
+        }
+    }
+
     #[test]
     fn shuffle_placeholder_aliases_cover_legacy_register_reads() {
         let aliases = derive_shuffle_ram_placeholder_aliases(&[
@@ -478,5 +733,122 @@ mod tests {
         );
         assert!(!aliases.contains_key(&(Placeholder::ShuffleRamReadValue(3), 0)));
         assert!(!aliases.contains_key(&(Placeholder::ShuffleRamReadValue(3), 1)));
+    }
+
+    #[test]
+    fn shuffle_placeholder_aliases_cover_supported_shuffle_writes() {
+        let aliases = derive_shuffle_ram_placeholder_aliases(&[
+            register_query(0, [10, 11]),
+            register_query(1, [20, 21]),
+            ShuffleRamMemQuery {
+                query_type: ShuffleRamQueryType::RegisterOnly {
+                    register_index: Variable(102),
+                },
+                local_timestamp_in_cycle: 2,
+                read_value: [Variable(30), Variable(31)],
+                write_value: [Variable(40), Variable(41)],
+            },
+        ]);
+
+        assert_eq!(
+            aliases[&(Placeholder::ShuffleRamWriteValue(2), 0)],
+            Variable(40)
+        );
+        assert_eq!(
+            aliases[&(Placeholder::WriteRegMemWriteValue, 1)],
+            Variable(41)
+        );
+    }
+
+    #[test]
+    fn shuffle_placeholder_aliases_cover_supported_shuffle_addresses() {
+        let aliases = derive_shuffle_ram_placeholder_aliases(&[
+            register_query(0, [10, 11]),
+            register_or_ram_query(
+                1,
+                [20, 21],
+                [20, 21],
+                [50, 51],
+                prover::cs::types::Boolean::Constant(true),
+            ),
+            register_or_ram_query(
+                2,
+                [30, 31],
+                [40, 41],
+                [60, 61],
+                prover::cs::types::Boolean::Constant(true),
+            ),
+        ]);
+
+        assert_eq!(
+            aliases[&(Placeholder::ShuffleRamAddress(1), 0)],
+            Variable(50)
+        );
+        assert_eq!(
+            aliases[&(Placeholder::ShuffleRamAddress(1), 1)],
+            Variable(51)
+        );
+        assert_eq!(
+            aliases[&(Placeholder::ShuffleRamAddress(2), 0)],
+            Variable(60)
+        );
+        assert_eq!(
+            aliases[&(Placeholder::ShuffleRamAddress(2), 1)],
+            Variable(61)
+        );
+    }
+
+    #[test]
+    fn shuffle_placeholder_aliases_cover_variable_is_register_discriminators() {
+        let aliases = derive_shuffle_ram_placeholder_aliases(&[
+            register_query(0, [10, 11]),
+            register_or_ram_query(
+                1,
+                [20, 21],
+                [20, 21],
+                [50, 51],
+                prover::cs::types::Boolean::Is(Variable(70)),
+            ),
+            register_or_ram_query(
+                2,
+                [30, 31],
+                [40, 41],
+                [60, 61],
+                prover::cs::types::Boolean::Is(Variable(71)),
+            ),
+        ]);
+
+        assert_eq!(
+            aliases[&(Placeholder::ShuffleRamIsRegisterAccess(1), 0)],
+            Variable(70)
+        );
+        assert_eq!(
+            aliases[&(Placeholder::ShuffleRamIsRegisterAccess(2), 0)],
+            Variable(71)
+        );
+    }
+
+    #[test]
+    fn shuffle_placeholder_aliases_skip_constant_is_register_discriminators() {
+        let aliases = derive_shuffle_ram_placeholder_aliases(&[
+            register_query(0, [10, 11]),
+            register_or_ram_query(
+                1,
+                [20, 21],
+                [20, 21],
+                [50, 51],
+                prover::cs::types::Boolean::Constant(true),
+            ),
+            register_or_ram_query(
+                2,
+                [30, 31],
+                [40, 41],
+                [60, 61],
+                prover::cs::types::Boolean::Constant(false),
+            ),
+        ]);
+
+        assert!(!aliases.contains_key(&(Placeholder::ShuffleRamIsRegisterAccess(1), 0)));
+        assert!(!aliases.contains_key(&(Placeholder::ShuffleRamIsRegisterAccess(2), 0)));
     }
 }
