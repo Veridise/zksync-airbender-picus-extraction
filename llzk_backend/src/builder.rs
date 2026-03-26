@@ -623,6 +623,16 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
         self.append_op_with_no_results(constrain::eq(location, lhs, rhs))
     }
 
+    /// Insert a `constrain.eq` at the builder's current semantic location.
+    #[inline]
+    pub fn append_constrain_eq_here(
+        &self,
+        lhs: Value<'ctx, 'sco>,
+        rhs: Value<'ctx, 'sco>,
+    ) -> Result<()> {
+        self.append_constrain_eq(self.current_location(), lhs, rhs)
+    }
+
     /// If not None, insert a `constrain.eq` operation to constrain `conditional => (lhs === rhs)`
     /// (implemented as `!conditional || (lhs === rhs)` since LLZK has no implication operation).
     /// Assumes `conditional` is a felt.type that is constrained to be in a boolean range.
@@ -650,6 +660,17 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
                 self.append_constrain_eq(location, implication, truth)
             }
         }
+    }
+
+    /// Insert a conditional `constrain.eq` at the builder's current semantic location.
+    #[inline]
+    pub fn append_conditional_constrain_eq_here(
+        &self,
+        conditional: Option<Value<'ctx, 'sco>>,
+        lhs: Value<'ctx, 'sco>,
+        rhs: Value<'ctx, 'sco>,
+    ) -> Result<()> {
+        self.append_conditional_constrain_eq(self.current_location(), conditional, lhs, rhs)
     }
 
     /// Compare `lhs` and `rhs` and return an `i1` predicate.
@@ -808,6 +829,16 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
         self.append_op_with_result(op)
     }
 
+    /// Append a struct member read using the builder's current semantic location.
+    pub fn append_member_read_here(
+        &self,
+        component: Value<'ctx, 'sco>,
+        result_type: Type<'ctx>,
+        member_name: &str,
+    ) -> Result<Value<'ctx, 'sco>> {
+        self.append_member_read(self.current_location(), component, result_type, member_name)
+    }
+
     /// Append a struct member write operation in the current function scope.
     pub fn append_member_write(
         &self,
@@ -834,6 +865,15 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
             arr_ref,
             indices,
         ))
+    }
+
+    /// Append an array read using the builder's current semantic location.
+    pub fn append_array_read_here(
+        &self,
+        arr_ref: Value<'ctx, 'sco>,
+        indices: &[Value<'ctx, 'sco>],
+    ) -> Result<Value<'ctx, 'sco>> {
+        self.append_array_read(self.current_location(), arr_ref, indices)
     }
 
     /// Append an array write operation in the current function scope.
@@ -989,6 +1029,12 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
         self.append_fold::<_>(location, felt::add, values)
     }
 
+    /// Perform addition using `felt.add` over all specified values at the current location.
+    #[inline]
+    pub fn append_sum_here(&self, values: &[Value<'ctx, 'sco>]) -> Result<Value<'ctx, 'sco>> {
+        self.append_sum(self.current_location(), values)
+    }
+
     /// Perform multiplication using `felt.mul` over all specified values.
     #[inline]
     pub fn append_product(
@@ -997,6 +1043,12 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
         values: &[Value<'ctx, 'sco>],
     ) -> Result<Value<'ctx, 'sco>> {
         self.append_fold::<_>(location, felt::mul, values)
+    }
+
+    /// Perform multiplication using `felt.mul` over all specified values at the current location.
+    #[inline]
+    pub fn append_product_here(&self, values: &[Value<'ctx, 'sco>]) -> Result<Value<'ctx, 'sco>> {
+        self.append_product(self.current_location(), values)
     }
 
     /// Emit a generic `arith.select`, which works for both LLZK felts and builtin integer types.
@@ -1448,6 +1500,15 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
         )?)
     }
 
+    /// Append a multiplication by the given constant felt value at the current location.
+    pub fn append_const_scaling_here(
+        &self,
+        const_coeff: u64,
+        val: Value<'ctx, 'sco>,
+    ) -> Result<Value<'ctx, 'sco>> {
+        self.append_const_scaling(self.current_location(), const_coeff, val)
+    }
+
     /// Create a vector of N `felt.type` nondets constrained such that:
     /// - They are all boolean
     /// - Only one of them is 1 (i.e., one bit hot)
@@ -1470,6 +1531,11 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
             self.get_felt_constant_from_start(1)?,
         ))?;
         Ok(bits)
+    }
+
+    /// Create a one-hot vector at the current semantic location.
+    pub fn append_one_hot_here(&self, bits: usize) -> Result<Vec<Value<'ctx, 'sco>>> {
+        self.append_one_hot(self.current_location(), bits)
     }
 
     /// Convert a one-hot bit vector into the original single value.
@@ -1501,6 +1567,14 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
             )
             .ok_or_else(|| anyhow!("must provide non-empty bits slice"))??;
         Ok(res)
+    }
+
+    /// Reconstruct a one-hot vector at the current semantic location.
+    pub fn append_one_hot_reconstruction_here(
+        &self,
+        bits: &[Value<'ctx, 'sco>],
+    ) -> Result<Value<'ctx, 'sco>> {
+        self.append_one_hot_reconstruction(self.current_location(), bits)
     }
 }
 

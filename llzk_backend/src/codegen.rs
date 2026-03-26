@@ -701,8 +701,7 @@ impl<F: FieldInfo> StructVars<F> {
         match index {
             None => builder.append_member_write(location, self_value, member_name, value),
             Some(index) => {
-                let register = builder.append_member_read(
-                    location,
+                let register = builder.append_member_read_here(
                     self_value,
                     builder.register_type(),
                     member_name,
@@ -728,7 +727,7 @@ impl<F: FieldInfo> StructVars<F> {
                     Some(index) => {
                         let indices =
                             &[builder.get_constant_from_start(builder.index_type(), *index)?];
-                        builder.append_array_read(builder.current_location(), arg_val, indices)?
+                        builder.append_array_read_here(arg_val, indices)?
                     }
                 };
                 Ok(Some(val))
@@ -751,7 +750,7 @@ impl<F: FieldInfo> StructVars<F> {
                     Some(index) => {
                         let indices =
                             &[builder.get_constant_from_start(builder.index_type(), *index)?];
-                        builder.append_array_read(builder.current_location(), arg_val, indices)?
+                        builder.append_array_read_here(arg_val, indices)?
                     }
                 };
                 Ok(Some(val))
@@ -786,38 +785,22 @@ impl<F: FieldInfo> StructVars<F> {
     ) -> Result<Option<Value<'ctx, 'sco>>> {
         match self.member_map.get(var) {
             None => Ok(None),
-            Some((member_name, index)) => {
-                let location = builder.current_location();
-                match index {
-                    None => {
-                        let member_ty = builder.felt_type();
-                        let member_val = builder.append_member_read(
-                            location,
-                            self_val,
-                            member_ty,
-                            member_name,
-                        )?;
-                        Ok(Some(member_val))
-                    }
-                    Some(index) => {
-                        let member_ty = builder.register_type();
-                        let member_val = builder.append_member_read(
-                            location,
-                            self_val,
-                            member_ty,
-                            member_name,
-                        )?;
-                        let indices =
-                            &[builder.get_constant_from_start(builder.index_type(), *index)?];
-                        let read_val = builder.append_array_read(
-                            builder.current_location(),
-                            member_val,
-                            indices,
-                        )?;
-                        Ok(Some(read_val))
-                    }
+            Some((member_name, index)) => match index {
+                None => {
+                    let member_ty = builder.felt_type();
+                    let member_val =
+                        builder.append_member_read_here(self_val, member_ty, member_name)?;
+                    Ok(Some(member_val))
                 }
-            }
+                Some(index) => {
+                    let member_ty = builder.register_type();
+                    let member_val =
+                        builder.append_member_read_here(self_val, member_ty, member_name)?;
+                    let indices = &[builder.get_constant_from_start(builder.index_type(), *index)?];
+                    let read_val = builder.append_array_read_here(member_val, indices)?;
+                    Ok(Some(read_val))
+                }
+            },
         }
     }
 

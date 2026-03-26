@@ -115,8 +115,8 @@ impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInConstrain<'ctx, 'sco, F> for (Con
                 builder.with_column_offset(term_idx, || term.emit_constrain(builder, vars))
             })
             .collect::<Result<Vec<Value<'_, '_>>>>()?;
-        let sum = builder.append_sum(builder.current_location(), &values)?;
-        builder.append_constrain_eq(builder.current_location(), sum, zero)
+        let sum = builder.append_sum_here(&values)?;
+        builder.append_constrain_eq_here(sum, zero)
     }
 }
 

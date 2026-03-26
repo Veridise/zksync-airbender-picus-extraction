@@ -284,7 +284,7 @@ fn combine_case_condition<'ctx, 'sco, F: FieldInfo>(
     let predicate = builder.append_bool_to_field(predicate)?;
     match conditional {
         Some(conditional) => Ok(Some(
-            builder.append_product(builder.current_location(), &[conditional, predicate])?,
+            builder.append_product_here(&[conditional, predicate])?,
         )),
         None => Ok(Some(predicate)),
     }
@@ -368,7 +368,7 @@ pub fn add_disjunctive_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     for flag in &flags {
         builder.append_boolean_constraint(*flag)?;
     }
-    let flag_sum = builder.append_sum(builder.current_location(), &flags)?;
+    let flag_sum = builder.append_sum_here(&flags)?;
     // flag_sum <= 1, meaning flag_sum must be boolean
     builder.append_boolean_constraint(flag_sum)?;
 
@@ -456,7 +456,7 @@ fn add_range_check_small_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
 
     builder.append_conditional_range_constraint(conditional, a, 8)?;
     builder.append_conditional_range_constraint(conditional, b, 8)?;
-    builder.append_conditional_constrain_eq(builder.current_location(), conditional, zero_pad, zero)
+    builder.append_conditional_constrain_eq_here(conditional, zero_pad, zero)
 }
 
 /// Translation for `U16GetSignAndHighByte`.
@@ -630,9 +630,9 @@ fn add_conditional_jmp_branch_slt_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
             builder.current_location(),
             &[
                 uf,
-                builder.append_const_scaling(builder.current_location(), 2, out_is_zero)?,
-                builder.append_const_scaling(builder.current_location(), 4, sign1)?,
-                builder.append_const_scaling(builder.current_location(), 8, sign2)?,
+                builder.append_const_scaling_here(2, out_is_zero)?,
+                builder.append_const_scaling_here(4, sign1)?,
+                builder.append_const_scaling_here(8, sign2)?,
             ],
         )?,
     )?;
@@ -656,7 +656,7 @@ fn add_conditional_jmp_branch_slt_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     // signed_lt = (sign1 * signs_different) + unsigned_lt * (1 - signs_different);
     let signed_lt = builder.append_op_with_result(felt::add(
         builder.current_location(),
-        builder.append_product(builder.current_location(), &[sign1, signs_different])?,
+        builder.append_product_here(&[sign1, signs_different])?,
         builder.append_product(
             builder.current_location(),
             &[
@@ -672,9 +672,8 @@ fn add_conditional_jmp_branch_slt_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     let eq = out_is_zero;
 
     // one-hot for funct3
-    let f3_one_hot = builder.append_one_hot(builder.current_location(), 8)?;
-    let f3_reconstructed =
-        builder.append_one_hot_reconstruction(builder.current_location(), &f3_one_hot)?;
+    let f3_one_hot = builder.append_one_hot_here(8)?;
+    let f3_reconstructed = builder.append_one_hot_reconstruction_here(&f3_one_hot)?;
     builder.append_conditional_constrain_eq(
         builder.current_location(),
         conditional,
@@ -703,16 +702,16 @@ fn add_conditional_jmp_branch_slt_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     let expected_flag = builder.append_sum(
         builder.current_location(),
         &[
-            builder.append_product(builder.current_location(), &[f3_one_hot[0], eq])?,
-            builder.append_product(builder.current_location(), &[f3_one_hot[1], one_minus(eq)?])?,
-            builder.append_product(builder.current_location(), &[f3_one_hot[2], signed_lt])?,
-            builder.append_product(builder.current_location(), &[f3_one_hot[3], unsigned_lt])?,
-            builder.append_product(builder.current_location(), &[f3_one_hot[4], signed_lt])?,
+            builder.append_product_here(&[f3_one_hot[0], eq])?,
+            builder.append_product_here(&[f3_one_hot[1], one_minus(eq)?])?,
+            builder.append_product_here(&[f3_one_hot[2], signed_lt])?,
+            builder.append_product_here(&[f3_one_hot[3], unsigned_lt])?,
+            builder.append_product_here(&[f3_one_hot[4], signed_lt])?,
             builder.append_product(
                 builder.current_location(),
                 &[f3_one_hot[5], one_minus(signed_lt)?],
             )?,
-            builder.append_product(builder.current_location(), &[f3_one_hot[6], unsigned_lt])?,
+            builder.append_product_here(&[f3_one_hot[6], unsigned_lt])?,
             builder.append_product(
                 builder.current_location(),
                 &[f3_one_hot[7], one_minus(unsigned_lt)?],
