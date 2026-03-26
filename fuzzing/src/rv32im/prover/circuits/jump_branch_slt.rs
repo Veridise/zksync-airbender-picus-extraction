@@ -11,6 +11,7 @@ use prover::fft::Twiddles;
 use prover::field::Field as _;
 use prover::field::Mersenne31Field;
 use prover::field::Mersenne31Quartic;
+use prover::merkle_trees::DefaultTreeConstructor;
 use prover::prover_stages::SetupPrecomputations;
 use prover::risc_v_simulator::machine_mode_only_unrolled::NonMemoryOpcodeTracingDataWithTimestamp;
 use prover::tests::unrolled::ensure_memory_trace_consistency;
@@ -40,7 +41,7 @@ use crate::rv32im::prover::NUM_CYCLES_PER_CHUNK;
 use crate::rv32im::prover::TRACE_LEN;
 use crate::rv32im::prover::TRACE_LEN_LOG2;
 use crate::rv32im::prover::TREE_CAP_SIZE;
-use crate::rv32im::vm::CountersT;
+use crate::rv32im::types::CountersT;
 
 impl Prover {
     pub fn prove_jump_branch_slt(
@@ -168,7 +169,7 @@ impl Prover {
             self.worker(),
         );
 
-        let (_, proof) = self.run_prover(
+        let (_, proof) = self.run_prover::<_, DefaultTreeConstructor, _>(
             &jump_branch_circuit,
             full_trace,
             &setup,

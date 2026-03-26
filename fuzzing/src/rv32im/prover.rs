@@ -1,120 +1,42 @@
-use std::alloc::Global;
-use std::collections::BTreeSet;
-use std::collections::HashMap;
-
-use prover::check_satisfied;
-use prover::common_constants::TimestampScalar;
-use prover::common_constants::ADD_SUB_LUI_AUIPC_MOP_CIRCUIT_FAMILY_IDX;
-use prover::common_constants::BIGINT_OPS_WITH_CONTROL_CSR_REGISTER;
-use prover::common_constants::BLAKE2S_DELEGATION_CSR_REGISTER;
 use prover::common_constants::INITIAL_TIMESTAMP;
-use prover::common_constants::JUMP_BRANCH_SLT_CIRCUIT_FAMILY_IDX;
-use prover::common_constants::KECCAK_SPECIAL5_CSR_REGISTER;
-use prover::common_constants::LOAD_STORE_SUBWORD_ONLY_CIRCUIT_FAMILY_IDX;
-use prover::common_constants::LOAD_STORE_WORD_ONLY_CIRCUIT_FAMILY_IDX;
-use prover::common_constants::MUL_DIV_CIRCUIT_FAMILY_IDX;
-use prover::common_constants::SHIFT_BINARY_CSR_CIRCUIT_FAMILY_IDX;
 use prover::common_constants::TIMESTAMP_STEP;
 use prover::common_constants::{self};
-use prover::cs::cs::circuit::Circuit as _;
-use prover::cs::cs::oracle::ExecutorFamilyDecoderData;
-use prover::cs::definitions::NUM_DELEGATION_ARGUMENT_KEY_PARTS;
-use prover::cs::definitions::NUM_MACHINE_STATE_LINEARIZATION_CHALLENGES;
-use prover::cs::definitions::NUM_MEM_ARGUMENT_KEY_PARTS;
-use prover::cs::delegation::blake2_round_with_extended_control::define_blake2_with_extended_control_delegation_circuit;
-use prover::cs::machine::machine_configurations::create_csr_table_for_delegation;
-use prover::cs::machine::ops::unrolled::compile_unrolled_circuit_state_transition;
-use prover::cs::machine::ops::unrolled::load_store::create_load_store_special_tables;
-use prover::cs::machine::ops::unrolled::load_store_subword_only::subword_only_load_store_circuit_with_preprocessed_bytecode;
-use prover::cs::machine::ops::unrolled::load_store_subword_only::subword_only_load_store_table_addition_fn;
-use prover::cs::machine::ops::unrolled::load_store_subword_only::subword_only_load_store_table_driver_fn;
-use prover::cs::machine::ops::unrolled::load_store_word_only::create_word_only_load_store_special_tables;
-use prover::cs::machine::ops::unrolled::load_store_word_only::word_only_load_store_circuit_with_preprocessed_bytecode;
-use prover::cs::machine::ops::unrolled::load_store_word_only::word_only_load_store_table_addition_fn;
-use prover::cs::machine::ops::unrolled::load_store_word_only::word_only_load_store_table_driver_fn;
-use prover::cs::machine::ops::unrolled::materialize_flattened_decoder_table;
-use prover::cs::machine::ops::unrolled::opcodes_for_full_machine_with_mem_word_access_specialization;
-use prover::cs::machine::ops::unrolled::opcodes_for_full_machine_with_unsigned_mul_div_only_with_mem_word_access_specialization;
-use prover::cs::machine::ops::unrolled::DecoderTableEntry;
-use prover::cs::machine::NON_DETERMINISM_CSR;
+use prover::cs::definitions::EXECUTOR_FAMILY_CIRCUIT_DECODER_TABLE_WIDTH;
 use prover::cs::one_row_compiler::CompiledCircuitArtifact;
-use prover::cs::one_row_compiler::OneRowCompiler;
-use prover::cs::tables::LookupWrapper;
 use prover::cs::tables::TableDriver;
-use prover::cs::tables::TableType;
-use prover::cs::utils::split_timestamp;
-use prover::definitions::produce_pc_into_permutation_accumulator_raw;
 use prover::definitions::AuxArgumentsBoundaryValues;
 use prover::definitions::ExternalChallenges;
-use prover::definitions::ExternalDelegationArgumentChallenges;
-use prover::definitions::ExternalMachineStateArgumentChallenges;
-use prover::definitions::ExternalMemoryArgumentChallenges;
-use prover::definitions::ExternalValues;
-use prover::evaluate_delegation_memory_witness;
-use prover::evaluate_witness;
-use prover::fft::materialize_powers_serial_starting_with_elem;
+use prover::fft::GoodAllocator;
 use prover::fft::LdePrecomputations;
 use prover::fft::Twiddles;
-use prover::field::Field as _;
 use prover::field::Mersenne31Complex;
 use prover::field::Mersenne31Field;
-use prover::field::Mersenne31Quartic;
-use prover::mem_utils::produce_register_contribution_into_memory_accumulator;
+use prover::field::PrimeField;
+use prover::field::TwoAdicField;
 use prover::merkle_trees::DefaultTreeConstructor;
+use prover::merkle_trees::MerkleTreeConstructor;
 use prover::prover_stages;
-use prover::prover_stages::prove;
 use prover::prover_stages::unrolled_prover::prove_configured_for_unrolled_circuits;
 use prover::prover_stages::unrolled_prover::UnrolledModeProof;
 use prover::prover_stages::ProverData;
 use prover::prover_stages::SetupPrecomputations;
-use prover::risc_v_simulator::machine_mode_only_unrolled::MemoryOpcodeTracingDataWithTimestamp;
-use prover::risc_v_simulator::machine_mode_only_unrolled::NonMemoryOpcodeTracingDataWithTimestamp;
-use prover::tests::blake2s_delegation_with_transpiler;
-use prover::tests::keccak_special5_delegation_with_transpiler;
-use prover::tests::unrolled::add_sub_lui_auipc_mod;
-use prover::tests::unrolled::ensure_memory_trace_consistency;
-use prover::tests::unrolled::jump_branch_slt;
-use prover::tests::unrolled::mul_div;
-use prover::tests::unrolled::mul_div_unsigned_only;
-use prover::tests::unrolled::parse_delegation_ram_accesses_from_full_trace;
-use prover::tests::unrolled::parse_shuffle_ram_accesses_from_full_trace;
-use prover::tests::unrolled::parse_state_permutation_elements_from_full_trace;
-use prover::tests::unrolled::shift_binop_csrrw;
-use prover::tests::unrolled::subword_load_store;
-use prover::tests::unrolled::word_load_store;
-use prover::tests::GpuComparisonArgs;
-use prover::tracers::oracles::transpiler_oracles::delegation::Blake2sDelegationOracle;
-use prover::tracers::oracles::transpiler_oracles::delegation::KeccakDelegationOracle;
-use prover::unrolled::evaluate_init_and_teardown_memory_witness;
-use prover::unrolled::evaluate_init_and_teardown_witness;
-use prover::unrolled::evaluate_memory_witness_for_executor_family;
-use prover::unrolled::evaluate_witness_for_executor_family;
-use prover::unrolled::MemoryCircuitOracle;
-use prover::unrolled::NonMemoryCircuitOracle;
 use prover::worker::Worker;
-use prover::ExecutorFamilyWitnessEvaluationAuxData;
-use prover::RamShuffleMemStateRecord;
-use prover::WitnessEvaluationData;
 use prover::WitnessEvaluationDataForExecutionFamily;
 use prover::DEFAULT_TRACE_PADDING_MULTIPLE;
-use riscv_transpiler::replayer::ReplayerRam;
-use riscv_transpiler::replayer::ReplayerVM;
-use riscv_transpiler::vm::Counters;
-use riscv_transpiler::vm::DelegationsAndFamiliesCounters;
+use riscv_transpiler::ir::preprocess_bytecode;
+use riscv_transpiler::ir::FullUnsignedMachineDecoderConfig;
 use riscv_transpiler::vm::RamWithRomRegion;
-use riscv_transpiler::vm::ReplayBuffer as _;
 use riscv_transpiler::vm::SimpleSnapshotter;
 use riscv_transpiler::vm::SimpleTape;
 use riscv_transpiler::vm::State;
-use riscv_transpiler::witness::BlakeDelegationDestinationHolder;
-use riscv_transpiler::witness::DelegationWitness;
-use riscv_transpiler::witness::KeccakDelegationDestinationHolder;
-use riscv_transpiler::witness::MemDestinationHolder;
-use riscv_transpiler::witness::NonMemDestinationHolder;
+use riscv_transpiler::vm::VM;
+use std::alloc::Allocator;
+use std::alloc::Global;
+use std::borrow::Cow;
 
 use crate::rv32im::prover::checks::validate_inits_and_teardowns;
 use crate::rv32im::prover::checks::validate_sets;
-use crate::rv32im::vm::CountersT;
+use crate::rv32im::types::CountersT;
 
 mod accumulators;
 mod checks;
@@ -131,7 +53,6 @@ use sets::WriteSets;
 
 const TRACE_LEN_LOG2: usize = 24;
 const NUM_CYCLES_PER_CHUNK: usize = (1 << TRACE_LEN_LOG2) - 1;
-const CHECK_MEMORY_PERMUTATION_ONLY: bool = false;
 
 const SUPPORT_SIGNED: bool = false;
 const INITIAL_PC: u32 = 0;
@@ -141,6 +62,71 @@ const NUM_DELEGATION_CYCLES: usize = (1 << 20) - 1;
 const LDE_FACTOR: usize = 2;
 const TREE_CAP_SIZE: usize = 32;
 const TRACE_LEN: usize = 1 << TRACE_LEN_LOG2;
+const DEFAULT_CYCLES: usize = 32_000_000;
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct AddSubLuiAuipcMopSmokeCache {
+    pub text_section: Vec<u32>,
+    pub opcode_trace:
+        Vec<prover::risc_v_simulator::machine_mode_only_unrolled::NonMemoryOpcodeTracingDataWithTimestamp>,
+}
+
+pub struct SmokeProofResult {
+    pub layout: CompiledCircuitArtifact<Mersenne31Field>,
+    pub proof: UnrolledModeProof,
+}
+
+type DecoderConfig = FullUnsignedMachineDecoderConfig;
+
+struct ProvingPayload<'c, 'a, A, T, const N: usize>
+where
+    A: Allocator + Clone + GoodAllocator,
+    T: MerkleTreeConstructor,
+{
+    compiled_circuit: &'c CompiledCircuitArtifact<Mersenne31Field>,
+    full_trace: WitnessEvaluationDataForExecutionFamily<N, A>,
+    setup: SetupPrecomputations<N, A, T>,
+    twiddles: Twiddles<Mersenne31Complex, A>,
+    lde_precomputations: LdePrecomputations<A>,
+    aux_boundary_data: &'a [AuxArgumentsBoundaryValues],
+}
+
+impl<'c, 'a, A, T, const N: usize> ProvingPayload<'c, 'a, A, T, N>
+where
+    A: Allocator + Clone + GoodAllocator,
+    T: MerkleTreeConstructor,
+{
+    pub fn new(
+        compiled_circuit: &'c CompiledCircuitArtifact<Mersenne31Field>,
+        full_trace: WitnessEvaluationDataForExecutionFamily<N, A>,
+        table_driver: &TableDriver<Mersenne31Field>,
+        decoder_table_data: &[[Mersenne31Field; EXECUTOR_FAMILY_CIRCUIT_DECODER_TABLE_WIDTH]],
+        aux_boundary_data: &'a [AuxArgumentsBoundaryValues],
+        worker: &Worker,
+    ) -> Self {
+        let twiddles: Twiddles<_, A> = Twiddles::new(TRACE_LEN, worker);
+        let lde_precomputations = LdePrecomputations::new(TRACE_LEN, LDE_FACTOR, &[0, 1], worker);
+        let setup = SetupPrecomputations::from_tables_and_trace_len_with_decoder_table(
+            table_driver,
+            decoder_table_data,
+            TRACE_LEN,
+            &compiled_circuit.setup_layout,
+            &twiddles,
+            &lde_precomputations,
+            LDE_FACTOR,
+            TREE_CAP_SIZE,
+            worker,
+        );
+        Self {
+            compiled_circuit,
+            full_trace,
+            setup,
+            twiddles,
+            lde_precomputations,
+            aux_boundary_data,
+        }
+    }
+}
 
 struct Prover {
     worker: Worker,
@@ -173,21 +159,36 @@ impl Prover {
         &self.default_security_config
     }
 
-    fn run_prover(
+    fn run_prover2<A, T, const N: usize>(
+        &self,
+        payload: ProvingPayload<'_, '_, A, T, N>,
+    ) -> (ProverData<N, A, T>, UnrolledModeProof)
+    where
+        T: MerkleTreeConstructor,
+        A: GoodAllocator + Clone,
+    {
+        self.run_prover_with_auxdata(
+            payload.compiled_circuit,
+            payload.full_trace,
+            &payload.setup,
+            &payload.twiddles,
+            &payload.lde_precomputations,
+            payload.aux_boundary_data,
+        )
+    }
+
+    fn run_prover<A, T, const N: usize>(
         &self,
         compiled_circuit: &CompiledCircuitArtifact<Mersenne31Field>,
-        full_trace: WitnessEvaluationDataForExecutionFamily<DEFAULT_TRACE_PADDING_MULTIPLE, Global>,
-        setup: &SetupPrecomputations<
-            DEFAULT_TRACE_PADDING_MULTIPLE,
-            Global,
-            DefaultTreeConstructor,
-        >,
-        twiddles: &Twiddles<Mersenne31Complex, Global>,
-        lde_precomputations: &LdePrecomputations<Global>,
-    ) -> (
-        ProverData<DEFAULT_TRACE_PADDING_MULTIPLE, Global, DefaultTreeConstructor>,
-        UnrolledModeProof,
-    ) {
+        full_trace: WitnessEvaluationDataForExecutionFamily<N, A>,
+        setup: &SetupPrecomputations<N, A, T>,
+        twiddles: &Twiddles<Mersenne31Complex, A>,
+        lde_precomputations: &LdePrecomputations<A>,
+    ) -> (ProverData<N, A, T>, UnrolledModeProof)
+    where
+        T: MerkleTreeConstructor,
+        A: GoodAllocator + Clone,
+    {
         self.run_prover_with_auxdata(
             compiled_circuit,
             full_trace,
@@ -198,30 +199,23 @@ impl Prover {
         )
     }
 
-    fn run_prover_with_auxdata(
+    fn run_prover_with_auxdata<A, T, const N: usize>(
         &self,
         compiled_circuit: &CompiledCircuitArtifact<Mersenne31Field>,
-        full_trace: WitnessEvaluationDataForExecutionFamily<DEFAULT_TRACE_PADDING_MULTIPLE, Global>,
-        setup: &SetupPrecomputations<
-            DEFAULT_TRACE_PADDING_MULTIPLE,
-            Global,
-            DefaultTreeConstructor,
-        >,
-        twiddles: &Twiddles<Mersenne31Complex, Global>,
-        lde_precomputations: &LdePrecomputations<Global>,
+        full_trace: WitnessEvaluationDataForExecutionFamily<N, A>,
+        setup: &SetupPrecomputations<N, A, T>,
+        twiddles: &Twiddles<Mersenne31Complex, A>,
+        lde_precomputations: &LdePrecomputations<A>,
         aux_boundary_data: &[AuxArgumentsBoundaryValues],
-    ) -> (
-        ProverData<DEFAULT_TRACE_PADDING_MULTIPLE, Global, DefaultTreeConstructor>,
-        UnrolledModeProof,
-    ) {
+    ) -> (ProverData<N, A, T>, UnrolledModeProof)
+    where
+        T: MerkleTreeConstructor,
+        A: GoodAllocator + Clone,
+    {
         println!("Trying to prove");
 
         let now = std::time::Instant::now();
-        let proof = prove_configured_for_unrolled_circuits::<
-            DEFAULT_TRACE_PADDING_MULTIPLE,
-            _,
-            DefaultTreeConstructor,
-        >(
+        let proof = prove_configured_for_unrolled_circuits::<N, A, T>(
             compiled_circuit,
             &vec![],
             self.external_challenges(),

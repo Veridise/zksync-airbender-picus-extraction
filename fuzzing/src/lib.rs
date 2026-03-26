@@ -3,6 +3,7 @@
 #![feature(generic_const_exprs)]
 
 mod afl;
+pub mod prover;
 pub mod rv32im;
 pub mod witgen;
 

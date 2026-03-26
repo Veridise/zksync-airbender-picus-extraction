@@ -35,7 +35,7 @@ use crate::rv32im::prover::Prover;
 use crate::rv32im::prover::LDE_FACTOR;
 use crate::rv32im::prover::NUM_DELEGATION_CYCLES;
 use crate::rv32im::prover::TREE_CAP_SIZE;
-use crate::rv32im::vm::CountersT;
+use crate::rv32im::types::CountersT;
 
 impl Prover {
     pub fn prove_keccak_delegation(

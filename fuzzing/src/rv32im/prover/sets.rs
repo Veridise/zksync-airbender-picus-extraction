@@ -6,7 +6,7 @@ use prover::RamShuffleMemStateRecord;
 use riscv_transpiler::vm::State;
 
 use crate::rv32im::prover::INITIAL_PC;
-use crate::rv32im::vm::CountersT;
+use crate::rv32im::types::CountersT;
 
 pub struct ReadSets {
     read_set: BTreeSet<(u32, TimestampScalar)>,

@@ -11,7 +11,7 @@ use unicorn_engine::RegisterRISCV;
 use unicorn_engine::Unicorn;
 
 use crate::rv32im::common::constants::TOTAL_MEM_SIZE;
-use crate::rv32im::vm::DecoderConfig;
+use crate::rv32im::types::DecoderConfig;
 use crate::rv32im::GuestResult;
 use crate::rv32im::DEFAULT_CYCLES;
 use crate::rv32im::ENTRYPOINT;

@@ -3,9 +3,11 @@ use clap::ValueEnum;
 pub use crate::rv32im::unicorn::run_on_unicorn;
 pub use crate::rv32im::vm::run_vm as run_on_airbender;
 
+mod binary;
 mod common;
 #[cfg(feature = "prover")]
-mod prover;
+pub(crate) mod prover;
+mod types;
 mod unicorn;
 mod vm;
 

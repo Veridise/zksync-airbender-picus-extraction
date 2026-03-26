@@ -54,7 +54,7 @@ use crate::rv32im::prover::NUM_DELEGATION_CYCLES;
 use crate::rv32im::prover::TRACE_LEN;
 use crate::rv32im::prover::TRACE_LEN_LOG2;
 use crate::rv32im::prover::TREE_CAP_SIZE;
-use crate::rv32im::vm::CountersT;
+use crate::rv32im::types::CountersT;
 
 impl Prover {
     pub fn prove_blake_delegation(

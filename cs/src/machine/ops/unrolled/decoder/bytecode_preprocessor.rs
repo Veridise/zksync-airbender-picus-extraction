@@ -1,5 +1,6 @@
 use super::*;
-use crate::definitions::{EXECUTOR_FAMILY_CIRCUIT_DECODER_TABLE_WIDTH, REGISTER_SIZE};
+use crate::definitions::EXECUTOR_FAMILY_CIRCUIT_DECODER_TABLE_WIDTH;
+use crate::definitions::REGISTER_SIZE;
 use field::PrimeField;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -50,6 +51,7 @@ pub fn preprocess_bytecode<F: PrimeField, A: GoodAllocator>(
 
     for (i, opcode) in binary.iter().copied().enumerate() {
         let pc = i * 4;
+        eprintln!("Preprocessing bytecode at PC = 0x{pc:08x}");
         let Ok(data) = family.define_decoder_subspace(opcode) else {
             continue;
         };
