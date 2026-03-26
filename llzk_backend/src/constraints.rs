@@ -110,10 +110,13 @@ impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInConstrain<'ctx, 'sco, F> for (Con
         let values = constraint
             .terms
             .iter()
-            .map(|term| term.emit_constrain(builder, vars))
+            .enumerate()
+            .map(|(term_idx, term)| {
+                builder.with_column_offset(term_idx, || term.emit_constrain(builder, vars))
+            })
             .collect::<Result<Vec<Value<'_, '_>>>>()?;
-        let sum = builder.append_sum(builder.unknown_location(), &values)?;
-        builder.append_constrain_eq(builder.unknown_location(), sum, zero)
+        let sum = builder.append_sum(builder.current_location(), &values)?;
+        builder.append_constrain_eq(builder.current_location(), sum, zero)
     }
 }
 
@@ -135,7 +138,7 @@ impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInConstrain<'ctx, 'sco, F> for Term
                     let coeff_opp_val =
                         builder.get_constant_from_start(builder.felt_type(), coeff_opp)?;
                     builder.append_op_with_result(felt::neg(
-                        builder.unknown_location(),
+                        builder.current_location(),
                         coeff_opp_val,
                     )?)?
                 })
@@ -151,7 +154,7 @@ impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInConstrain<'ctx, 'sco, F> for Term
                 let mut monomial = builder.get_constant_from_start(builder.felt_type(), 1)?;
                 for var in inner.iter().take(*degree) {
                     let var_val = vars.get_constrain_val(builder, var)?;
-                    let mul = felt::mul(builder.unknown_location(), monomial, var_val)?;
+                    let mul = felt::mul(builder.current_location(), monomial, var_val)?;
                     monomial = builder.append_op_with_result(mul)?;
                 }
 
@@ -161,21 +164,21 @@ impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInConstrain<'ctx, 'sco, F> for Term
                     } else {
                         let coeff_val =
                             builder.get_constant_from_start(builder.felt_type(), coeff)?;
-                        let mul = felt::mul(builder.unknown_location(), coeff_val, monomial)?;
+                        let mul = felt::mul(builder.current_location(), coeff_val, monomial)?;
                         builder.append_op_with_result(mul)?
                     }
                 } else if coeff_opp == 1 {
                     builder
-                        .append_op_with_result(felt::neg(builder.unknown_location(), monomial)?)?
+                        .append_op_with_result(felt::neg(builder.current_location(), monomial)?)?
                 } else {
                     let coeff_opp_val =
                         builder.get_constant_from_start(builder.felt_type(), coeff_opp)?;
                     let mul = builder.append_op_with_result(felt::mul(
-                        builder.unknown_location(),
+                        builder.current_location(),
                         coeff_opp_val,
                         monomial,
                     )?)?;
-                    builder.append_op_with_result(felt::neg(builder.unknown_location(), mul)?)?
+                    builder.append_op_with_result(felt::neg(builder.current_location(), mul)?)?
                 })
             }
         }
@@ -202,18 +205,23 @@ impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInConstrain<'ctx, 'sco, F> for Look
                 )?;
                 linear_terms
                     .iter()
-                    .map(|(coeff, var)| {
-                        let coeff_val = builder
-                            .get_constant_from_start(builder.felt_type(), coeff.as_u64_reduced())?;
-                        builder.append_op_with_result(felt::mul(
-                            builder.unknown_location(),
-                            coeff_val,
-                            vars.get_constrain_val(builder, var)?,
-                        )?)
+                    .enumerate()
+                    .map(|(term_idx, (coeff, var))| {
+                        builder.with_column_offset(term_idx, || {
+                            let coeff_val = builder.get_constant_from_start(
+                                builder.felt_type(),
+                                coeff.as_u64_reduced(),
+                            )?;
+                            builder.append_op_with_result(felt::mul(
+                                builder.current_location(),
+                                coeff_val,
+                                vars.get_constrain_val(builder, var)?,
+                            )?)
+                        })
                     })
                     .try_fold(init, |sum, term_val| {
                         builder.append_op_with_result(felt::add(
-                            builder.unknown_location(),
+                            builder.current_location(),
                             sum,
                             term_val?,
                         )?)
@@ -265,7 +273,7 @@ impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInConstrain<'ctx, 'sco, F> for Bool
         match self {
             Boolean::Is(variable) => vars.get_constrain_val(builder, variable),
             Boolean::Not(variable) => builder.append_op_with_result(felt::sub(
-                builder.unknown_location(),
+                builder.current_location(),
                 builder.get_felt_constant_from_start(1)?,
                 vars.get_constrain_val(builder, variable)?,
             )?),
@@ -282,9 +290,11 @@ mod tests {
 
     use super::*;
     use crate::builder::OpsBuilder;
+    use crate::builder::SemanticLocation;
     use crate::codegen::StructVars;
     use crate::test_helpers::assert_full_ir_eq;
     use crate::test_helpers::emit_test_constrain_ir;
+    use crate::test_helpers::emit_test_constrain_ir_with_debug_info;
 
     /// Convert `value` to a field element in [`Mersenne31Field`].
     fn field(value: u64) -> Mersenne31Field {
@@ -436,5 +446,26 @@ mod tests {
                 query.emit_constrain(ops, vars)
             },
         );
+    }
+
+    #[test]
+    fn constrain_debug_locations_use_semantic_virtual_paths() {
+        let inputs = [Variable(0)];
+        let ir = emit_test_constrain_ir_with_debug_info(
+            "constraint_debug_locations",
+            &inputs,
+            &[],
+            |ops, vars| {
+                ops.with_semantic_location(SemanticLocation::constrain_constraint(1), || {
+                    let constraint = Constraint {
+                        terms: vec![Term::from((field(1), inputs[0])), Term::Constant(field(7))],
+                    };
+                    (constraint, false).emit_constrain(ops, vars)
+                })
+            },
+        );
+
+        assert!(ir.contains("llzk://constrain/constraints\":1:0"));
+        assert!(ir.contains("llzk://constrain/constraints\":1:1"));
     }
 }

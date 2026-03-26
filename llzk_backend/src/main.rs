@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use clap::Subcommand;
 use clap::ValueEnum;
+use llzk_backend::config::DebugLocationStyle;
 use llzk_backend::config::LlzkStructLayout;
 use llzk_backend::config::OptLevel;
 use llzk_backend::gen_add_sub_lui_auipc_mop;
@@ -26,7 +27,7 @@ enum Circuits {
 
 type CircuitFnTuple = (
     Circuits,
-    fn(&str, OutputFormat, OptLevel, LlzkStructLayout) -> Result<()>,
+    fn(&str, OutputFormat, OptLevel, LlzkStructLayout, DebugLocationStyle) -> Result<()>,
 );
 const CIRCUITS: &[CircuitFnTuple] = &[
     (Circuits::AddSubLuiAuipcMop, gen_add_sub_lui_auipc_mop),
@@ -60,6 +61,8 @@ enum Commands {
         opt_level: OptLevel,
         #[arg(long, default_value_t = LlzkStructLayout::ComputeConstrain)]
         layout: LlzkStructLayout,
+        #[arg(long, default_value_t = DebugLocationStyle::FileLineCol)]
+        debug_location_style: DebugLocationStyle,
     },
 }
 
@@ -81,12 +84,17 @@ fn main() -> Result<()> {
             format,
             opt_level,
             layout,
+            debug_location_style,
         } => {
             CIRCUITS
                 .iter()
                 .find_map(|(name, handler)| (name == circuit).then_some(handler))
                 .expect("circuit without a handler function")(
-                output, *format, *opt_level, *layout,
+                output,
+                *format,
+                *opt_level,
+                *layout,
+                *debug_location_style,
             )?;
         }
     }

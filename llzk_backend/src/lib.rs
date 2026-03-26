@@ -1,5 +1,7 @@
 use anyhow::Result;
 use llzk::prelude::*;
+use melior::ir::operation::OperationLike;
+use melior::ir::operation::OperationPrintingFlags;
 use prover::common_constants;
 use prover::cs::cs::circuit::Circuit as _;
 use prover::cs::cs::circuit::CircuitOutput;
@@ -21,6 +23,7 @@ use crate::builder::ModuleEnv;
 use crate::codegen::CircuitBundle;
 use crate::codegen::EmitLlzkInModule as _;
 use crate::codegen::SpecialCsrPropertiesMetadata;
+use crate::config::DebugLocationStyle;
 use crate::config::LlzkStructLayout;
 use crate::config::OptLevel;
 use crate::output_format::OutputFormat;
@@ -45,6 +48,7 @@ pub fn gen_add_sub_lui_auipc_mop(
     format: OutputFormat,
     opt_level: OptLevel,
     layout: LlzkStructLayout,
+    debug_location_style: DebugLocationStyle,
 ) -> Result<()> {
     use add_sub_lui_auipc_mop::dump_ssa_form;
     use add_sub_lui_auipc_mop::ROM_ADDRESS_SPACE_SECOND_WORD_BITS;
@@ -59,6 +63,7 @@ pub fn gen_add_sub_lui_auipc_mop(
         format,
         opt_level,
         layout,
+        debug_location_style,
         bytecode_size,
         TRACE_LEN_LOG2 as usize,
         |cs| {
@@ -76,6 +81,7 @@ pub fn gen_jump_branch_slt(
     format: OutputFormat,
     opt_level: OptLevel,
     layout: LlzkStructLayout,
+    debug_location_style: DebugLocationStyle,
 ) -> Result<()> {
     use jump_branch_slt::dump_ssa_form;
     use jump_branch_slt::ROM_ADDRESS_SPACE_SECOND_WORD_BITS;
@@ -90,6 +96,7 @@ pub fn gen_jump_branch_slt(
         format,
         opt_level,
         layout,
+        debug_location_style,
         bytecode_size,
         TRACE_LEN_LOG2 as usize,
         |cs| {
@@ -106,6 +113,7 @@ pub fn gen_load_store_subword_only(
     format: OutputFormat,
     opt_level: OptLevel,
     layout: LlzkStructLayout,
+    debug_location_style: DebugLocationStyle,
 ) -> Result<()> {
     use load_store_subword_only::dump_ssa_form;
     use load_store_subword_only::ROM_ADDRESS_SPACE_SECOND_WORD_BITS;
@@ -120,6 +128,7 @@ pub fn gen_load_store_subword_only(
         format,
         opt_level,
         layout,
+        debug_location_style,
         bytecode_size,
         TRACE_LEN_LOG2 as usize,
         |cs| {
@@ -148,6 +157,7 @@ pub fn gen_load_store_word_only(
     format: OutputFormat,
     opt_level: OptLevel,
     layout: LlzkStructLayout,
+    debug_location_style: DebugLocationStyle,
 ) -> Result<()> {
     use load_store_word_only::dump_ssa_form;
     use load_store_word_only::ROM_ADDRESS_SPACE_SECOND_WORD_BITS;
@@ -162,6 +172,7 @@ pub fn gen_load_store_word_only(
         format,
         opt_level,
         layout,
+        debug_location_style,
         bytecode_size,
         TRACE_LEN_LOG2 as usize,
         |cs| {
@@ -184,6 +195,7 @@ pub fn gen_mul_div(
     format: OutputFormat,
     opt_level: OptLevel,
     layout: LlzkStructLayout,
+    debug_location_style: DebugLocationStyle,
 ) -> Result<()> {
     use mul_div::dump_ssa_form;
     use mul_div::ROM_ADDRESS_SPACE_SECOND_WORD_BITS;
@@ -198,6 +210,7 @@ pub fn gen_mul_div(
         format,
         opt_level,
         layout,
+        debug_location_style,
         bytecode_size,
         TRACE_LEN_LOG2 as usize,
         |cs| {
@@ -215,6 +228,7 @@ pub fn gen_shift_binary_csr(
     format: OutputFormat,
     opt_level: OptLevel,
     layout: LlzkStructLayout,
+    debug_location_style: DebugLocationStyle,
 ) -> Result<()> {
     use prover::cs::machine::machine_configurations::create_csr_table_for_delegation;
     use prover::cs::machine::ops::unrolled::shift_binary_csr::shift_binop_csrrw_circuit_with_preprocessed_bytecode;
@@ -233,6 +247,7 @@ pub fn gen_shift_binary_csr(
         format,
         opt_level,
         layout,
+        debug_location_style,
         bytecode_size,
         TRACE_LEN_LOG2 as usize,
         |cs| {
@@ -258,6 +273,7 @@ pub fn gen_unified_reduced_machine(
     format: OutputFormat,
     opt_level: OptLevel,
     layout: LlzkStructLayout,
+    debug_location_style: DebugLocationStyle,
 ) -> Result<()> {
     use prover::cs::machine::machine_configurations::create_csr_table_for_delegation;
     use prover::cs::machine::ops::unrolled::reduced_machine_ops::reduced_machine_circuit_with_preprocessed_bytecode;
@@ -276,6 +292,7 @@ pub fn gen_unified_reduced_machine(
         format,
         opt_level,
         layout,
+        debug_location_style,
         bytecode_size,
         TRACE_LEN_LOG2 as usize,
         |cs| {
@@ -322,7 +339,15 @@ impl<'ctx> GenCircuitResult<'ctx> {
     /// Write the result to the given file.
     pub fn dump<F: Write>(&self, file: &mut F) -> Result<()> {
         match self {
-            GenCircuitResult::Mlir(module) => write!(file, "{}", module.as_operation())?,
+            GenCircuitResult::Mlir(module) => {
+                // pretty_form is not parsable by llzk-opt
+                let flags = OperationPrintingFlags::new().enable_debug_info(true, false);
+                write!(
+                    file,
+                    "{}",
+                    module.as_operation().to_string_with_flags(flags)?
+                )?
+            }
             GenCircuitResult::Pcl(picus_program) => write!(file, "{}", picus_program)?,
         }
         Ok(())
@@ -338,6 +363,7 @@ fn generate_circuit_command(
     format: OutputFormat,
     opt_level: OptLevel,
     layout: LlzkStructLayout,
+    debug_location_style: DebugLocationStyle,
     bytecode_size: usize,
     trace_len_log2: usize,
     synthesis_fn: impl Fn(&mut BasicAssembly<Mersenne31Field>),
@@ -389,8 +415,9 @@ fn generate_circuit_command(
 
     // Generate an empty LLZK module
     let ctx = LlzkContext::new();
-    let mut module = llzk_module(Location::unknown(&ctx));
-    let env: ModuleEnv<'_, Mersenne31Field> = ModuleEnv::new(&ctx, &module);
+    let module_location = format!("llzk://layout/module/{name}");
+    let mut module = llzk_module(Location::new(&ctx, &module_location, 0, 0));
+    let env: ModuleEnv<'_, Mersenne31Field> = ModuleEnv::new(&ctx, &module, debug_location_style);
 
     // Add the circuit output to it.
     let circuit_bundle = CircuitBundle::new(name, layout, circuit_output, witness)?;

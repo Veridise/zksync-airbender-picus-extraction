@@ -5,6 +5,8 @@ use std::env;
 
 use anyhow::Result;
 use llzk::prelude::*;
+use melior::ir::operation::OperationLike;
+use melior::ir::operation::OperationPrintingFlags;
 use prover::cs::definitions::Variable;
 use prover::field::Mersenne31Field;
 
@@ -13,6 +15,7 @@ use crate::builder::OpsBuilder;
 use crate::builder::StructBuilder;
 use crate::codegen::SpecialCsrPropertiesMetadata;
 use crate::codegen::StructVars;
+use crate::config::DebugLocationStyle;
 use crate::constraints::AddConstraints;
 
 /// Normalize textual IR by trimming trailing whitespace at the end of each line.
@@ -71,7 +74,7 @@ pub(crate) fn emit_test_constrain_ir_with_special_csr_properties(
 ) -> String {
     let ctx = LlzkContext::new();
     let module = llzk_module(Location::unknown(&ctx));
-    let env = ModuleEnv::<Mersenne31Field>::new(&ctx, &module);
+    let env = ModuleEnv::<Mersenne31Field>::new(&ctx, &module, DebugLocationStyle::Named);
 
     let mut struct_builder = StructBuilder::new(&env, struct_name);
     for _ in input_vars {
@@ -103,4 +106,51 @@ pub(crate) fn emit_test_constrain_ir_with_special_csr_properties(
     verify_operation_with_diags(&module.as_operation()).unwrap();
 
     format!("{}", module.as_operation())
+}
+
+/// Emit a synthetic `@constrain` body for unit tests and serialize it with MLIR debug info
+/// enabled so semantic locations appear in the textual IR.
+pub(crate) fn emit_test_constrain_ir_with_debug_info(
+    struct_name: &str,
+    input_vars: &[Variable],
+    member_vars: &[(Variable, &str)],
+    emit: impl FnOnce(&OpsBuilder<'_, '_, Mersenne31Field>, &StructVars<Mersenne31Field>) -> Result<()>,
+) -> String {
+    let ctx = LlzkContext::new();
+    let module = llzk_module(Location::unknown(&ctx));
+    let env = ModuleEnv::<Mersenne31Field>::new(&ctx, &module, DebugLocationStyle::Named);
+
+    let mut struct_builder = StructBuilder::new(&env, struct_name);
+    for _ in input_vars {
+        struct_builder.with_input(env.felt_type());
+    }
+    for (_, name) in member_vars {
+        struct_builder.with_member((*name).to_string(), env.felt_type(), false);
+    }
+
+    let arg_map = input_vars
+        .iter()
+        .enumerate()
+        .map(|(idx, var)| (*var, (idx, None)))
+        .collect::<HashMap<_, _>>();
+    let member_map = member_vars
+        .iter()
+        .map(|(var, name)| (*var, ((*name).to_string(), None)))
+        .collect::<HashMap<_, _>>();
+    let vars = StructVars::from_test_maps_with_special_csr_properties(member_map, arg_map, None);
+
+    let struct_op = struct_builder.build_in_module().unwrap();
+    struct_op
+        .add_constraints(&env, |ops| emit(ops, &vars))
+        .unwrap();
+    verify_operation_with_diags(&module.as_operation()).unwrap();
+
+    module
+        .as_operation()
+        .to_string_with_flags(OperationPrintingFlags::new().enable_debug_info(true, false))
+        .map(|ir| {
+            maybe_dump_test_ir(struct_name, &ir);
+            ir
+        })
+        .unwrap()
 }

@@ -5,6 +5,7 @@
 //! - An operations builder meant for creating ops inside a function.
 //! - A struct builder.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
@@ -26,22 +27,144 @@ use melior::ir::Identifier;
 use prover::cs::definitions::REGISTER_SIZE;
 
 use crate::codegen::SpecialCsrPropertiesMetadata;
+use crate::config::DebugLocationStyle;
 use crate::field::FieldInfo;
+
+/// Synthetic semantic debug location used to annotate emitted LLZK IR even when the source
+/// circuit does not carry real file spans.
+///
+/// The filename identifies the lowering subsystem, while the line/column pair encodes stable
+/// zero-based indices inside that subsystem. For some location families, the filename also carries
+/// a descriptive hook kind (for example `llzk://compute/runtime/oracle_u32`). These locations are
+/// meant for analyzer correlation, not source navigation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticLocation {
+    path: Cow<'static, str>,
+    line: usize,
+    column: usize,
+}
+
+impl SemanticLocation {
+    /// Create a semantic location from its virtual path and zero-based line/column coordinates.
+    pub const fn new(path: &'static str, line: usize, column: usize) -> Self {
+        Self {
+            path: Cow::Borrowed(path),
+            line,
+            column,
+        }
+    }
+
+    /// Create a semantic location whose virtual path is derived dynamically.
+    pub fn new_owned(path: String, line: usize, column: usize) -> Self {
+        Self {
+            path: Cow::Owned(path),
+            line,
+            column,
+        }
+    }
+
+    /// Location family for boolean constraints synthesized from declared boolean variables.
+    pub fn constrain_boolean(index: usize) -> Self {
+        Self::new("llzk://constrain/booleans", index, 0)
+    }
+
+    /// Location family for explicit range checks.
+    pub fn constrain_range_check(index: usize) -> Self {
+        Self::new("llzk://constrain/range_checks", index, 0)
+    }
+
+    /// Location family for top-level lookup constraints.
+    pub fn constrain_lookup(index: usize) -> Self {
+        Self::new("llzk://constrain/lookups", index, 0)
+    }
+
+    /// Location family for top-level algebraic constraints.
+    pub fn constrain_constraint(index: usize) -> Self {
+        Self::new("llzk://constrain/constraints", index, 0)
+    }
+
+    /// Location family for top-level witness SSA expressions lowered into `@compute`.
+    pub fn compute_ssa(index: usize) -> Self {
+        Self::new("llzk://compute/ssa", index, 0)
+    }
+
+    /// Location family for runtime hooks used by one witness SSA expression.
+    ///
+    /// `path` should identify the concrete hook kind (for example
+    /// `llzk://compute/runtime/oracle_u32`). The line encodes the zero-based SSA expression
+    /// index, while the column remains available for any future substructure within that hook.
+    pub const fn compute_runtime(path: &'static str, index: usize) -> Self {
+        Self::new(path, index, 0)
+    }
+
+    /// Location for the top-level LLZK module.
+    pub fn layout_module(name: &str) -> Self {
+        Self::new_owned(format!("llzk://layout/module/{name}"), 0, 0)
+    }
+
+    /// Location for a generated struct definition.
+    pub fn layout_struct(name: &str) -> Self {
+        Self::new_owned(format!("llzk://layout/struct/{name}"), 0, 0)
+    }
+
+    /// Location for a generated method on a struct definition.
+    pub fn layout_function(struct_name: &str, function_name: &str) -> Self {
+        Self::new_owned(
+            format!("llzk://layout/function/{struct_name}/{function_name}"),
+            0,
+            0,
+        )
+    }
+
+    /// Child location family for a generated function argument label.
+    pub fn layout_argument() -> Self {
+        Self::new("llzk://layout/argument", 0, 0)
+    }
+
+    /// Plain file/line/column location family for a generated function argument label.
+    pub fn layout_argument_label(label: &str) -> Self {
+        Self::new_owned(format!("llzk://layout/argument/{label}"), 0, 0)
+    }
+
+    /// Child location family for a generated struct member label.
+    pub fn layout_member() -> Self {
+        Self::new("llzk://layout/member", 0, 0)
+    }
+
+    /// Plain file/line/column location family for a generated struct member label.
+    pub fn layout_member_label(label: &str) -> Self {
+        Self::new_owned(format!("llzk://layout/member/{label}"), 0, 0)
+    }
+
+    /// Return a sibling location at a later zero-based column within the same semantic line.
+    pub fn with_column_offset(self, offset: usize) -> Self {
+        Self {
+            column: self.column + offset,
+            ..self
+        }
+    }
+}
 
 /// Module-scoped helper with convenience factory methods and access to the root LLZK module.
 pub struct ModuleEnv<'ctx, F: FieldInfo> {
     context: &'ctx Context,
     /// The root LLZK module.
     module: &'ctx Module<'ctx>,
+    debug_location_style: DebugLocationStyle,
     _field: core::marker::PhantomData<F>,
 }
 
 impl<'ctx, F: FieldInfo> ModuleEnv<'ctx, F> {
     /// Creates a new module helper.
-    pub fn new(context: &'ctx Context, module: &'ctx Module<'ctx>) -> Self {
+    pub fn new(
+        context: &'ctx Context,
+        module: &'ctx Module<'ctx>,
+        debug_location_style: DebugLocationStyle,
+    ) -> Self {
         Self {
             context,
             module,
+            debug_location_style,
             _field: PhantomData,
         }
     }
@@ -59,6 +182,35 @@ impl<'ctx, F: FieldInfo> ModuleEnv<'ctx, F> {
     /// Returns the unknown location.
     pub fn unknown_location(&self) -> Location<'ctx> {
         Location::unknown(self.context)
+    }
+
+    /// Convert a synthetic semantic location into an MLIR file/line/column location.
+    pub fn semantic_location(&self, location: SemanticLocation) -> Location<'ctx> {
+        Location::new(
+            self.context,
+            location.path.as_ref(),
+            location.line,
+            location.column,
+        )
+    }
+
+    /// Wrap a semantic child location in a descriptive MLIR `NameLoc`.
+    pub fn semantic_name_location(&self, name: &str, child: SemanticLocation) -> Location<'ctx> {
+        Location::name(self.context, name, self.semantic_location(child))
+    }
+
+    /// Emit either a descriptive `NameLoc` or a plain file/line/column location, depending on the
+    /// configured debug-location style.
+    pub fn semantic_labeled_location(
+        &self,
+        name: &str,
+        named_child: SemanticLocation,
+        plain_location: SemanticLocation,
+    ) -> Location<'ctx> {
+        match self.debug_location_style {
+            DebugLocationStyle::Named => self.semantic_name_location(name, named_child),
+            DebugLocationStyle::FileLineCol => self.semantic_location(plain_location),
+        }
     }
 
     /// Creates a `!felt.type`.
@@ -128,8 +280,9 @@ impl<'ctx, F: FieldInfo> ModuleEnv<'ctx, F> {
             Identifier::new(self.context, "sym_visibility"),
             StringAttribute::new(self.context, "private").into(),
         )];
+        let location = Location::new(self.context, &format!("llzk://layout/extern/{name}"), 0, 0);
         let func = dialect::function::def(
-            self.unknown_location(),
+            location,
             name,
             FunctionType::new(self.context, inputs, results),
             &visibility,
@@ -229,6 +382,9 @@ pub struct OpsBuilder<'ctx: 'sco, 'sco, F: FieldInfo> {
     /// Cache of constant op values of specified type at the beginning of the
     /// function scope. Using a BTreeMap since [Type] is not hashable.
     const_vals: RefCell<BTreeMap<ConstOpKey<'ctx>, Value<'ctx, 'sco>>>,
+    /// Stack of scoped semantic locations. The top entry is the semantic location currently in
+    /// effect for emitted ops.
+    semantic_locations: RefCell<Vec<SemanticLocation>>,
 }
 
 impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
@@ -238,7 +394,63 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
             scope,
             env,
             const_vals: BTreeMap::new().into(),
+            semantic_locations: Vec::new().into(),
         }
+    }
+
+    /// Returns the scoped semantic location currently active for this builder, if any.
+    pub fn current_semantic_location(&self) -> Option<SemanticLocation> {
+        self.semantic_locations.borrow().last().cloned()
+    }
+
+    /// Run `f` with `location` as the effective builder location.
+    pub fn with_semantic_location<T>(
+        &self,
+        location: SemanticLocation,
+        f: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        struct SemanticLocationGuard<'a> {
+            stack: &'a RefCell<Vec<SemanticLocation>>,
+        }
+
+        impl Drop for SemanticLocationGuard<'_> {
+            fn drop(&mut self) {
+                // Always restore the previous scope, even if lowering returns early.
+                self.stack
+                    .borrow_mut()
+                    .pop()
+                    .expect("semantic location stack underflow");
+            }
+        }
+
+        // Push before running the closure so nested helpers inherit the same semantic location.
+        self.semantic_locations.borrow_mut().push(location);
+        let _guard = SemanticLocationGuard {
+            stack: &self.semantic_locations,
+        };
+        f()
+    }
+
+    /// Run `f` with the current semantic location shifted to a sibling column, if one is active.
+    pub fn with_column_offset<T>(&self, offset: usize, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        if let Some(location) = self.current_semantic_location() {
+            self.with_semantic_location(location.with_column_offset(offset), f)
+        } else {
+            f()
+        }
+    }
+
+    /// Returns the currently active semantic location, or `loc(unknown)` when no semantic scope
+    /// is active.
+    pub fn current_location(&self) -> Location<'ctx> {
+        self.current_semantic_location()
+            .map(|location| self.env.semantic_location(location))
+            .unwrap_or_else(|| self.env.unknown_location())
+    }
+
+    /// Compatibility shim for older call sites. Prefer [`Self::current_location`] for new code.
+    pub fn unknown_location(&self) -> Location<'ctx> {
+        self.current_location()
     }
 
     /// Appends an operation with no results at the end.
@@ -1311,14 +1523,18 @@ macro_rules! as_op {
 pub struct StructBuilder<'ctx, 'str, F: FieldInfo> {
     /// Shared module-scoped helper used for type construction and module insertion.
     env: &'ctx ModuleEnv<'ctx, F>,
-    /// Location for the struct and its direct child ops.
+    /// Location for the struct definition itself.
     location: Option<Location<'ctx>>,
+    /// Location for the generated `@compute` function.
+    compute_location: Option<Location<'ctx>>,
+    /// Location for the generated `@constrain` function.
+    constrain_location: Option<Location<'ctx>>,
     /// Name of the struct.
     name: &'str str,
     /// Inputs shared by both `@compute` and `@constrain` (excluding `self` in `@constrain`).
-    inputs: Vec<Type<'ctx>>,
+    inputs: Vec<(Type<'ctx>, Option<Location<'ctx>>)>,
     /// List of members. Contains the name, type and whether is marked public or not.
-    members: Vec<(String, Type<'ctx>, bool)>,
+    members: Vec<(String, Type<'ctx>, bool, Option<Location<'ctx>>)>,
 }
 
 impl<'ctx, 'str, F: FieldInfo> StructBuilder<'ctx, 'str, F> {
@@ -1327,6 +1543,8 @@ impl<'ctx, 'str, F: FieldInfo> StructBuilder<'ctx, 'str, F> {
         Self {
             env,
             location: None,
+            compute_location: None,
+            constrain_location: None,
             name,
             inputs: vec![],
             members: vec![],
@@ -1335,7 +1553,17 @@ impl<'ctx, 'str, F: FieldInfo> StructBuilder<'ctx, 'str, F> {
 
     /// Adds an input to the list.
     pub fn with_input(&mut self, input: Type<'ctx>) -> &mut Self {
-        self.inputs.push(input);
+        self.inputs.push((input, None));
+        self
+    }
+
+    /// Adds an input with an explicit debug location.
+    pub fn with_input_location(
+        &mut self,
+        input: Type<'ctx>,
+        location: Location<'ctx>,
+    ) -> &mut Self {
+        self.inputs.push((input, Some(location)));
         self
     }
 
@@ -1346,9 +1574,33 @@ impl<'ctx, 'str, F: FieldInfo> StructBuilder<'ctx, 'str, F> {
         self
     }
 
+    /// Sets the location of the generated `@compute` function.
+    pub fn with_compute_location(&mut self, location: Location<'ctx>) -> &mut Self {
+        self.compute_location = Some(location);
+        self
+    }
+
+    /// Sets the location of the generated `@constrain` function.
+    pub fn with_constrain_location(&mut self, location: Location<'ctx>) -> &mut Self {
+        self.constrain_location = Some(location);
+        self
+    }
+
     /// Adds a member to the struct.
     pub fn with_member(&mut self, name: String, r#type: Type<'ctx>, is_public: bool) -> &mut Self {
-        self.members.push((name, r#type, is_public));
+        self.members.push((name, r#type, is_public, None));
+        self
+    }
+
+    /// Adds a member with an explicit debug location.
+    pub fn with_member_location(
+        &mut self,
+        name: String,
+        r#type: Type<'ctx>,
+        is_public: bool,
+        location: Location<'ctx>,
+    ) -> &mut Self {
+        self.members.push((name, r#type, is_public, Some(location)));
         self
     }
 
@@ -1362,22 +1614,30 @@ impl<'ctx, 'str, F: FieldInfo> StructBuilder<'ctx, 'str, F> {
             .unwrap_or_else(|| Location::unknown(self.context()))
     }
 
+    fn compute_location(&self) -> Location<'ctx> {
+        self.compute_location.unwrap_or_else(|| self.location())
+    }
+
+    fn constrain_location(&self) -> Location<'ctx> {
+        self.constrain_location.unwrap_or_else(|| self.location())
+    }
+
     /// Creates a struct using the build data.
     pub fn build(&self) -> Result<StructDefOp<'ctx>, LlzkError> {
         let constrain_inputs = self
             .inputs
             .iter()
-            .map(|arg| (*arg, self.location()))
+            .map(|(arg, location)| (*arg, location.unwrap_or_else(|| self.constrain_location())))
             .collect::<Vec<_>>();
         let compute_inputs = self
             .inputs
             .iter()
-            .map(|arg| (*arg, self.location()))
+            .map(|(arg, location)| (*arg, location.unwrap_or_else(|| self.compute_location())))
             .collect::<Vec<_>>();
 
-        let members = self.members.iter().map(|(name, typ, is_pub)| {
+        let members = self.members.iter().map(|(name, typ, is_pub, location)| {
             as_op!(dialect::r#struct::member(
-                self.location(),
+                location.unwrap_or_else(|| self.location()),
                 name,
                 *typ,
                 true,
@@ -1386,13 +1646,13 @@ impl<'ctx, 'str, F: FieldInfo> StructBuilder<'ctx, 'str, F> {
         });
 
         let compute = as_op!(dialect::r#struct::helpers::compute_fn(
-            self.location(),
+            self.compute_location(),
             self.struct_type(),
             &compute_inputs,
             None,
         ));
         let constrain = as_op!(dialect::r#struct::helpers::constrain_fn(
-            self.location(),
+            self.constrain_location(),
             self.struct_type(),
             &constrain_inputs,
             None,
@@ -1450,7 +1710,7 @@ mod tests {
     fn module_contains_top_level_function_ignores_nested_struct_functions() {
         let ctx = LlzkContext::new();
         let module = llzk_module(Location::unknown(&ctx));
-        let env = ModuleEnv::<Mersenne31Field>::new(&ctx, &module);
+        let env = ModuleEnv::<Mersenne31Field>::new(&ctx, &module, DebugLocationStyle::Named);
 
         let builder = StructBuilder::new(&env, "nested_fns_only");
         module
@@ -1473,7 +1733,7 @@ mod tests {
     fn declare_private_extern_function_is_idempotent() {
         let ctx = LlzkContext::new();
         let module = llzk_module(Location::unknown(&ctx));
-        let env = ModuleEnv::<Mersenne31Field>::new(&ctx, &module);
+        let env = ModuleEnv::<Mersenne31Field>::new(&ctx, &module, DebugLocationStyle::Named);
         let felt = env.felt_type();
 
         env.declare_private_extern_function("read_oracle_field", &[felt], &[felt])
@@ -1490,5 +1750,38 @@ mod tests {
             .unwrap());
 
         verify_operation_with_diags(&module.as_operation()).unwrap();
+    }
+
+    #[test]
+    fn semantic_location_uses_virtual_llzk_paths() {
+        let ctx = LlzkContext::new();
+        let module = llzk_module(Location::unknown(&ctx));
+        let env = ModuleEnv::<Mersenne31Field>::new(&ctx, &module, DebugLocationStyle::Named);
+
+        let location =
+            env.semantic_location(SemanticLocation::constrain_constraint(3).with_column_offset(2));
+        assert_eq!(
+            location.to_string(),
+            "loc(\"llzk://constrain/constraints\":3:2)"
+        );
+
+        let location = env.semantic_location(SemanticLocation::compute_ssa(5));
+        assert_eq!(location.to_string(), "loc(\"llzk://compute/ssa\":5:0)");
+
+        let location = env.semantic_location(SemanticLocation::compute_runtime(
+            "llzk://compute/runtime/oracle_u32",
+            5,
+        ));
+        assert_eq!(
+            location.to_string(),
+            "loc(\"llzk://compute/runtime/oracle_u32\":5:0)"
+        );
+
+        let location =
+            env.semantic_name_location("Variable(30)", SemanticLocation::layout_argument());
+        assert_eq!(
+            location.to_string(),
+            "loc(\"Variable(30)\"(\"llzk://layout/argument\":0:0))"
+        );
     }
 }

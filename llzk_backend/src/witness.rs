@@ -41,6 +41,7 @@ use prover::cs::tables::TableType;
 
 use crate::builder::ModuleEnv;
 use crate::builder::OpsBuilder;
+use crate::builder::SemanticLocation;
 use crate::codegen::SpecialCsrPropertiesMetadata;
 use crate::codegen::StructVars;
 use crate::field::FieldInfo;
@@ -57,6 +58,34 @@ const READ_ORACLE_BOOL_EXTERN: &str = "read_oracle_bool";
 const READ_ORACLE_U8_EXTERN: &str = "read_oracle_u8";
 const READ_ORACLE_U16_EXTERN: &str = "read_oracle_u16";
 const READ_ORACLE_U32_EXTERN: &str = "read_oracle_u32";
+
+#[derive(Clone, Copy)]
+enum ComputeRuntimeHookKind {
+    MemoryRead,
+    MemoryWrite,
+    OracleField,
+    OracleBool,
+    OracleU8,
+    OracleU16,
+    OracleU32,
+    RomRead,
+}
+
+impl ComputeRuntimeHookKind {
+    /// Virtual path segment used for descriptive `llzk://compute/runtime/...` debug locations.
+    const fn debug_path(self) -> &'static str {
+        match self {
+            Self::MemoryRead => "llzk://compute/runtime/memory_read",
+            Self::MemoryWrite => "llzk://compute/runtime/memory_write",
+            Self::OracleField => "llzk://compute/runtime/oracle_field",
+            Self::OracleBool => "llzk://compute/runtime/oracle_bool",
+            Self::OracleU8 => "llzk://compute/runtime/oracle_u8",
+            Self::OracleU16 => "llzk://compute/runtime/oracle_u16",
+            Self::OracleU32 => "llzk://compute/runtime/oracle_u32",
+            Self::RomRead => "llzk://compute/runtime/rom_read",
+        }
+    }
+}
 
 /// An encoding for a witness placeholder (from [`Placeholder`]), but encoded for easy
 /// emission to LLZK in a fixed format that is consistent across all placeholder types.
@@ -301,6 +330,7 @@ impl<F: FieldInfo> WitnessComputation<F> {
     ) -> Result<()> {
         let has_runtime_memory_reads = self.has_runtime_memory_reads(vars);
         let self_value = builder.get_compute_self_value()?;
+        let mut expr_idx = 0usize;
         for block in &self.ssa {
             let mut lowering = ComputeLowering::new(
                 builder,
@@ -315,7 +345,11 @@ impl<F: FieldInfo> WitnessComputation<F> {
             );
 
             for expr in block {
-                expr.emit_compute(&mut lowering)?;
+                lowering.set_current_expr_index(expr_idx);
+                builder.with_semantic_location(SemanticLocation::compute_ssa(expr_idx), || {
+                    expr.emit_compute(&mut lowering)
+                })?;
+                expr_idx += 1;
             }
         }
         Ok(())
@@ -659,6 +693,7 @@ struct ComputeLowering<'a, 'ctx: 'sco, 'sco, F: FieldInfo> {
     special_csr_properties: &'a Option<SpecialCsrPropertiesMetadata>,
     has_runtime_memory_reads: bool,
     block: &'a [RawExpression<F>],
+    current_expr_index: usize,
     slots: Vec<SsaSlot<'ctx, 'sco>>,
     slot_input_origins: Vec<Option<Variable>>,
     slot_u32_input_origins: Vec<Option<[Variable; 2]>>,
@@ -696,10 +731,29 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             special_csr_properties,
             has_runtime_memory_reads,
             block,
+            current_expr_index: 0,
             slots: Vec::new(),
             slot_input_origins: Vec::new(),
             slot_u32_input_origins: Vec::new(),
         }
+    }
+
+    /// Record the zero-based flattened SSA expression index currently being lowered.
+    fn set_current_expr_index(&mut self, current_expr_index: usize) {
+        self.current_expr_index = current_expr_index;
+    }
+
+    /// Run a runtime hook under a dedicated `llzk://compute/runtime` location derived from the
+    /// current SSA expression.
+    fn with_runtime_location<T>(
+        &self,
+        kind: ComputeRuntimeHookKind,
+        f: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        self.with_semantic_location(
+            SemanticLocation::compute_runtime(kind.debug_path(), self.current_expr_index),
+            f,
+        )
     }
 
     /// Append one SSA slot to the block-local cache.
@@ -914,24 +968,28 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
 
     /// Read a compiled memory-subtree column through the LLZK runtime hook.
     fn read_memory_subtree(&self, offset: usize) -> Result<Value<'ctx, 'sco>> {
-        let location = self.unknown_location();
-        let index_type = self.index_type();
-        let felt_type = self.felt_type();
-        let offset = self.get_constant_from_start(index_type, offset as u64)?;
-        self.append_call_with_result(
-            location,
-            READ_FROM_MEMORY_SUBTREE_EXTERN,
-            &[offset],
-            felt_type,
-        )
+        self.with_runtime_location(ComputeRuntimeHookKind::MemoryRead, || {
+            let location = self.current_location();
+            let index_type = self.index_type();
+            let felt_type = self.felt_type();
+            let offset = self.get_constant_from_start(index_type, offset as u64)?;
+            self.append_call_with_result(
+                location,
+                READ_FROM_MEMORY_SUBTREE_EXTERN,
+                &[offset],
+                felt_type,
+            )
+        })
     }
 
     /// Write a compiled memory-subtree column through the LLZK runtime hook.
     fn write_memory_subtree(&self, offset: usize, value: Value<'ctx, 'sco>) -> Result<()> {
-        let location = self.unknown_location();
-        let index_type = self.index_type();
-        let offset = self.get_constant_from_start(index_type, offset as u64)?;
-        self.append_call_no_results(location, WRITE_TO_MEMORY_SUBTREE_EXTERN, &[offset, value])
+        self.with_runtime_location(ComputeRuntimeHookKind::MemoryWrite, || {
+            let location = self.current_location();
+            let index_type = self.index_type();
+            let offset = self.get_constant_from_start(index_type, offset as u64)?;
+            self.append_call_no_results(location, WRITE_TO_MEMORY_SUBTREE_EXTERN, &[offset, value])
+        })
     }
 
     /// Try to resolve one placeholder limb through the explicit `@compute` boundary arguments.
@@ -1043,16 +1101,18 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             return Ok(value);
         }
 
-        let location = self.unknown_location();
-        let felt_type = self.felt_type();
-        let [kind, arg0, arg1] = self.oracle_placeholder_args(placeholder)?;
-        let subindex = self.oracle_abi_constant(subindex as u64)?;
-        self.append_call_with_result(
-            location,
-            READ_ORACLE_FIELD_EXTERN,
-            &[kind, arg0, arg1, subindex],
-            felt_type,
-        )
+        self.with_runtime_location(ComputeRuntimeHookKind::OracleField, || {
+            let location = self.current_location();
+            let felt_type = self.felt_type();
+            let [kind, arg0, arg1] = self.oracle_placeholder_args(placeholder)?;
+            let subindex = self.oracle_abi_constant(subindex as u64)?;
+            self.append_call_with_result(
+                location,
+                READ_ORACLE_FIELD_EXTERN,
+                &[kind, arg0, arg1, subindex],
+                felt_type,
+            )
+        })
     }
 
     /// Read a boolean oracle placeholder through the LLZK runtime hook.
@@ -1061,15 +1121,17 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             return Ok(value);
         }
 
-        let location = self.unknown_location();
-        let bool_type = self.bool_type();
-        let [kind, arg0, arg1] = self.oracle_placeholder_args(placeholder)?;
-        self.append_call_with_result(
-            location,
-            READ_ORACLE_BOOL_EXTERN,
-            &[kind, arg0, arg1],
-            bool_type,
-        )
+        self.with_runtime_location(ComputeRuntimeHookKind::OracleBool, || {
+            let location = self.current_location();
+            let bool_type = self.bool_type();
+            let [kind, arg0, arg1] = self.oracle_placeholder_args(placeholder)?;
+            self.append_call_with_result(
+                location,
+                READ_ORACLE_BOOL_EXTERN,
+                &[kind, arg0, arg1],
+                bool_type,
+            )
+        })
     }
 
     /// Read an 8-bit oracle placeholder through the LLZK runtime hook.
@@ -1078,15 +1140,17 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             return Ok(value);
         }
 
-        let location = self.unknown_location();
-        let felt_type = self.felt_type();
-        let [kind, arg0, arg1] = self.oracle_placeholder_args(placeholder)?;
-        self.append_call_with_result(
-            location,
-            READ_ORACLE_U8_EXTERN,
-            &[kind, arg0, arg1],
-            felt_type,
-        )
+        self.with_runtime_location(ComputeRuntimeHookKind::OracleU8, || {
+            let location = self.current_location();
+            let felt_type = self.felt_type();
+            let [kind, arg0, arg1] = self.oracle_placeholder_args(placeholder)?;
+            self.append_call_with_result(
+                location,
+                READ_ORACLE_U8_EXTERN,
+                &[kind, arg0, arg1],
+                felt_type,
+            )
+        })
     }
 
     /// Read a 16-bit oracle placeholder through the LLZK runtime hook.
@@ -1095,15 +1159,17 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             return Ok(value);
         }
 
-        let location = self.unknown_location();
-        let felt_type = self.felt_type();
-        let [kind, arg0, arg1] = self.oracle_placeholder_args(placeholder)?;
-        self.append_call_with_result(
-            location,
-            READ_ORACLE_U16_EXTERN,
-            &[kind, arg0, arg1],
-            felt_type,
-        )
+        self.with_runtime_location(ComputeRuntimeHookKind::OracleU16, || {
+            let location = self.current_location();
+            let felt_type = self.felt_type();
+            let [kind, arg0, arg1] = self.oracle_placeholder_args(placeholder)?;
+            self.append_call_with_result(
+                location,
+                READ_ORACLE_U16_EXTERN,
+                &[kind, arg0, arg1],
+                felt_type,
+            )
+        })
     }
 
     /// Read a 32-bit oracle placeholder through the LLZK runtime hook.
@@ -1112,18 +1178,20 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             return Ok(value);
         }
 
-        let location = self.unknown_location();
-        let felt_type = self.felt_type();
-        let [low, high] = {
-            let [kind, arg0, arg1] = self.oracle_placeholder_args(placeholder)?;
-            self.append_call::<2>(
-                location,
-                READ_ORACLE_U32_EXTERN,
-                &[kind, arg0, arg1],
-                &[felt_type, felt_type],
-            )?
-        };
-        Ok(U32Parts { low, high })
+        self.with_runtime_location(ComputeRuntimeHookKind::OracleU32, || {
+            let location = self.current_location();
+            let felt_type = self.felt_type();
+            let [low, high] = {
+                let [kind, arg0, arg1] = self.oracle_placeholder_args(placeholder)?;
+                self.append_call::<2>(
+                    location,
+                    READ_ORACLE_U32_EXTERN,
+                    &[kind, arg0, arg1],
+                    &[felt_type, felt_type],
+                )?
+            };
+            Ok(U32Parts { low, high })
+        })
     }
 
     /// Convert a 32-bit limb pair back into felts.
@@ -2159,20 +2227,22 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             bail!("RomRead expects 1 input, found {}", inputs.len());
         }
 
-        let location = self.unknown_location();
-        let word_index = self.append_op_with_result(felt::shr(
-            location,
-            inputs[0],
-            self.get_felt_constant_from_start(2)?,
-        )?)?;
-        let felt_type = self.felt_type();
-        let [low, high] = self.append_call::<2>(
-            location,
-            READ_FROM_ROM_EXTERN,
-            &[word_index],
-            &[felt_type, felt_type],
-        )?;
-        self.finalize_lookup_outputs(vec![low, high], num_outputs)
+        self.with_runtime_location(ComputeRuntimeHookKind::RomRead, || {
+            let location = self.current_location();
+            let word_index = self.append_op_with_result(felt::shr(
+                location,
+                inputs[0],
+                self.get_felt_constant_from_start(2)?,
+            )?)?;
+            let felt_type = self.felt_type();
+            let [low, high] = self.append_call::<2>(
+                location,
+                READ_FROM_ROM_EXTERN,
+                &[word_index],
+                &[felt_type, felt_type],
+            )?;
+            self.finalize_lookup_outputs(vec![low, high], num_outputs)
+        })
     }
 
     /// Lower the CSR support/delegation table using metadata recovered from the source circuit.
@@ -2558,7 +2628,6 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         let offset_is_odd =
             self.append_field_is_nonzero(self.append_lowest_bits_felt(offset, 1)?)?;
         let false_bool = self.get_bool_constant_from_start(false)?;
-        let true_bool = self.get_bool_constant_from_start(true)?;
         let two = self.get_felt_constant_from_start(2)?;
         let four = self.get_felt_constant_from_start(4)?;
         let match_funct3 = |value| self.append_field_eq_constant(funct3, value);
@@ -2583,7 +2652,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             self.append_select_value(
                 is_halfword,
                 offset_is_odd,
-                self.append_select_value(is_byte, false_bool, true_bool)?,
+                self.append_op_with_result(bool::not(location, is_byte)?)?,
             )?,
         )?;
 
@@ -2830,15 +2899,17 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             bail!("AlignedRomRead expects 1 input, found {}", inputs.len());
         }
 
-        let location = self.unknown_location();
-        let felt_type = self.felt_type();
-        let [low, high] = self.append_call::<2>(
-            location,
-            READ_FROM_ROM_EXTERN,
-            inputs,
-            &[felt_type, felt_type],
-        )?;
-        self.finalize_lookup_outputs(vec![low, high], num_outputs)
+        self.with_runtime_location(ComputeRuntimeHookKind::RomRead, || {
+            let location = self.current_location();
+            let felt_type = self.felt_type();
+            let [low, high] = self.append_call::<2>(
+                location,
+                READ_FROM_ROM_EXTERN,
+                inputs,
+                &[felt_type, felt_type],
+            )?;
+            self.finalize_lookup_outputs(vec![low, high], num_outputs)
+        })
     }
 
     /// Read a field-valued SSA slot by index.

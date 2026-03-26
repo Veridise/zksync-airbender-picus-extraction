@@ -93,6 +93,14 @@ impl ExtractedVariable {
             ExtractedVariable::Scalar(_) => 1,
         }
     }
+
+    /// Stable variable-oriented label for layout debug locations.
+    pub fn debug_label(&self) -> String {
+        match self {
+            ExtractedVariable::Register { low, high } => format!("Register({low:?},{high:?})"),
+            ExtractedVariable::Scalar(variable) => format!("{variable:?}"),
+        }
+    }
 }
 
 /// Trait for extracting inputs, outputs, and intermediate variables from the implementing circuit
@@ -386,6 +394,14 @@ impl<'ctx, F: FieldInfo> EmitLlzkInModule<'ctx, F> for CircuitBundle<F> {
         }
 
         let mut struct_builder = StructBuilder::new(env, self.name());
+        struct_builder
+            .with_location(env.semantic_location(SemanticLocation::layout_struct(self.name())))
+            .with_compute_location(
+                env.semantic_location(SemanticLocation::layout_function(self.name(), "compute")),
+            )
+            .with_constrain_location(
+                env.semantic_location(SemanticLocation::layout_function(self.name(), "constrain")),
+            );
 
         // Sanity check: all variables should be an input, output, or intermediate.
         let num_input_vars = num_vars(self.get_inputs()?);
@@ -401,24 +417,50 @@ impl<'ctx, F: FieldInfo> EmitLlzkInModule<'ctx, F> for CircuitBundle<F> {
             struct_op.add_constraints(
                 env,
                 |builder: &mut OpsBuilder<'_, '_, F>| -> Result<()> {
-                    // Add some constants to reuse at the beginning here.
-                    builder.insert_constant_at_start(builder.index_type(), 1)?;
-                    builder.insert_constant_at_start(builder.index_type(), 0)?;
-                    builder.insert_constant_at_start(builder.felt_type(), 1)?;
-                    builder.insert_constant_at_start(builder.felt_type(), 0)?;
-                    // Add boolean constraints.
-                    for bool_var in self.boolean_vars.iter() {
-                        let val = vars.get_constrain_val(builder, bool_var)?;
-                        let _ = builder.felt_type();
-                        builder.append_boolean_constraint(val)?;
-                    }
-                    // Add range constraints.
-                    self.range_check_expressions
-                        .emit_constrain(builder, &vars)?;
-                    // Add lookup constraints.
-                    self.lookups.emit_constrain(builder, &vars)?;
-                    // Add all other constraints.
-                    self.constraints.emit_constrain(builder, &vars)
+                    builder.with_semantic_location(
+                        SemanticLocation::layout_function(self.name(), "constrain"),
+                        || {
+                            // Add some constants to reuse at the beginning here.
+                            builder.insert_constant_at_start(builder.index_type(), 1)?;
+                            builder.insert_constant_at_start(builder.index_type(), 0)?;
+                            builder.insert_constant_at_start(builder.felt_type(), 1)?;
+                            builder.insert_constant_at_start(builder.felt_type(), 0)?;
+                            // Add boolean constraints.
+                            for (idx, bool_var) in self.boolean_vars.iter().enumerate() {
+                                builder.with_semantic_location(
+                                    SemanticLocation::constrain_boolean(idx),
+                                    || {
+                                        let val = vars.get_constrain_val(builder, bool_var)?;
+                                        builder.append_boolean_constraint(val)
+                                    },
+                                )?;
+                            }
+                            // Add range constraints.
+                            for (idx, range_check) in
+                                self.range_check_expressions.iter().enumerate()
+                            {
+                                builder.with_semantic_location(
+                                    SemanticLocation::constrain_range_check(idx),
+                                    || range_check.emit_constrain(builder, &vars),
+                                )?;
+                            }
+                            // Add lookup constraints.
+                            for (idx, lookup) in self.lookups.iter().enumerate() {
+                                builder.with_semantic_location(
+                                    SemanticLocation::constrain_lookup(idx),
+                                    || lookup.emit_constrain(builder, &vars),
+                                )?;
+                            }
+                            // Add all other constraints.
+                            for (idx, constraint) in self.constraints.iter().enumerate() {
+                                builder.with_semantic_location(
+                                    SemanticLocation::constrain_constraint(idx),
+                                    || constraint.emit_constrain(builder, &vars),
+                                )?;
+                            }
+                            Ok(())
+                        },
+                    )
                 },
             )?;
         }
@@ -429,7 +471,10 @@ impl<'ctx, F: FieldInfo> EmitLlzkInModule<'ctx, F> for CircuitBundle<F> {
                 .as_ref()
                 .ok_or_else(|| anyhow!("must have witness specified"))?;
             struct_op.add_compute(env, |builder: &mut OpsBuilder<'_, '_, F>| {
-                wit.emit_compute(builder, &vars)
+                builder.with_semantic_location(
+                    SemanticLocation::layout_function(self.name(), "compute"),
+                    || wit.emit_compute(builder, &vars),
+                )
             })?;
 
             wit.declare_runtime_externs(env)?;
@@ -475,15 +520,21 @@ impl<F: FieldInfo> StructVars<F> {
         // Add inputs to struct.
         let mut arg_map: HashMap<Variable, (usize, Option<u64>)> = HashMap::new();
         for (input_num, input) in extractor.get_inputs()?.iter().enumerate() {
+            let debug_label = input.debug_label();
+            let location = struct_builder.semantic_labeled_location(
+                &debug_label,
+                SemanticLocation::layout_argument(),
+                SemanticLocation::layout_argument_label(&debug_label),
+            );
             match input {
                 ExtractedVariable::Register { low, high } => {
                     arg_map.insert(*low, (input_num, Some(0)));
                     arg_map.insert(*high, (input_num, Some(1)));
-                    struct_builder.with_input(register_type);
+                    struct_builder.with_input_location(register_type, location);
                 }
                 ExtractedVariable::Scalar(variable) => {
                     arg_map.insert(*variable, (input_num, None));
-                    struct_builder.with_input(felt_type);
+                    struct_builder.with_input_location(felt_type, location);
                 }
             };
         }
@@ -491,35 +542,47 @@ impl<F: FieldInfo> StructVars<F> {
         // Add outputs to struct.
         let mut member_map: HashMap<Variable, (String, Option<u64>)> = HashMap::new();
         for output in extractor.get_outputs()?.iter() {
+            let debug_label = output.debug_label();
+            let location = struct_builder.semantic_labeled_location(
+                &debug_label,
+                SemanticLocation::layout_member(),
+                SemanticLocation::layout_member_label(&debug_label),
+            );
             // TODO: better naming scheme
             match output {
                 ExtractedVariable::Register { low, high } => {
                     let name = format!("out_reg_{}_{}", low.0, high.0);
                     member_map.insert(*low, (name.clone(), Some(0)));
                     member_map.insert(*high, (name.clone(), Some(1)));
-                    struct_builder.with_member(name, register_type, true);
+                    struct_builder.with_member_location(name, register_type, true, location);
                 }
                 ExtractedVariable::Scalar(variable) => {
                     let name = format!("out_var_{}", variable.0);
                     member_map.insert(*variable, (name.clone(), None));
-                    struct_builder.with_member(name, felt_type, true);
+                    struct_builder.with_member_location(name, felt_type, true, location);
                 }
             }
         }
 
         // Add intermediates to struct.
         for output in extractor.get_intermediates()?.iter() {
+            let debug_label = output.debug_label();
+            let location = struct_builder.semantic_labeled_location(
+                &debug_label,
+                SemanticLocation::layout_member(),
+                SemanticLocation::layout_member_label(&debug_label),
+            );
             match output {
                 ExtractedVariable::Register { low, high } => {
                     let name = format!("internal_reg_{}_{}", low.0, high.0);
                     member_map.insert(*low, (name.clone(), Some(0)));
                     member_map.insert(*high, (name.clone(), Some(1)));
-                    struct_builder.with_member(name, register_type, false);
+                    struct_builder.with_member_location(name, register_type, false, location);
                 }
                 ExtractedVariable::Scalar(variable) => {
                     let name = format!("internal_var_{}", variable.0);
                     member_map.insert(*variable, (name.clone(), None));
-                    struct_builder.with_member(name, felt_type, false);
+                    struct_builder.with_member_location(name, felt_type, false, location);
                 }
             }
         }
@@ -634,7 +697,7 @@ impl<F: FieldInfo> StructVars<F> {
             .member_map
             .get(var)
             .ok_or_else(|| anyhow!("Variable {var:?} is not stored as a struct member"))?;
-        let location = builder.unknown_location();
+        let location = builder.current_location();
         match index {
             None => builder.append_member_write(location, self_value, member_name, value),
             Some(index) => {
@@ -665,7 +728,7 @@ impl<F: FieldInfo> StructVars<F> {
                     Some(index) => {
                         let indices =
                             &[builder.get_constant_from_start(builder.index_type(), *index)?];
-                        builder.append_array_read(builder.unknown_location(), arg_val, indices)?
+                        builder.append_array_read(builder.current_location(), arg_val, indices)?
                     }
                 };
                 Ok(Some(val))
@@ -688,7 +751,7 @@ impl<F: FieldInfo> StructVars<F> {
                     Some(index) => {
                         let indices =
                             &[builder.get_constant_from_start(builder.index_type(), *index)?];
-                        builder.append_array_read(builder.unknown_location(), arg_val, indices)?
+                        builder.append_array_read(builder.current_location(), arg_val, indices)?
                     }
                 };
                 Ok(Some(val))
@@ -724,7 +787,7 @@ impl<F: FieldInfo> StructVars<F> {
         match self.member_map.get(var) {
             None => Ok(None),
             Some((member_name, index)) => {
-                let location = builder.unknown_location();
+                let location = builder.current_location();
                 match index {
                     None => {
                         let member_ty = builder.felt_type();
@@ -747,7 +810,7 @@ impl<F: FieldInfo> StructVars<F> {
                         let indices =
                             &[builder.get_constant_from_start(builder.index_type(), *index)?];
                         let read_val = builder.append_array_read(
-                            builder.unknown_location(),
+                            builder.current_location(),
                             member_val,
                             indices,
                         )?;

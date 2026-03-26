@@ -284,7 +284,7 @@ fn combine_case_condition<'ctx, 'sco, F: FieldInfo>(
     let predicate = builder.append_bool_to_field(predicate)?;
     match conditional {
         Some(conditional) => Ok(Some(
-            builder.append_product(builder.unknown_location(), &[conditional, predicate])?,
+            builder.append_product(builder.current_location(), &[conditional, predicate])?,
         )),
         None => Ok(Some(predicate)),
     }
@@ -305,7 +305,7 @@ pub fn add_dynamic_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     conditional: Option<Value<'ctx, 'sco>>,
 ) -> Result<()> {
     let table_id = vars.get_constrain_val(builder, &table_id_variable)?;
-    let location = builder.unknown_location();
+    let location = builder.current_location();
     let candidates = [TableType::Xor, TableType::Or, TableType::And];
     let matches = candidates
         .iter()
@@ -368,7 +368,7 @@ pub fn add_disjunctive_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     for flag in &flags {
         builder.append_boolean_constraint(*flag)?;
     }
-    let flag_sum = builder.append_sum(builder.unknown_location(), &flags)?;
+    let flag_sum = builder.append_sum(builder.current_location(), &flags)?;
     // flag_sum <= 1, meaning flag_sum must be boolean
     builder.append_boolean_constraint(flag_sum)?;
 
@@ -406,7 +406,7 @@ fn apply_row_multiplier<'ctx, 'sco, F: FieldInfo>(
 ) -> Result<Value<'ctx, 'sco>> {
     match row_multiplier {
         Some(coeff) => {
-            let op = felt::mul(builder.unknown_location(), coeff, val)?;
+            let op = felt::mul(builder.current_location(), coeff, val)?;
             builder.append_op_with_result(op)
         }
         None => Ok(val),
@@ -456,7 +456,7 @@ fn add_range_check_small_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
 
     builder.append_conditional_range_constraint(conditional, a, 8)?;
     builder.append_conditional_range_constraint(conditional, b, 8)?;
-    builder.append_conditional_constrain_eq(builder.unknown_location(), conditional, zero_pad, zero)
+    builder.append_conditional_constrain_eq(builder.current_location(), conditional, zero_pad, zero)
 }
 
 /// Translation for `U16GetSignAndHighByte`.
@@ -474,7 +474,7 @@ fn add_u16_get_sign_and_high_byte_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
 
     let low_byte = builder.new_nondet_felt()?;
     let high_byte_low_bits = builder.new_nondet_felt()?;
-    let location = builder.unknown_location();
+    let location = builder.current_location();
     let byte_scale = builder.get_constant_from_start(builder.felt_type(), 1 << 8)?;
     let sign_scale = builder.get_constant_from_start(builder.felt_type(), 1 << 7)?;
 
@@ -510,7 +510,7 @@ fn add_memory_offset_get_bits_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     conditional: Option<Value<'ctx, 'sco>>,
 ) -> Result<()> {
     let (input, lowest, second) = constrain_lookup_row3(builder, vars, query, row_multiplier)?;
-    let location = builder.unknown_location();
+    let location = builder.current_location();
 
     builder.append_conditional_range_constraint(conditional, input, 16)?;
     builder.append_conditional_boolean_constraint(conditional, lowest)?;
@@ -559,18 +559,18 @@ fn add_jump_cleanup_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     // a = cleaned + 2*bit_1 + bit_0
     //      2*bit_1
     let bit_1_mul = builder.append_op_with_result(felt::mul(
-        builder.unknown_location(),
+        builder.current_location(),
         builder.get_constant_from_start(builder.felt_type(), 2)?,
         bit_1,
     )?)?;
     //      2*bit_1 + bit_0
     let twit =
-        builder.append_op_with_result(felt::add(builder.unknown_location(), bit_1_mul, bit_0)?)?;
+        builder.append_op_with_result(felt::add(builder.current_location(), bit_1_mul, bit_0)?)?;
     //      cleaned + 2*bit_1 + bit_0
     let a_computed =
-        builder.append_op_with_result(felt::add(builder.unknown_location(), cleaned, twit)?)?;
+        builder.append_op_with_result(felt::add(builder.current_location(), cleaned, twit)?)?;
     builder.append_conditional_constrain_eq(
-        builder.unknown_location(),
+        builder.current_location(),
         conditional,
         a,
         a_computed,
@@ -578,11 +578,11 @@ fn add_jump_cleanup_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
 
     // cleaned = 4*k
     builder.append_conditional_constrain_eq(
-        builder.unknown_location(),
+        builder.current_location(),
         conditional,
         cleaned,
         builder.append_op_with_result(felt::mul(
-            builder.unknown_location(),
+            builder.current_location(),
             builder.get_constant_from_start(builder.felt_type(), 4)?,
             k,
         )?)?,
@@ -623,30 +623,30 @@ fn add_conditional_jmp_branch_slt_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
 
     // a = uf + 2*out_is_zero + 4*sign1 + 8*sign2
     builder.append_conditional_constrain_eq(
-        builder.unknown_location(),
+        builder.current_location(),
         conditional,
         a,
         builder.append_sum(
-            builder.unknown_location(),
+            builder.current_location(),
             &[
                 uf,
-                builder.append_const_scaling(builder.unknown_location(), 2, out_is_zero)?,
-                builder.append_const_scaling(builder.unknown_location(), 4, sign1)?,
-                builder.append_const_scaling(builder.unknown_location(), 8, sign2)?,
+                builder.append_const_scaling(builder.current_location(), 2, out_is_zero)?,
+                builder.append_const_scaling(builder.current_location(), 4, sign1)?,
+                builder.append_const_scaling(builder.current_location(), 8, sign2)?,
             ],
         )?,
     )?;
 
     // signs_different = sign1 + sign2 - (2 * sign1 * sign2)
     let signs_different = builder.append_sum(
-        builder.unknown_location(),
+        builder.current_location(),
         &[
             sign1,
             sign2,
             builder.append_op_with_result(felt::neg(
-                builder.unknown_location(),
+                builder.current_location(),
                 builder.append_product(
-                    builder.unknown_location(),
+                    builder.current_location(),
                     &[builder.get_felt_constant_from_start(2)?, sign1, sign2],
                 )?,
             )?)?,
@@ -655,14 +655,14 @@ fn add_conditional_jmp_branch_slt_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     let unsigned_lt = uf;
     // signed_lt = (sign1 * signs_different) + unsigned_lt * (1 - signs_different);
     let signed_lt = builder.append_op_with_result(felt::add(
-        builder.unknown_location(),
-        builder.append_product(builder.unknown_location(), &[sign1, signs_different])?,
+        builder.current_location(),
+        builder.append_product(builder.current_location(), &[sign1, signs_different])?,
         builder.append_product(
-            builder.unknown_location(),
+            builder.current_location(),
             &[
                 unsigned_lt,
                 builder.append_op_with_result(felt::sub(
-                    builder.unknown_location(),
+                    builder.current_location(),
                     builder.get_felt_constant_from_start(1)?,
                     signs_different,
                 )?)?,
@@ -672,11 +672,11 @@ fn add_conditional_jmp_branch_slt_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     let eq = out_is_zero;
 
     // one-hot for funct3
-    let f3_one_hot = builder.append_one_hot(builder.unknown_location(), 8)?;
+    let f3_one_hot = builder.append_one_hot(builder.current_location(), 8)?;
     let f3_reconstructed =
-        builder.append_one_hot_reconstruction(builder.unknown_location(), &f3_one_hot)?;
+        builder.append_one_hot_reconstruction(builder.current_location(), &f3_one_hot)?;
     builder.append_conditional_constrain_eq(
-        builder.unknown_location(),
+        builder.current_location(),
         conditional,
         f3,
         f3_reconstructed,
@@ -694,34 +694,34 @@ fn add_conditional_jmp_branch_slt_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
 
     let one_minus = |v| -> Result<Value<'ctx, 'sco>> {
         builder.append_op_with_result(felt::sub(
-            builder.unknown_location(),
+            builder.current_location(),
             builder.get_felt_constant_from_start(1)?,
             v,
         )?)
     };
 
     let expected_flag = builder.append_sum(
-        builder.unknown_location(),
+        builder.current_location(),
         &[
-            builder.append_product(builder.unknown_location(), &[f3_one_hot[0], eq])?,
-            builder.append_product(builder.unknown_location(), &[f3_one_hot[1], one_minus(eq)?])?,
-            builder.append_product(builder.unknown_location(), &[f3_one_hot[2], signed_lt])?,
-            builder.append_product(builder.unknown_location(), &[f3_one_hot[3], unsigned_lt])?,
-            builder.append_product(builder.unknown_location(), &[f3_one_hot[4], signed_lt])?,
+            builder.append_product(builder.current_location(), &[f3_one_hot[0], eq])?,
+            builder.append_product(builder.current_location(), &[f3_one_hot[1], one_minus(eq)?])?,
+            builder.append_product(builder.current_location(), &[f3_one_hot[2], signed_lt])?,
+            builder.append_product(builder.current_location(), &[f3_one_hot[3], unsigned_lt])?,
+            builder.append_product(builder.current_location(), &[f3_one_hot[4], signed_lt])?,
             builder.append_product(
-                builder.unknown_location(),
+                builder.current_location(),
                 &[f3_one_hot[5], one_minus(signed_lt)?],
             )?,
-            builder.append_product(builder.unknown_location(), &[f3_one_hot[6], unsigned_lt])?,
+            builder.append_product(builder.current_location(), &[f3_one_hot[6], unsigned_lt])?,
             builder.append_product(
-                builder.unknown_location(),
+                builder.current_location(),
                 &[f3_one_hot[7], one_minus(unsigned_lt)?],
             )?,
         ],
     )?;
     // flag === expected_flag
     builder.append_conditional_constrain_eq(
-        builder.unknown_location(),
+        builder.current_location(),
         conditional,
         flag,
         expected_flag,
@@ -782,7 +782,7 @@ where
         ) -> Result<melior::ir::Operation<'ctx>, llzk::error::Error>,
 {
     let (lhs, rhs, out) = constrain_lookup_row3(builder, vars, query, row_multiplier)?;
-    let location = builder.unknown_location();
+    let location = builder.current_location();
 
     builder.append_conditional_range_constraint(conditional, lhs, 8)?;
     builder.append_conditional_range_constraint(conditional, rhs, 8)?;
@@ -830,7 +830,7 @@ fn add_rom_address_space_separator_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
         16 - common_constants::ROM_SECOND_WORD_BITS,
     )?;
 
-    let location = builder.unknown_location();
+    let location = builder.current_location();
     // Address decomposition by ROM chunk size.
     // address_high = rom_chunk + (rom_bound * q)
     builder.append_conditional_constrain_eq(
@@ -882,7 +882,7 @@ fn add_rom_read_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
 ) -> Result<()> {
     let (byte_address, low, high) = constrain_lookup_row3(builder, vars, query, row_multiplier)?;
     let word_index = builder.new_nondet_felt()?;
-    let location = builder.unknown_location();
+    let location = builder.current_location();
 
     builder.append_conditional_range_constraint(
         conditional,
@@ -914,7 +914,7 @@ fn add_range_check_16_with_zero_pads_lookup_constraints<'ctx, 'sco, F: FieldInfo
 ) -> Result<()> {
     let (value, zero_0, zero_1) = constrain_lookup_row3(builder, vars, query, row_multiplier)?;
     let zero = builder.get_felt_constant_from_start(0)?;
-    let location = builder.unknown_location();
+    let location = builder.current_location();
 
     builder.append_conditional_range_constraint(conditional, value, 16)?;
     builder.append_conditional_constrain_eq(location, conditional, zero_0, zero)?;
@@ -937,7 +937,7 @@ fn add_special_csr_properties_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
 
     let (csr_index, is_supported, is_for_delegation) =
         constrain_lookup_row3(builder, vars, query, row_multiplier)?;
-    let location = builder.unknown_location();
+    let location = builder.current_location();
 
     builder.append_conditional_range_constraint(conditional, csr_index, 12)?;
     builder.append_conditional_boolean_constraint(conditional, is_supported)?;
@@ -1003,7 +1003,7 @@ fn add_extend_loaded_value_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     conditional: Option<Value<'ctx, 'sco>>,
 ) -> Result<()> {
     let (input, out_low, out_high) = constrain_lookup_row3(builder, vars, query, row_multiplier)?;
-    let location = builder.unknown_location();
+    let location = builder.current_location();
     let (expected_low, expected_high) = builder.append_extend_loaded_value_outputs(input)?;
 
     builder.append_conditional_range_constraint(conditional, input, 20)?;
@@ -1022,7 +1022,7 @@ fn add_store_byte_source_contribution_lookup_constraints<'ctx, 'sco, F: FieldInf
     conditional: Option<Value<'ctx, 'sco>>,
 ) -> Result<()> {
     let (byte, bit_0, out) = constrain_lookup_row3(builder, vars, query, row_multiplier)?;
-    let location = builder.unknown_location();
+    let location = builder.current_location();
 
     builder.append_conditional_range_constraint(conditional, byte, 8)?;
     builder.append_conditional_boolean_constraint(conditional, bit_0)?;
@@ -1044,7 +1044,7 @@ fn add_store_byte_existing_contribution_lookup_constraints<'ctx, 'sco, F: FieldI
     conditional: Option<Value<'ctx, 'sco>>,
 ) -> Result<()> {
     let (word, bit_0, out) = constrain_lookup_row3(builder, vars, query, row_multiplier)?;
-    let location = builder.unknown_location();
+    let location = builder.current_location();
 
     builder.append_conditional_range_constraint(conditional, word, 16)?;
     builder.append_conditional_boolean_constraint(conditional, bit_0)?;
@@ -1176,7 +1176,7 @@ fn add_truncate_shift_amount_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
 ) -> Result<()> {
     let (input, truncated, zero_pad) = constrain_lookup_row3(builder, vars, query, row_multiplier)?;
     let quotient = builder.new_nondet_felt()?;
-    let location = builder.unknown_location();
+    let location = builder.current_location();
 
     builder.append_conditional_range_constraint(conditional, input, 16)?;
     builder.append_conditional_range_constraint(conditional, truncated, 5)?;
@@ -1210,7 +1210,7 @@ fn add_shift_implementation_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     conditional: Option<Value<'ctx, 'sco>>,
 ) -> Result<()> {
     let (input, in_place, overflow) = constrain_lookup_row3(builder, vars, query, row_multiplier)?;
-    let location = builder.unknown_location();
+    let location = builder.current_location();
     let (expected_in_place, expected_overflow) =
         builder.append_shift_implementation_outputs(input)?;
 
@@ -1230,7 +1230,7 @@ fn add_sra_sign_filler_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     conditional: Option<Value<'ctx, 'sco>>,
 ) -> Result<()> {
     let (input, low, high) = constrain_lookup_row3(builder, vars, query, row_multiplier)?;
-    let location = builder.unknown_location();
+    let location = builder.current_location();
     let (expected_low, expected_high) = builder.append_sra_sign_filler_outputs(input)?;
 
     builder.append_conditional_range_constraint(conditional, input, 7)?;
@@ -1250,7 +1250,7 @@ fn add_conditional_op_all_conditions_lookup_constraints<'ctx, 'sco, F: FieldInfo
 ) -> Result<()> {
     let (input, should_branch, should_store) =
         constrain_lookup_row3(builder, vars, query, row_multiplier)?;
-    let location = builder.unknown_location();
+    let location = builder.current_location();
     let (expected_branch, expected_store) =
         builder.append_conditional_op_all_conditions_outputs(input)?;
 
@@ -1281,7 +1281,7 @@ fn add_logical_shift_16_bit_lookup_constraints<
     conditional: Option<Value<'ctx, 'sco>>,
 ) -> Result<()> {
     let (input, low, high) = constrain_lookup_row3(builder, vars, query, row_multiplier)?;
-    let location = builder.unknown_location();
+    let location = builder.current_location();
     let (expected_low, expected_high) =
         builder.append_logical_shift_16_bit_outputs::<INPUT_IS_HIGH, IS_RIGHT_SHIFT>(input)?;
 
@@ -1301,7 +1301,7 @@ fn add_sra_16_bit_input_sign_fill_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     conditional: Option<Value<'ctx, 'sco>>,
 ) -> Result<()> {
     let (input, low, high) = constrain_lookup_row3(builder, vars, query, row_multiplier)?;
-    let location = builder.unknown_location();
+    let location = builder.current_location();
     let (expected_low, expected_high) = builder.append_sra_16_bit_input_sign_fill_outputs(input)?;
 
     builder.append_conditional_range_constraint(conditional, input, 21)?;

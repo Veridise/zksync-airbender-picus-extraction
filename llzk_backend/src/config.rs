@@ -55,3 +55,23 @@ impl fmt::Display for LlzkStructLayout {
         )
     }
 }
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, ValueEnum)]
+/// Options for how semantic debug locations are rendered in emitted LLZK IR.
+pub enum DebugLocationStyle {
+    /// Emit plain file/line/column locations only.
+    FileLineCol,
+    /// Emit descriptive MLIR `NameLoc`s for layout values such as arguments and members.
+    Named,
+}
+
+impl fmt::Display for DebugLocationStyle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(
+            self.to_possible_value()
+                .expect("ValueEnum variant should always have a PossibleValue")
+                .get_name(),
+        )
+    }
+}
