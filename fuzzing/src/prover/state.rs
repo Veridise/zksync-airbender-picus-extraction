@@ -6,7 +6,6 @@ use crate::prover::circuits::CircuitRegistry;
 use crate::prover::crashes::BugReport;
 use crate::prover::crashes::CrashArtifact;
 use crate::prover::seeds::expand_seed_cases;
-use crate::prover::seeds::load_or_create_cache_entries;
 use crate::prover::seeds::CacheEntry;
 use crate::prover::seeds::SeedCase;
 use crate::prover::seeds::SeedProgram;
@@ -15,10 +14,6 @@ use crate::prover::FuzzerConfig;
 /// In-memory state accumulated across a fuzzing run.
 #[derive(Debug, Default)]
 pub struct FuzzerState {
-    /// Seed programs discovered from the input corpus directory.
-    pub programs: Vec<SeedProgram>,
-    /// Cache entries loaded or constructed during initialization.
-    pub cache_entries: Vec<CacheEntry>,
     /// Flattened per-circuit seed cases derived from the cache.
     pub seed_cases: Vec<SeedCase>,
     /// Next crash id to allocate when persisting a bug report.
@@ -28,14 +23,14 @@ pub struct FuzzerState {
 impl FuzzerState {
     /// Builds the initial in-memory fuzzer state from the configured corpus and output dirs.
     pub fn new(config: &FuzzerConfig, registry: &CircuitRegistry) -> io::Result<Self> {
-        let programs = SeedProgram::find_programs(&config.input_dir)?;
-        let cache_entries = load_or_create_cache_entries(&programs, registry, &config.cache_dir)?;
-        let seed_cases = expand_seed_cases(&cache_entries);
+        let cache_entries = SeedProgram::find_programs(&config.input_dir)?
+            .into_iter()
+            .map(|program| CacheEntry::load_or_create(program, registry, &config.cache_dir))
+            .collect::<Result<Vec<_>, _>>()?;
+        let seed_cases = expand_seed_cases(cache_entries);
         let next_crash_id = discover_next_crash_id(&config.crash_dir)?;
 
         Ok(Self {
-            programs,
-            cache_entries,
             seed_cases,
             next_crash_id,
         })

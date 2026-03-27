@@ -21,6 +21,7 @@ use prover::prover_stages::unrolled_prover::UnrolledModeProof;
 use prover::prover_stages::ProverData;
 use prover::prover_stages::SetupPrecomputations;
 use prover::worker::Worker;
+use prover::ShuffleRamSetupAndTeardown;
 use prover::WitnessEvaluationDataForExecutionFamily;
 use prover::DEFAULT_TRACE_PADDING_MULTIPLE;
 use riscv_transpiler::ir::preprocess_bytecode;
@@ -37,6 +38,7 @@ use std::borrow::Cow;
 use crate::rv32im::prover::checks::validate_inits_and_teardowns;
 use crate::rv32im::prover::checks::validate_sets;
 use crate::rv32im::types::CountersT;
+use crate::rv32im::vm::VMSnapshot;
 
 mod accumulators;
 mod checks;
@@ -77,6 +79,16 @@ pub struct SmokeProofResult {
 }
 
 type DecoderConfig = FullUnsignedMachineDecoderConfig;
+
+#[derive(Clone)]
+pub(crate) struct PreparedExecution {
+    pub counters: CountersT,
+    pub total_unique_teardowns: usize,
+    pub inits_and_teardowns: Vec<ShuffleRamSetupAndTeardown>,
+    pub flattened_inits_and_teardowns: Vec<(u32, (common_constants::TimestampScalar, u32))>,
+    pub expected_final_state: State<CountersT>,
+    pub preprocessing_data: factories::PreprocessingData,
+}
 
 struct ProvingPayload<'c, 'a, A, T, const N: usize>
 where
@@ -235,25 +247,22 @@ impl Prover {
     }
 }
 
-pub fn prove_vm_result(
-    snapshotter: &mut SimpleSnapshotter<CountersT, { common_constants::ROM_SECOND_WORD_BITS }>,
-    state: &mut State<CountersT>,
-    ram: &mut RamWithRomRegion<{ common_constants::ROM_SECOND_WORD_BITS }>,
-    text_section: &[u32],
-    tape: &SimpleTape,
-    binary: &[u32],
-    cycles_bound: usize,
-) {
-    let prover = Prover::new();
-    let _total_snapshots = snapshotter.snapshots.len();
+pub(crate) fn prepare_execution(snapshot: VMSnapshot, worker: &Worker) -> PreparedExecution {
+    let _total_snapshots = snapshot.snapshotter().snapshots.len();
 
-    let exact_cycles_passed = (state.timestamp - INITIAL_TIMESTAMP) / TIMESTAMP_STEP;
+    let exact_cycles_passed = (snapshot.state().timestamp - INITIAL_TIMESTAMP) / TIMESTAMP_STEP;
 
     println!("Passed exactly {} cycles", exact_cycles_passed);
 
-    let counters = snapshotter.snapshots.last().unwrap().state.counters;
+    let counters = snapshot
+        .snapshotter()
+        .snapshots
+        .last()
+        .unwrap()
+        .state
+        .counters;
 
-    let shuffle_ram_touched_addresses = ram.collect_inits_and_teardowns(prover.worker(), Global);
+    let shuffle_ram_touched_addresses = snapshot.ram().collect_inits_and_teardowns(worker, Global);
 
     use prover::tracers::oracles::chunk_lazy_init_and_teardown;
     let total_unique_teardowns: usize = shuffle_ram_touched_addresses
@@ -267,7 +276,7 @@ pub fn prove_vm_result(
         1,
         NUM_CYCLES_PER_CHUNK * NUM_INIT_AND_TEARDOWN_SETS,
         &shuffle_ram_touched_addresses,
-        prover.worker(),
+        worker,
     );
     assert_eq!(num_trivial, 0, "trivial padding is not expected in tests");
 
@@ -276,132 +285,137 @@ pub fn prove_vm_result(
         .flatten()
         .collect();
 
-    println!("Finished at PC = 0x{:08x}", state.pc);
-    for (reg_idx, reg) in state.registers.iter().enumerate() {
+    println!("Finished at PC = 0x{:08x}", snapshot.state().pc);
+    for (reg_idx, reg) in snapshot.state().registers.iter().enumerate() {
         println!("x{} = {}", reg_idx, reg.value);
     }
 
-    let mut expected_final_state = *state;
+    let mut expected_final_state = snapshot.state();
     expected_final_state.counters = Default::default();
 
-    let external_challenges = make_external_challenges();
-    // evaluate memory witness
-    let preprocessing_data = make_preprocessing_data(text_section);
-    let mut accumulators = Accumulators::new(*state, &external_challenges);
-    let mut read_sets = ReadSets::new(*state);
-    let mut write_sets = WriteSets::new();
+    let preprocessing_data = make_preprocessing_data(snapshot.text());
 
     validate_counters(&counters);
 
+    PreparedExecution {
+        counters,
+        total_unique_teardowns,
+        inits_and_teardowns,
+        flattened_inits_and_teardowns,
+        expected_final_state,
+        preprocessing_data,
+    }
+}
+
+pub fn prove_vm_result(snapshot: VMSnapshot) {
+    let prover = Prover::new();
+    let prepared = prepare_execution(snapshot, prover.worker());
+    let external_challenges = make_external_challenges();
+    let mut accumulators = Accumulators::new(snapshot.state(), &external_challenges);
+    let mut read_sets = ReadSets::new(snapshot.state());
+    let mut write_sets = WriteSets::new();
+
     prover.prove_add_sub_lui_auipc_mop(
         &mut accumulators,
-        snapshotter,
-        &counters,
-        tape,
-        cycles_bound,
-        expected_final_state,
+        snapshot,
+        &prepared,
         &mut read_sets,
         &mut write_sets,
-        &preprocessing_data,
     );
 
     prover.prove_jump_branch_slt(
         &mut accumulators,
-        snapshotter,
-        &counters,
-        tape,
-        cycles_bound,
-        expected_final_state,
+        snapshot.snapshotter(),
+        &prepared.counters,
+        snapshot.tape(),
+        snapshot.cycles_bound(),
+        prepared.expected_final_state,
         &mut read_sets,
         &mut write_sets,
-        &preprocessing_data,
+        &prepared.preprocessing_data,
     );
 
     prover.prove_xor_and_or_shift_csr(
         &mut accumulators,
-        snapshotter,
-        &counters,
-        tape,
-        cycles_bound,
-        expected_final_state,
+        snapshot,
+        &prepared,
         &mut read_sets,
         &mut write_sets,
-        &preprocessing_data,
     );
 
     prover.prove_mul_div(
         &mut accumulators,
-        snapshotter,
-        &counters,
-        tape,
-        cycles_bound,
-        expected_final_state,
+        snapshot.snapshotter(),
+        &prepared.counters,
+        snapshot.tape(),
+        snapshot.cycles_bound(),
+        prepared.expected_final_state,
         &mut read_sets,
         &mut write_sets,
-        &preprocessing_data,
+        &prepared.preprocessing_data,
     );
 
     prover.prove_load_store(
         &mut accumulators,
-        snapshotter,
-        &counters,
-        tape,
-        cycles_bound,
-        expected_final_state,
+        snapshot.snapshotter(),
+        &prepared.counters,
+        snapshot.tape(),
+        snapshot.cycles_bound(),
+        prepared.expected_final_state,
         &mut read_sets,
         &mut write_sets,
-        &preprocessing_data,
-        binary,
+        &prepared.preprocessing_data,
+        snapshot.binary(),
     );
 
     prover.prove_subword_load_store(
         &mut accumulators,
-        snapshotter,
-        &counters,
-        tape,
-        cycles_bound,
-        expected_final_state,
+        snapshot.snapshotter(),
+        &prepared.counters,
+        snapshot.tape(),
+        snapshot.cycles_bound(),
+        prepared.expected_final_state,
         &mut read_sets,
         &mut write_sets,
-        &preprocessing_data,
-        binary,
+        &prepared.preprocessing_data,
+        snapshot.binary(),
     );
     // Machine state permutation ended
     validate_sets(&read_sets, &write_sets);
 
     prover.prove_init_and_teardowns(
         &mut accumulators,
-        snapshotter,
-        &counters,
-        tape,
-        cycles_bound,
-        expected_final_state,
+        snapshot.snapshotter(),
+        &prepared.counters,
+        snapshot.tape(),
+        snapshot.cycles_bound(),
+        prepared.expected_final_state,
         &mut read_sets,
         &mut write_sets,
-        &preprocessing_data,
-        &inits_and_teardowns,
+        &prepared.preprocessing_data,
+        &prepared.inits_and_teardowns,
     );
     // now prove delegation circuits
     prover.prove_blake_delegation(
         &mut accumulators,
-        &counters,
-        snapshotter,
+        &prepared.counters,
+        snapshot.snapshotter(),
         &mut read_sets,
         &mut write_sets,
-        tape,
-        cycles_bound,
-        expected_final_state,
+        snapshot.tape(),
+        snapshot.cycles_bound(),
+        prepared.expected_final_state,
     );
 
     prover.prove_keccak_delegation(
         &mut accumulators,
-        &counters,
-        snapshotter,
+        &prepared.counters,
+        snapshot.snapshotter(),
         &mut read_sets,
         &mut write_sets,
-        tape,
-        cycles_bound,
-        expected_final_state,
+        snapshot.tape(),
+        snapshot.cycles_bound(),
+        prepared.expected_final_state,
     );
 
     dbg!(accumulators.permutation_argument());
@@ -411,8 +425,8 @@ pub fn prove_vm_result(
     validate_inits_and_teardowns(
         &read_sets,
         &write_sets,
-        &flattened_inits_and_teardowns,
+        &prepared.flattened_inits_and_teardowns,
         &accumulators,
-        total_unique_teardowns,
+        prepared.total_unique_teardowns,
     );
 }

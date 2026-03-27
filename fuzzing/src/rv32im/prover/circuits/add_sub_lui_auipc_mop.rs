@@ -21,9 +21,11 @@ use crate::rv32im::prover::circuits::NonMemoryCircuitProver;
 use crate::rv32im::prover::factories::PreprocessingData;
 use crate::rv32im::prover::sets::ReadSets;
 use crate::rv32im::prover::sets::WriteSets;
+use crate::rv32im::prover::PreparedExecution;
 use crate::rv32im::prover::Prover;
 use crate::rv32im::prover::TRACE_LEN_LOG2;
 use crate::rv32im::types::CountersT;
+use crate::rv32im::vm::VMSnapshot;
 
 pub struct AddSubLuiAuipcMop;
 
@@ -69,26 +71,18 @@ impl Prover {
     pub fn prove_add_sub_lui_auipc_mop(
         &self,
         accumulators: &mut Accumulators,
-        snapshotter: &SimpleSnapshotter<CountersT, { common_constants::ROM_SECOND_WORD_BITS }>,
-        counters: &DelegationsAndFamiliesCounters,
-        tape: &SimpleTape,
-        cycles_bound: usize,
-        expected_final_state: State<CountersT>,
+        snapshot: VMSnapshot,
+        prepared: &PreparedExecution,
         read_sets: &mut ReadSets,
         write_sets: &mut WriteSets,
-        preprocessing_data: &PreprocessingData,
     ) {
         let circuit = AddSubLuiAuipcMop;
         circuit.prove(
+            snapshot,
+            prepared,
             accumulators,
-            snapshotter,
-            counters,
-            tape,
-            cycles_bound,
-            expected_final_state,
             read_sets,
             write_sets,
-            preprocessing_data,
             self,
             self.worker(),
         );

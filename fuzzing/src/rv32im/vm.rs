@@ -16,6 +16,51 @@ use crate::rv32im::DEFAULT_CYCLES;
 
 type Ram = RamWithRomRegion<{ common_constants::ROM_SECOND_WORD_BITS }>;
 
+#[derive(Copy, Clone)]
+pub struct VMSnapshot<'vm> {
+    ram: &'vm Ram,
+    state: State<CountersT>,
+    snapshotter: &'vm Snapshotter,
+    tape: &'vm SimpleTape,
+
+    #[cfg(feature = "prover")]
+    binary: &'vm [u32],
+    #[cfg(feature = "prover")]
+    text: Option<&'vm [u32]>,
+}
+
+impl<'vm> VMSnapshot<'vm> {
+    pub fn snapshotter(&self) -> &'vm Snapshotter {
+        self.snapshotter
+    }
+
+    pub fn state(&self) -> State<vm::DelegationsAndFamiliesCounters> {
+        self.state
+    }
+
+    pub fn ram(&self) -> &'vm Ram {
+        self.ram
+    }
+
+    pub fn tape(&self) -> &'vm SimpleTape {
+        self.tape
+    }
+
+    pub fn cycles_bound(&self) -> usize {
+        VM::cycle_count()
+    }
+
+    #[cfg(feature = "prover")]
+    pub fn binary(&self) -> &'vm [u32] {
+        self.binary
+    }
+
+    #[cfg(feature = "prover")]
+    pub fn text(&self) -> &'vm [u32] {
+        self.text.unwrap_or(self.binary)
+    }
+}
+
 pub struct VM {
     finished: bool,
     tape: SimpleTape,
@@ -23,6 +68,7 @@ pub struct VM {
     state: State<CountersT>,
     snapshotter: Snapshotter,
     non_determinism: QuasiUARTSource,
+
     #[cfg(feature = "prover")]
     binary: Vec<u32>,
     #[cfg(feature = "prover")]
@@ -75,17 +121,24 @@ impl VM {
         })
     }
 
+    pub fn final_state(&self) -> &State<CountersT> {
+        &self.state
+    }
+
+    pub fn snapshot(&self) -> VMSnapshot {
+        VMSnapshot {
+            ram: &self.ram,
+            state: self.state,
+            snapshotter: &self.snapshotter,
+            binary: &self.binary,
+            text: self.text.as_deref(),
+            tape: &self.tape,
+        }
+    }
+
     #[cfg(feature = "prover")]
     fn prove(&mut self) {
-        crate::rv32im::prover::prove_vm_result(
-            &mut self.snapshotter,
-            &mut self.state,
-            &mut self.ram,
-            self.text.as_deref().unwrap_or(&self.binary),
-            &self.tape,
-            &self.binary,
-            Self::cycle_count(),
-        );
+        crate::rv32im::prover::prove_vm_result(self.snapshot());
     }
 }
 

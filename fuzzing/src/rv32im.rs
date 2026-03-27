@@ -2,6 +2,7 @@ use clap::ValueEnum;
 
 pub use crate::rv32im::unicorn::run_on_unicorn;
 pub use crate::rv32im::vm::run_vm as run_on_airbender;
+pub use crate::rv32im::vm::VM;
 
 pub(crate) mod binary;
 mod common;
@@ -9,7 +10,7 @@ mod common;
 pub(crate) mod prover;
 mod types;
 mod unicorn;
-mod vm;
+pub(crate) mod vm;
 
 /// Available fuzzing modes
 #[derive(ValueEnum, Clone, Copy, PartialEq, Eq)]

@@ -41,11 +41,13 @@ use crate::rv32im::prover::circuits::traces::TracesFactory;
 use crate::rv32im::prover::factories::PreprocessingData;
 use crate::rv32im::prover::sets::ReadSets;
 use crate::rv32im::prover::sets::WriteSets;
+use crate::rv32im::prover::PreparedExecution;
 use crate::rv32im::prover::Prover;
 use crate::rv32im::prover::ProvingPayload;
 use crate::rv32im::prover::NUM_CYCLES_PER_CHUNK;
 use crate::rv32im::types::CountersT;
 use crate::rv32im::types::Snapshotter;
+use crate::rv32im::vm::VMSnapshot;
 
 pub mod add_sub_lui_auipc_mop;
 pub mod blake_delegation;
@@ -106,6 +108,12 @@ pub struct ProofInputs<T> {
     buffer: Vec<T>,
 }
 
+impl<T> ProofInputs<T> {
+    pub fn family_idx(&self) -> u8 {
+        self.family_idx
+    }
+}
+
 pub trait CircuitProver<const CIRCUIT_FAMILY_IDX: u8> {
     type BufferElt: serde::Serialize + for<'de> serde::Deserialize<'de>;
     type Tracer<'t>: WitnessTracer;
@@ -125,30 +133,28 @@ pub trait CircuitProver<const CIRCUIT_FAMILY_IDX: u8> {
 
     fn create_proof_input(
         &self,
-        snapshotter: &Snapshotter,
-        counters: &CountersT,
-        tape: &SimpleTape,
-        cycles_bound: usize,
-        expected_final_state: State<CountersT>,
-        preprocessing_data: &PreprocessingData,
+        snapshot: VMSnapshot,
+        prepared: &PreparedExecution,
         table_driver: &mut TableDriver<Mersenne31Field>,
     ) -> ProofInputs<Self::BufferElt> {
         let circuit = self.compile_circuit();
 
         self.fill_table(table_driver);
 
-        let num_calls = counters.get_calls_to_circuit_family::<CIRCUIT_FAMILY_IDX>();
+        let num_calls = prepared
+            .counters
+            .get_calls_to_circuit_family::<CIRCUIT_FAMILY_IDX>();
         let mut buffer = self.create_buffer(num_calls);
         run_replayer_vm(
-            snapshotter,
-            tape,
-            cycles_bound,
-            expected_final_state,
+            snapshot.snapshotter(),
+            snapshot.tape(),
+            snapshot.cycles_bound(),
+            prepared.expected_final_state,
             &mut self.create_tracer(&mut [&mut buffer[..]]),
         );
 
         let (decoder_table_data, witness_gen_data) =
-            get_preprocessing_data(preprocessing_data, CIRCUIT_FAMILY_IDX);
+            get_preprocessing_data(&prepared.preprocessing_data, CIRCUIT_FAMILY_IDX);
 
         ProofInputs {
             family_idx: CIRCUIT_FAMILY_IDX,
@@ -159,6 +165,7 @@ pub trait CircuitProver<const CIRCUIT_FAMILY_IDX: u8> {
         }
     }
 
+    /// Pass None to table_driver if the proof inputs come from deserialized data.
     fn check_proof(
         &self,
         inputs: ProofInputs<Self::BufferElt>,
@@ -200,29 +207,17 @@ pub trait CircuitProver<const CIRCUIT_FAMILY_IDX: u8> {
 
     fn prove(
         &self,
+        snapshot: VMSnapshot,
+        prepared: &PreparedExecution,
         accumulators: &mut Accumulators,
-        snapshotter: &Snapshotter,
-        counters: &CountersT,
-        tape: &SimpleTape,
-        cycles_bound: usize,
-        expected_final_state: State<CountersT>,
         read_sets: &mut ReadSets,
         write_sets: &mut WriteSets,
-        preprocessing_data: &PreprocessingData,
         prover: &Prover,
         worker: &Worker,
     ) {
         println!("Will try to prove {} circuit", self.name());
         let mut table_driver = TableDriver::<Mersenne31Field>::new();
-        let inputs = self.create_proof_input(
-            snapshotter,
-            counters,
-            tape,
-            cycles_bound,
-            expected_final_state,
-            preprocessing_data,
-            &mut table_driver,
-        );
+        let inputs = self.create_proof_input(snapshot, prepared, &mut table_driver);
         self.check_proof(
             inputs,
             accumulators,

@@ -10,6 +10,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use prover::risc_v_simulator::machine_mode_only_unrolled::NonMemoryOpcodeTracingDataWithTimestamp;
+use prover::worker::Worker;
 use rand::prelude::IndexedRandom;
 use rand::rngs::StdRng;
 
@@ -17,6 +18,8 @@ use crate::prover::circuits::CircuitKind;
 use crate::prover::circuits::CircuitRegistry;
 use crate::rv32im::binary::Binary;
 use crate::rv32im::prover::circuits::ProofInputs;
+use crate::rv32im::prover::prepare_execution;
+use crate::rv32im::VM;
 
 #[derive(Debug)]
 pub struct SeedProgram {
@@ -129,7 +132,7 @@ pub struct CacheEntry {
 
 impl CacheEntry {
     pub fn load_or_create(
-        program: &SeedProgram,
+        program: SeedProgram,
         registry: &CircuitRegistry,
         cache_dir: &Path,
     ) -> io::Result<Self> {
@@ -145,9 +148,22 @@ impl CacheEntry {
         Ok(entry)
     }
 
-    fn create(program: &SeedProgram, registry: &CircuitRegistry) -> io::Result<Self> {
-        let _ = (program, registry);
-        todo!("execute the seed program and generate per-circuit cached proof inputs")
+    fn create(program: SeedProgram, registry: &CircuitRegistry) -> io::Result<Self> {
+        let binary = program.binary()?;
+        let mut vm = VM::new(&binary);
+        vm.run();
+        let worker = Worker::new_with_num_threads(1);
+        let snapshot = vm.snapshot();
+        let prepared = prepare_execution(snapshot, &worker);
+
+        Ok(Self {
+            seed: program.name,
+            inputs: registry
+                .circuits()
+                .iter()
+                .map(|kind| registry.generate_inputs(*kind, snapshot, &prepared))
+                .collect(),
+        })
     }
 
     fn load(path: &Path) -> io::Result<Self> {
@@ -200,7 +216,8 @@ pub enum StoredProofInputs {
 impl StoredProofInputs {
     pub fn circuit(&self) -> CircuitKind {
         match self {
-            Self::AddSubLuiAuipcMop(_) => CircuitKind::AddSubLuiAuipcMop,
+            Self::AddSubLuiAuipcMop(inputs) => CircuitKind::from_family_idx(inputs.family_idx())
+                .expect("stored proof inputs contain an unsupported circuit family idx"),
             Self::JumpBranchSlt(_) => CircuitKind::JumpBranchSlt,
             Self::XorAndOrShiftCsr(_) => CircuitKind::XorAndOrShiftCsr,
             Self::MulDiv(_) => CircuitKind::MulDiv,
@@ -213,11 +230,11 @@ impl StoredProofInputs {
     }
 }
 
-pub fn expand_seed_cases(entries: &[CacheEntry]) -> Vec<SeedCase> {
+pub fn expand_seed_cases(entries: impl IntoIterator<Item = CacheEntry>) -> Vec<SeedCase> {
     entries
-        .iter()
+        .into_iter()
         .flat_map(|entry| {
-            entry.inputs.iter().cloned().map(|base_input| SeedCase {
+            entry.inputs.into_iter().map(move |base_input| SeedCase {
                 seed_program: entry.seed.clone(),
                 circuit: base_input.circuit(),
                 base_input,
