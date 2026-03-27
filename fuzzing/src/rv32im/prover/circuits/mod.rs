@@ -97,7 +97,7 @@ fn get_preprocessing_data(
 
 type FullTrace<A, const N: usize> = WitnessEvaluationDataForExecutionFamily<N, A>;
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ProofInputs<T> {
     family_idx: u8,
     circuit: CompiledCircuitArtifact<Mersenne31Field>,

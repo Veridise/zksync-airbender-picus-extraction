@@ -40,7 +40,7 @@ use crate::rv32im::types::CountersT;
 
 mod accumulators;
 mod checks;
-mod circuits;
+pub(crate) mod circuits;
 mod factories;
 mod sets;
 
