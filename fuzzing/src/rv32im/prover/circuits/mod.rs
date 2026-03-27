@@ -5,10 +5,12 @@ use prover::check_satisfied;
 use prover::common_constants;
 use prover::cs::cs::oracle::ExecutorFamilyDecoderData;
 use prover::cs::cs::oracle::Oracle;
+use prover::cs::devices::aux_data;
 use prover::cs::machine::ops::unrolled::materialize_flattened_decoder_table;
 use prover::cs::machine::ops::unrolled::DecoderTableEntry;
 use prover::cs::one_row_compiler::CompiledCircuitArtifact;
 use prover::cs::tables::TableDriver;
+use prover::definitions::AuxArgumentsBoundaryValues;
 use prover::field::Mersenne31Field;
 use prover::merkle_trees::DefaultTreeConstructor;
 use prover::prover_stages::unrolled_prover::UnrolledModeProof;
@@ -34,6 +36,8 @@ use riscv_transpiler::witness::NonMemDestinationHolder;
 use riscv_transpiler::witness::WitnessTracer;
 
 use crate::rv32im::prover::accumulators::Accumulators;
+use crate::rv32im::prover::circuits::traces::FullAndMemTraces;
+use crate::rv32im::prover::circuits::traces::TracesFactory;
 use crate::rv32im::prover::factories::PreprocessingData;
 use crate::rv32im::prover::sets::ReadSets;
 use crate::rv32im::prover::sets::WriteSets;
@@ -51,6 +55,7 @@ pub mod keccak_delegation;
 pub mod load_store;
 pub mod mul_div;
 pub mod subword_load_store;
+mod traces;
 pub mod xor_and_or_shift_csr;
 
 fn run_replayer_vm(
@@ -90,70 +95,7 @@ fn get_preprocessing_data(
     (decoder_table_data, witness_gen_data)
 }
 
-struct Traces<A, const N: usize>
-where
-    A: Allocator + Clone,
-{
-    full_trace: WitnessEvaluationDataForExecutionFamily<N, A>,
-    memory_trace: MemoryOnlyWitnessEvaluationDataForExecutionFamily<N, A>,
-}
-
-impl Traces<Global, DEFAULT_TRACE_PADDING_MULTIPLE> {
-    pub fn new<O: Oracle<Mersenne31Field>>(
-        circuit: &CompiledCircuitArtifact<Mersenne31Field>,
-        oracle: &O,
-        table_driver: &TableDriver<Mersenne31Field>,
-        witness_eval: fn(&mut SimpleWitnessProxy<'_, O>),
-        read_sets: &mut ReadSets,
-        write_sets: &mut WriteSets,
-        worker: &Worker,
-    ) -> Self {
-        let memory_trace = evaluate_memory_witness_for_executor_family::<_, Global>(
-            circuit,
-            NUM_CYCLES_PER_CHUNK,
-            oracle,
-            worker,
-            Global,
-        );
-
-        let full_trace = evaluate_witness_for_executor_family::<_, Global>(
-            circuit,
-            witness_eval,
-            NUM_CYCLES_PER_CHUNK,
-            oracle,
-            table_driver,
-            worker,
-            Global,
-        );
-
-        ensure_memory_trace_consistency(&memory_trace, &full_trace);
-
-        parse_state_permutation_elements_from_full_trace(
-            &circuit,
-            &full_trace,
-            write_sets.write_set_mut(),
-            read_sets.read_set_mut(),
-        );
-        parse_shuffle_ram_accesses_from_full_trace(
-            &circuit,
-            &full_trace,
-            write_sets.memory_write_set_mut(),
-            read_sets.memory_read_set_mut(),
-        );
-
-        let is_satisfied = check_satisfied(
-            &circuit,
-            &full_trace.exec_trace,
-            full_trace.num_witness_columns,
-        );
-        assert!(is_satisfied);
-
-        Self {
-            full_trace,
-            memory_trace,
-        }
-    }
-}
+type FullTrace<A, const N: usize> = WitnessEvaluationDataForExecutionFamily<N, A>;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct ProofInputs<T> {
@@ -168,6 +110,18 @@ pub trait CircuitProver<const CIRCUIT_FAMILY_IDX: u8> {
     type BufferElt: serde::Serialize + for<'de> serde::Deserialize<'de>;
     type Tracer<'t>: WitnessTracer;
     type Oracle<'o>: Oracle<Mersenne31Field>;
+    type TracesFactory<'o, 'r>: TracesFactory<
+        (
+            &'r Self::Oracle<'o>,
+            fn(&mut SimpleWitnessProxy<'_, Self::Oracle<'o>>),
+            &'r mut ReadSets,
+            &'r mut WriteSets,
+        ),
+        FullTrace = FullTrace<Global, DEFAULT_TRACE_PADDING_MULTIPLE>,
+    >
+    where
+        Self::Oracle<'o>: 'r,
+        'o: 'r;
 
     fn create_proof_input(
         &self,
@@ -224,22 +178,20 @@ pub trait CircuitProver<const CIRCUIT_FAMILY_IDX: u8> {
             }
         };
         let oracle = self.create_oracle(&inputs.buffer, &inputs.witness_gen_data);
-        let traces = Traces::new(
+        let traces = Self::TracesFactory::new(
             &inputs.circuit,
-            &oracle,
+            (&oracle, Self::witness_eval, read_sets, write_sets),
             table_driver,
-            Self::witness_eval,
-            read_sets,
-            write_sets,
             worker,
         );
+        let aux_data = self.create_aux_data(&traces);
 
         let (_, proof) = prover.run_prover2(ProvingPayload::<_, DefaultTreeConstructor, _>::new(
             &inputs.circuit,
-            traces.full_trace,
+            traces.take_full_trace(),
             table_driver,
             &inputs.decoder_table_data,
-            &[],
+            &aux_data,
             worker,
         ));
         self.check_constraints(&proof, &oracle);
@@ -303,6 +255,14 @@ pub trait CircuitProver<const CIRCUIT_FAMILY_IDX: u8> {
     fn check_constraints(&self, proof: &UnrolledModeProof, oracle: &Self::Oracle<'_>);
 
     fn accumulate(&self, accumulators: &mut Accumulators, proof: &UnrolledModeProof);
+
+    #[allow(unused_variables)]
+    fn create_aux_data<'i, 'r>(
+        &self,
+        traces: &Self::TracesFactory<'i, 'r>,
+    ) -> Vec<AuxArgumentsBoundaryValues> {
+        vec![]
+    }
 }
 
 trait NonMemoryCircuitProver<const N: u8> {
@@ -316,10 +276,12 @@ trait NonMemoryCircuitProver<const N: u8> {
 
 impl<const N: u8, T: NonMemoryCircuitProver<N>> CircuitProver<N> for T {
     type BufferElt = NonMemoryOpcodeTracingDataWithTimestamp;
-
     type Tracer<'t> = NonMemDestinationHolder<'t, N>;
-
     type Oracle<'o> = NonMemoryCircuitOracle<'o>;
+    type TracesFactory<'o, 'r>
+        = FullAndMemTraces<Global, DEFAULT_TRACE_PADDING_MULTIPLE>
+    where
+        NonMemoryCircuitOracle<'o>: 'r;
 
     fn compile_circuit(&self) -> CompiledCircuitArtifact<Mersenne31Field> {
         self.compile_circuit()
