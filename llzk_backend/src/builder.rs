@@ -1,10 +1,11 @@
 //! Builder types for encapsulating common codegen tasks.
 //!
 //! Contains:
-//! - A generic builder with stateless factory methods.
+//! - A module-scoped helper with stateless factory methods.
 //! - An operations builder meant for creating ops inside a function.
 //! - A struct builder.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
@@ -16,29 +17,154 @@ use llzk::builder::OpBuilder;
 use llzk::dialect::bool;
 use llzk::dialect::constrain;
 use llzk::dialect::felt;
+use llzk::operation::WalkOperationMutLike;
 use llzk::prelude::dialect::array;
 use llzk::prelude::dialect::r#struct;
 use llzk::prelude::melior_dialects::arith;
 use llzk::prelude::*;
 use llzk::utils::IsA;
+use melior::ir::Identifier;
 use prover::cs::definitions::REGISTER_SIZE;
 
+use crate::codegen::SpecialCsrPropertiesMetadata;
+use crate::config::DebugLocationStyle;
 use crate::field::FieldInfo;
 
-/// Root builder with convenience factory methods and access to the root LLZK module.
-pub struct ModuleBuilder<'ctx, F: FieldInfo> {
+/// Synthetic semantic debug location used to annotate emitted LLZK IR even when the source
+/// circuit does not carry real file spans.
+///
+/// The filename identifies the lowering subsystem, while the line/column pair encodes stable
+/// zero-based indices inside that subsystem. For some location families, the filename also carries
+/// a descriptive hook kind (for example `llzk://compute/runtime/oracle_u32`). These locations are
+/// meant for analyzer correlation, not source navigation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticLocation {
+    path: Cow<'static, str>,
+    line: usize,
+    column: usize,
+}
+
+impl SemanticLocation {
+    /// Create a semantic location from its virtual path and zero-based line/column coordinates.
+    pub const fn new(path: &'static str, line: usize, column: usize) -> Self {
+        Self {
+            path: Cow::Borrowed(path),
+            line,
+            column,
+        }
+    }
+
+    /// Create a semantic location whose virtual path is derived dynamically.
+    pub fn new_owned(path: String, line: usize, column: usize) -> Self {
+        Self {
+            path: Cow::Owned(path),
+            line,
+            column,
+        }
+    }
+
+    /// Location family for boolean constraints synthesized from declared boolean variables.
+    pub fn constrain_boolean(index: usize) -> Self {
+        Self::new("llzk://constrain/booleans", index, 0)
+    }
+
+    /// Location family for explicit range checks.
+    pub fn constrain_range_check(index: usize) -> Self {
+        Self::new("llzk://constrain/range_checks", index, 0)
+    }
+
+    /// Location family for top-level lookup constraints.
+    pub fn constrain_lookup(index: usize) -> Self {
+        Self::new("llzk://constrain/lookups", index, 0)
+    }
+
+    /// Location family for top-level algebraic constraints.
+    pub fn constrain_constraint(index: usize) -> Self {
+        Self::new("llzk://constrain/constraints", index, 0)
+    }
+
+    /// Location family for top-level witness SSA expressions lowered into `@compute`.
+    pub fn compute_ssa(index: usize) -> Self {
+        Self::new("llzk://compute/ssa", index, 0)
+    }
+
+    /// Location family for runtime hooks used by one witness SSA expression.
+    ///
+    /// `path` should identify the concrete hook kind (for example
+    /// `llzk://compute/runtime/oracle_u32`). The line encodes the zero-based SSA expression
+    /// index, while the column remains available for any future substructure within that hook.
+    pub const fn compute_runtime(path: &'static str, index: usize) -> Self {
+        Self::new(path, index, 0)
+    }
+
+    /// Location for the top-level LLZK module.
+    pub fn layout_module(name: &str) -> Self {
+        Self::new_owned(format!("llzk://layout/module/{name}"), 0, 0)
+    }
+
+    /// Location for a generated struct definition.
+    pub fn layout_struct(name: &str) -> Self {
+        Self::new_owned(format!("llzk://layout/struct/{name}"), 0, 0)
+    }
+
+    /// Location for a generated method on a struct definition.
+    pub fn layout_function(struct_name: &str, function_name: &str) -> Self {
+        Self::new_owned(
+            format!("llzk://layout/function/{struct_name}/{function_name}"),
+            0,
+            0,
+        )
+    }
+
+    /// Child location family for a generated function argument label.
+    pub fn layout_argument() -> Self {
+        Self::new("llzk://layout/argument", 0, 0)
+    }
+
+    /// Plain file/line/column location family for a generated function argument label.
+    pub fn layout_argument_label(label: &str) -> Self {
+        Self::new_owned(format!("llzk://layout/argument/{label}"), 0, 0)
+    }
+
+    /// Child location family for a generated struct member label.
+    pub fn layout_member() -> Self {
+        Self::new("llzk://layout/member", 0, 0)
+    }
+
+    /// Plain file/line/column location family for a generated struct member label.
+    pub fn layout_member_label(label: &str) -> Self {
+        Self::new_owned(format!("llzk://layout/member/{label}"), 0, 0)
+    }
+
+    /// Return a sibling location at a later zero-based column within the same semantic line.
+    pub fn with_column_offset(self, offset: usize) -> Self {
+        Self {
+            column: self.column + offset,
+            ..self
+        }
+    }
+}
+
+/// Module-scoped helper with convenience factory methods and access to the root LLZK module.
+pub struct ModuleEnv<'ctx, F: FieldInfo> {
     context: &'ctx Context,
     /// The root LLZK module.
     module: &'ctx Module<'ctx>,
+    debug_location_style: DebugLocationStyle,
     _field: core::marker::PhantomData<F>,
 }
 
-impl<'ctx, F: FieldInfo> ModuleBuilder<'ctx, F> {
-    /// Creates a new builder.
-    pub fn new(context: &'ctx Context, module: &'ctx Module<'ctx>) -> Self {
+impl<'ctx, F: FieldInfo> ModuleEnv<'ctx, F> {
+    /// Creates a new module helper.
+    pub fn new(
+        context: &'ctx Context,
+        module: &'ctx Module<'ctx>,
+        debug_location_style: DebugLocationStyle,
+    ) -> Self {
         Self {
             context,
             module,
+            debug_location_style,
             _field: PhantomData,
         }
     }
@@ -49,13 +175,42 @@ impl<'ctx, F: FieldInfo> ModuleBuilder<'ctx, F> {
     }
 
     /// Returns a reference to the root module.
-    pub fn module(&self) -> &Module<'ctx> {
+    pub fn module(&self) -> &'ctx Module<'ctx> {
         self.module
     }
 
     /// Returns the unknown location.
     pub fn unknown_location(&self) -> Location<'ctx> {
         Location::unknown(self.context)
+    }
+
+    /// Convert a synthetic semantic location into an MLIR file/line/column location.
+    pub fn semantic_location(&self, location: SemanticLocation) -> Location<'ctx> {
+        Location::new(
+            self.context,
+            location.path.as_ref(),
+            location.line,
+            location.column,
+        )
+    }
+
+    /// Wrap a semantic child location in a descriptive MLIR `NameLoc`.
+    pub fn semantic_name_location(&self, name: &str, child: SemanticLocation) -> Location<'ctx> {
+        Location::name(self.context, name, self.semantic_location(child))
+    }
+
+    /// Emit either a descriptive `NameLoc` or a plain file/line/column location, depending on the
+    /// configured debug-location style.
+    pub fn semantic_labeled_location(
+        &self,
+        name: &str,
+        named_child: SemanticLocation,
+        plain_location: SemanticLocation,
+    ) -> Location<'ctx> {
+        match self.debug_location_style {
+            DebugLocationStyle::Named => self.semantic_name_location(name, named_child),
+            DebugLocationStyle::FileLineCol => self.semantic_location(plain_location),
+        }
     }
 
     /// Creates a `!felt.type`.
@@ -107,6 +262,88 @@ impl<'ctx, F: FieldInfo> ModuleBuilder<'ctx, F> {
         )
         .into()
     }
+
+    /// Declare a private module-level external function if it is not already present.
+    ///
+    /// Used to create oracle hooks (e.g., ROM reads) for `@compute`.
+    pub fn declare_private_extern_function(
+        &self,
+        name: &str,
+        inputs: &[Type<'ctx>],
+        results: &[Type<'ctx>],
+    ) -> Result<()> {
+        if self.module_contains_top_level_function(name)? {
+            return Ok(());
+        }
+
+        let visibility = [(
+            Identifier::new(self.context, "sym_visibility"),
+            StringAttribute::new(self.context, "private").into(),
+        )];
+        let location = Location::new(self.context, &format!("llzk://layout/extern/{name}"), 0, 0);
+        let func = dialect::function::def(
+            location,
+            name,
+            FunctionType::new(self.context, inputs, results),
+            &visibility,
+            None,
+        )?;
+        self.module.body().append_operation(func.into());
+        Ok(())
+    }
+
+    /// Query the module for the given named free function.
+    fn module_contains_top_level_function(&self, name: &str) -> Result<bool> {
+        let module_op = self.module.as_operation();
+        let mut found = false;
+        module_op.walk(WalkOrder::PreOrder, |op| {
+            if op
+                .parent_operation()
+                .map(|parent| parent == module_op)
+                .unwrap_or(false)
+            {
+                if dialect::function::is_func_def(&op)
+                    && op
+                        .attribute("sym_name")
+                        .and_then(StringAttribute::try_from)
+                        .map(|attr| attr.value() == name)
+                        .unwrap_or(false)
+                {
+                    found = true;
+                    WalkResult::Interrupt
+                } else {
+                    // This query only cares about free functions directly under the module.
+                    WalkResult::Skip
+                }
+            } else {
+                WalkResult::Advance
+            }
+        });
+
+        Ok(found)
+    }
+
+    /// Return `true` if any operation nested in the module references `callee` through a
+    /// `function.call`-style symbol attribute.
+    pub fn module_contains_call_to(&self, callee: &str) -> Result<bool> {
+        let callee_attr = format!("@{callee}");
+        let mut found = false;
+        let mut module_op =
+            unsafe { OperationRefMut::from_raw(self.module.as_operation().to_raw()) };
+        module_op.walk_mut(WalkOrder::PreOrder, |op| {
+            if op
+                .attribute("callee")
+                .map(|attr| attr.to_string().contains(&callee_attr))
+                .unwrap_or(false)
+            {
+                found = true;
+                WalkResult::Interrupt
+            } else {
+                WalkResult::Advance
+            }
+        });
+        Ok(found)
+    }
 }
 
 /// Possible locations for insertion.
@@ -140,21 +377,80 @@ impl<'ctx> PartialOrd for ConstOpKey<'ctx> {
 
 /// Operations builder that handles insertion of operations in the target function.
 pub struct OpsBuilder<'ctx: 'sco, 'sco, F: FieldInfo> {
-    builder: &'ctx ModuleBuilder<'ctx, F>,
+    env: &'ctx ModuleEnv<'ctx, F>,
     scope: FuncDefOpRef<'ctx, 'sco>,
     /// Cache of constant op values of specified type at the beginning of the
     /// function scope. Using a BTreeMap since [Type] is not hashable.
     const_vals: RefCell<BTreeMap<ConstOpKey<'ctx>, Value<'ctx, 'sco>>>,
+    /// Stack of scoped semantic locations. The top entry is the semantic location currently in
+    /// effect for emitted ops.
+    semantic_locations: RefCell<Vec<SemanticLocation>>,
 }
 
 impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
     /// Creates a new builder.
-    pub fn new(builder: &'ctx ModuleBuilder<'ctx, F>, scope: FuncDefOpRef<'ctx, 'sco>) -> Self {
+    pub fn new(env: &'ctx ModuleEnv<'ctx, F>, scope: FuncDefOpRef<'ctx, 'sco>) -> Self {
         Self {
             scope,
-            builder,
+            env,
             const_vals: BTreeMap::new().into(),
+            semantic_locations: Vec::new().into(),
         }
+    }
+
+    /// Returns the scoped semantic location currently active for this builder, if any.
+    pub fn current_semantic_location(&self) -> Option<SemanticLocation> {
+        self.semantic_locations.borrow().last().cloned()
+    }
+
+    /// Run `f` with `location` as the effective builder location.
+    pub fn with_semantic_location<T>(
+        &self,
+        location: SemanticLocation,
+        f: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        struct SemanticLocationGuard<'a> {
+            stack: &'a RefCell<Vec<SemanticLocation>>,
+        }
+
+        impl Drop for SemanticLocationGuard<'_> {
+            fn drop(&mut self) {
+                // Always restore the previous scope, even if lowering returns early.
+                self.stack
+                    .borrow_mut()
+                    .pop()
+                    .expect("semantic location stack underflow");
+            }
+        }
+
+        // Push before running the closure so nested helpers inherit the same semantic location.
+        self.semantic_locations.borrow_mut().push(location);
+        let _guard = SemanticLocationGuard {
+            stack: &self.semantic_locations,
+        };
+        f()
+    }
+
+    /// Run `f` with the current semantic location shifted to a sibling column, if one is active.
+    pub fn with_column_offset<T>(&self, offset: usize, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        if let Some(location) = self.current_semantic_location() {
+            self.with_semantic_location(location.with_column_offset(offset), f)
+        } else {
+            f()
+        }
+    }
+
+    /// Returns the currently active semantic location, or `loc(unknown)` when no semantic scope
+    /// is active.
+    pub fn current_location(&self) -> Location<'ctx> {
+        self.current_semantic_location()
+            .map(|location| self.env.semantic_location(location))
+            .unwrap_or_else(|| self.env.unknown_location())
+    }
+
+    /// Compatibility shim for older call sites. Prefer [`Self::current_location`] for new code.
+    pub fn unknown_location(&self) -> Location<'ctx> {
+        self.current_location()
     }
 
     /// Appends an operation with no results at the end.
@@ -327,6 +623,16 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
         self.append_op_with_no_results(constrain::eq(location, lhs, rhs))
     }
 
+    /// Insert a `constrain.eq` at the builder's current semantic location.
+    #[inline]
+    pub fn append_constrain_eq_here(
+        &self,
+        lhs: Value<'ctx, 'sco>,
+        rhs: Value<'ctx, 'sco>,
+    ) -> Result<()> {
+        self.append_constrain_eq(self.current_location(), lhs, rhs)
+    }
+
     /// If not None, insert a `constrain.eq` operation to constrain `conditional => (lhs === rhs)`
     /// (implemented as `!conditional || (lhs === rhs)` since LLZK has no implication operation).
     /// Assumes `conditional` is a felt.type that is constrained to be in a boolean range.
@@ -342,18 +648,83 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
         match conditional {
             None => self.append_constrain_eq(location, lhs, rhs),
             Some(conditional) => {
-                let not_conditional = self.append_op_with_result(bool::eq(
+                let not_conditional = self.append_eq_predicate(
                     location,
                     self.get_felt_constant_from_start(0)?,
                     conditional,
-                )?)?;
-                let sides_eq = self.append_op_with_result(bool::eq(location, lhs, rhs)?)?;
+                )?;
+                let sides_eq = self.append_eq_predicate(location, lhs, rhs)?;
                 let implication =
                     self.append_op_with_result(bool::or(location, not_conditional, sides_eq)?)?;
                 let truth = self.get_constant_from_start(self.bool_type(), 1)?;
                 self.append_constrain_eq(location, implication, truth)
             }
         }
+    }
+
+    /// Insert a conditional `constrain.eq` at the builder's current semantic location.
+    #[inline]
+    pub fn append_conditional_constrain_eq_here(
+        &self,
+        conditional: Option<Value<'ctx, 'sco>>,
+        lhs: Value<'ctx, 'sco>,
+        rhs: Value<'ctx, 'sco>,
+    ) -> Result<()> {
+        self.append_conditional_constrain_eq(self.current_location(), conditional, lhs, rhs)
+    }
+
+    /// Compare `lhs` and `rhs` and return an `i1` predicate.
+    ///
+    /// LLZK uses different equality ops for felts and plain integer types, so conditional
+    /// constraints need this helper instead of assuming every compared value is a felt.
+    fn append_eq_predicate(
+        &self,
+        location: Location<'ctx>,
+        lhs: Value<'ctx, 'sco>,
+        rhs: Value<'ctx, 'sco>,
+    ) -> Result<Value<'ctx, 'sco>> {
+        anyhow::ensure!(
+            lhs.r#type() == rhs.r#type(),
+            "cannot compare values with different types: {} vs {}",
+            lhs.r#type(),
+            rhs.r#type()
+        );
+
+        if lhs.r#type() == self.felt_type() {
+            self.append_op_with_result(bool::eq(location, lhs, rhs)?)
+        } else if lhs.r#type() == self.index_type() || lhs.r#type().isa::<IntegerType>() {
+            self.append_op_with_result(arith::cmpi(
+                self.context,
+                arith::CmpiPredicate::Eq,
+                lhs,
+                rhs,
+                location,
+            ))
+        } else {
+            anyhow::bail!("unsupported equality predicate type {}", lhs.r#type());
+        }
+    }
+
+    /// Assert that the given boolean predicate holds inside `@compute`.
+    pub fn append_bool_assert(
+        &self,
+        location: Location<'ctx>,
+        predicate: Value<'ctx, 'sco>,
+        msg: Option<&str>,
+    ) -> Result<()> {
+        self.append_op_with_no_results(bool::assert(location, predicate, msg)?)
+    }
+
+    /// Compare `lhs` and `rhs` and assert that they are equal inside `@compute`.
+    pub fn append_assert_equal(
+        &self,
+        location: Location<'ctx>,
+        lhs: Value<'ctx, 'sco>,
+        rhs: Value<'ctx, 'sco>,
+        msg: Option<&str>,
+    ) -> Result<()> {
+        let predicate = self.append_eq_predicate(location, lhs, rhs)?;
+        self.append_bool_assert(location, predicate, msg)
     }
 
     /// Compute the inner values used to generate a boolean constraint.
@@ -434,6 +805,12 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
         Ok(self.scope.argument(arg_no)?.into())
     }
 
+    /// Return the struct instance created at the start of a `@compute` body.
+    pub fn get_compute_self_value(&self) -> Result<Value<'ctx, 'sco>> {
+        // LLZK exposes this directly on the function op, conveniently
+        Ok(self.scope.self_value_of_compute()?)
+    }
+
     /// Append a struct member read operation in the current function scope.
     pub fn append_member_read(
         &self,
@@ -452,6 +829,28 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
         self.append_op_with_result(op)
     }
 
+    /// Append a struct member read using the builder's current semantic location.
+    pub fn append_member_read_here(
+        &self,
+        component: Value<'ctx, 'sco>,
+        result_type: Type<'ctx>,
+        member_name: &str,
+    ) -> Result<Value<'ctx, 'sco>> {
+        self.append_member_read(self.current_location(), component, result_type, member_name)
+    }
+
+    /// Append a struct member write operation in the current function scope.
+    pub fn append_member_write(
+        &self,
+        location: Location<'ctx>,
+        component: Value<'ctx, 'sco>,
+        member_name: &str,
+        value: Value<'ctx, 'sco>,
+    ) -> Result<()> {
+        let op = r#struct::writem(location, component, member_name, value)?;
+        self.append_op_with_no_results(op)
+    }
+
     /// Append an array read operation and return the read value.
     pub fn append_array_read(
         &self,
@@ -466,6 +865,75 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
             arr_ref,
             indices,
         ))
+    }
+
+    /// Append an array read using the builder's current semantic location.
+    pub fn append_array_read_here(
+        &self,
+        arr_ref: Value<'ctx, 'sco>,
+        indices: &[Value<'ctx, 'sco>],
+    ) -> Result<Value<'ctx, 'sco>> {
+        self.append_array_read(self.current_location(), arr_ref, indices)
+    }
+
+    /// Append an array write operation in the current function scope.
+    pub fn append_array_write(
+        &self,
+        location: Location<'ctx>,
+        arr_ref: Value<'ctx, 'sco>,
+        indices: &[Value<'ctx, 'sco>],
+        rvalue: Value<'ctx, 'sco>,
+    ) -> Result<()> {
+        self.append_op_with_no_results(array::write(location, arr_ref, indices, rvalue))
+    }
+
+    /// Append a `function.call` and return all results.
+    pub fn append_call<const N: usize>(
+        &self,
+        location: Location<'ctx>,
+        callee: &str,
+        args: &[Value<'ctx, 'sco>],
+        result_types: &[Type<'ctx>],
+    ) -> Result<[Value<'ctx, 'sco>; N]> {
+        let op = dialect::function::call(
+            &OpBuilder::new(self.context),
+            location,
+            FlatSymbolRefAttribute::new(self.context, callee),
+            args,
+            result_types,
+        )?;
+        self.append_op_with_results::<N>(op.into())
+    }
+
+    /// Append a `function.call` with a single result.
+    #[inline]
+    pub fn append_call_with_result(
+        &self,
+        location: Location<'ctx>,
+        callee: &str,
+        args: &[Value<'ctx, 'sco>],
+        result_type: Type<'ctx>,
+    ) -> Result<Value<'ctx, 'sco>> {
+        self.append_call::<1>(location, callee, args, &[result_type])
+            .map(|results| results[0])
+    }
+
+    /// Append a `function.call` that returns no results.
+    #[inline]
+    pub fn append_call_no_results(
+        &self,
+        location: Location<'ctx>,
+        callee: &str,
+        args: &[Value<'ctx, 'sco>],
+    ) -> Result<()> {
+        let op = dialect::function::call(
+            &OpBuilder::new(self.context),
+            location,
+            FlatSymbolRefAttribute::new(self.context, callee),
+            args,
+            &[] as &[Type<'ctx>],
+        )?;
+        self.append_op_with_no_results(op.into())
     }
 
     /// Lookup a previously generated constant in the function scope or
@@ -501,6 +969,12 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
     #[inline]
     pub fn get_felt_constant_from_start(&self, i: u64) -> Result<Value<'ctx, 'sco>> {
         self.get_constant_from_start(self.felt_type(), i)
+    }
+
+    /// Get an `i1` constant from the function prologue.
+    #[inline]
+    pub fn get_bool_constant_from_start(&self, value: bool) -> Result<Value<'ctx, 'sco>> {
+        self.get_constant_from_start(self.bool_type(), value as u64)
     }
 
     /// Perform the index constant insertion without producing a return value.
@@ -555,6 +1029,12 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
         self.append_fold::<_>(location, felt::add, values)
     }
 
+    /// Perform addition using `felt.add` over all specified values at the current location.
+    #[inline]
+    pub fn append_sum_here(&self, values: &[Value<'ctx, 'sco>]) -> Result<Value<'ctx, 'sco>> {
+        self.append_sum(self.current_location(), values)
+    }
+
     /// Perform multiplication using `felt.mul` over all specified values.
     #[inline]
     pub fn append_product(
@@ -563,6 +1043,447 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
         values: &[Value<'ctx, 'sco>],
     ) -> Result<Value<'ctx, 'sco>> {
         self.append_fold::<_>(location, felt::mul, values)
+    }
+
+    /// Perform multiplication using `felt.mul` over all specified values at the current location.
+    #[inline]
+    pub fn append_product_here(&self, values: &[Value<'ctx, 'sco>]) -> Result<Value<'ctx, 'sco>> {
+        self.append_product(self.current_location(), values)
+    }
+
+    /// Emit a generic `arith.select`, which works for both LLZK felts and builtin integer types.
+    pub fn append_select_value(
+        &self,
+        condition: Value<'ctx, 'sco>,
+        if_true: Value<'ctx, 'sco>,
+        if_false: Value<'ctx, 'sco>,
+    ) -> Result<Value<'ctx, 'sco>> {
+        self.append_op_with_result(arith::select(
+            condition,
+            if_true,
+            if_false,
+            self.unknown_location(),
+        ))
+    }
+
+    /// Return an `i1` indicating whether the felt value is non-zero.
+    pub fn append_field_is_nonzero(&self, value: Value<'ctx, 'sco>) -> Result<Value<'ctx, 'sco>> {
+        self.append_op_with_result(bool::ne(
+            self.unknown_location(),
+            value,
+            self.get_felt_constant_from_start(0)?,
+        )?)
+    }
+
+    /// Convert an `i1` condition into the felt encoding used by witness columns.
+    pub fn append_bool_to_field(&self, value: Value<'ctx, 'sco>) -> Result<Value<'ctx, 'sco>> {
+        self.append_select_value(
+            value,
+            self.get_felt_constant_from_start(1)?,
+            self.get_felt_constant_from_start(0)?,
+        )
+    }
+
+    /// Reduce a felt value modulo `2^bits`.
+    pub fn append_lowest_bits_felt(
+        &self,
+        value: Value<'ctx, 'sco>,
+        bits: u32,
+    ) -> Result<Value<'ctx, 'sco>> {
+        if bits == 0 {
+            return self.get_felt_constant_from_start(0);
+        }
+        let modulus = 1u64 << bits;
+        self.append_op_with_result(felt::umod(
+            self.unknown_location(),
+            value,
+            self.get_felt_constant_from_start(modulus)?,
+        )?)
+    }
+
+    /// Compare a felt-encoded small integer against a literal.
+    pub fn append_field_eq_constant(
+        &self,
+        value: Value<'ctx, 'sco>,
+        constant: u64,
+    ) -> Result<Value<'ctx, 'sco>> {
+        self.append_op_with_result(bool::eq(
+            self.unknown_location(),
+            value,
+            self.get_felt_constant_from_start(constant)?,
+        )?)
+    }
+
+    /// Sum one-hot equality checks for `value` against a fixed set of small constants.
+    pub fn append_field_eq_any_constant(
+        &self,
+        value: Value<'ctx, 'sco>,
+        constants: &[u16],
+    ) -> Result<Value<'ctx, 'sco>> {
+        let location = self.unknown_location();
+        let matches = constants
+            .iter()
+            .map(|constant| {
+                self.append_bool_to_field(
+                    self.append_field_eq_constant(value, u64::from(*constant))?,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        if matches.is_empty() {
+            self.get_felt_constant_from_start(0)
+        } else if matches.len() == 1 {
+            Ok(matches[0])
+        } else {
+            self.append_sum(location, &matches)
+        }
+    }
+
+    /// Compute the `(is_supported, is_for_delegation)` outputs for the
+    /// `SpecialCSRProperties` table.
+    pub fn append_special_csr_properties_outputs(
+        &self,
+        csr_index: Value<'ctx, 'sco>,
+        metadata: &SpecialCsrPropertiesMetadata,
+    ) -> Result<(Value<'ctx, 'sco>, Value<'ctx, 'sco>)> {
+        let location = self.unknown_location();
+        let is_for_delegation =
+            self.append_field_eq_any_constant(csr_index, &metadata.delegation_indices)?;
+        let is_supported = if metadata.supported_only_indices.is_empty() {
+            is_for_delegation
+        } else {
+            self.append_sum(
+                location,
+                &[
+                    self.append_field_eq_any_constant(csr_index, &metadata.supported_only_indices)?,
+                    is_for_delegation,
+                ],
+            )?
+        };
+        Ok((is_supported, is_for_delegation))
+    }
+
+    /// Extract a small bit-slice from a felt-encoded value.
+    pub fn append_shifted_low_bits(
+        &self,
+        value: Value<'ctx, 'sco>,
+        shift: u64,
+        bits: u32,
+    ) -> Result<Value<'ctx, 'sco>> {
+        let shifted = if shift == 0 {
+            value
+        } else {
+            self.append_op_with_result(felt::shr(
+                self.unknown_location(),
+                value,
+                self.get_felt_constant_from_start(shift)?,
+            )?)?
+        };
+        self.append_lowest_bits_felt(shifted, bits)
+    }
+
+    /// Compute the `(out_low, out_high)` outputs for the `ExtendLoadedValue` table.
+    pub fn append_extend_loaded_value_outputs(
+        &self,
+        input: Value<'ctx, 'sco>,
+    ) -> Result<(Value<'ctx, 'sco>, Value<'ctx, 'sco>)> {
+        let location = self.unknown_location();
+        let word = self.append_lowest_bits_felt(input, 16)?;
+        let use_high_half =
+            self.append_field_is_nonzero(self.append_shifted_low_bits(input, 16, 1)?)?;
+        let funct3 = self.append_shifted_low_bits(input, 17, 3)?;
+        let low_byte = self.append_lowest_bits_felt(word, 8)?;
+        let high_byte = self.append_shifted_low_bits(word, 8, 8)?;
+        let selected_byte = self.append_select_value(use_high_half, high_byte, low_byte)?;
+        let byte_sign =
+            self.append_field_is_nonzero(self.append_shifted_low_bits(selected_byte, 7, 1)?)?;
+        let word_sign = self.append_field_is_nonzero(self.append_shifted_low_bits(word, 15, 1)?)?;
+        let zero = self.get_felt_constant_from_start(0)?;
+        let full_sign = self.get_felt_constant_from_start(0xffff)?;
+        let byte_high_fill = self.get_felt_constant_from_start(0xff00)?;
+
+        let out_low = self.append_select_value(
+            self.append_field_eq_constant(funct3, 0b000)?,
+            self.append_select_value(
+                byte_sign,
+                self.append_sum(location, &[selected_byte, byte_high_fill])?,
+                selected_byte,
+            )?,
+            self.append_select_value(
+                self.append_field_eq_constant(funct3, 0b100)?,
+                selected_byte,
+                self.append_select_value(
+                    self.append_field_eq_constant(funct3, 0b001)?,
+                    word,
+                    self.append_select_value(
+                        self.append_field_eq_constant(funct3, 0b101)?,
+                        word,
+                        zero,
+                    )?,
+                )?,
+            )?,
+        )?;
+        let out_high = self.append_select_value(
+            self.append_field_eq_constant(funct3, 0b000)?,
+            self.append_select_value(byte_sign, full_sign, zero)?,
+            self.append_select_value(
+                self.append_field_eq_constant(funct3, 0b001)?,
+                self.append_select_value(word_sign, full_sign, zero)?,
+                zero,
+            )?,
+        )?;
+
+        Ok((out_low, out_high))
+    }
+
+    /// Compute the output for the `StoreByteSourceContribution` table.
+    pub fn append_store_byte_source_contribution_output(
+        &self,
+        byte: Value<'ctx, 'sco>,
+        bit_0: Value<'ctx, 'sco>,
+    ) -> Result<Value<'ctx, 'sco>> {
+        let location = self.unknown_location();
+        let shifted = self.append_op_with_result(felt::shl(
+            location,
+            byte,
+            self.get_felt_constant_from_start(8)?,
+        )?)?;
+        let bit_0_bool = self.append_field_is_nonzero(bit_0)?;
+        self.append_select_value(bit_0_bool, shifted, byte)
+    }
+
+    /// Compute the output for the `StoreByteExistingContribution` table.
+    pub fn append_store_byte_existing_contribution_output(
+        &self,
+        word: Value<'ctx, 'sco>,
+        bit_0: Value<'ctx, 'sco>,
+    ) -> Result<Value<'ctx, 'sco>> {
+        let location = self.unknown_location();
+        let keep_low = self.append_op_with_result(felt::bit_and(
+            location,
+            word,
+            self.get_felt_constant_from_start(0x00ff)?,
+        )?)?;
+        let keep_high = self.append_op_with_result(felt::bit_and(
+            location,
+            word,
+            self.get_felt_constant_from_start(0xff00)?,
+        )?)?;
+        let bit_0_bool = self.append_field_is_nonzero(bit_0)?;
+        self.append_select_value(bit_0_bool, keep_low, keep_high)
+    }
+
+    /// Compute the `(in_place, overflow)` outputs for the `ShiftImplementation` table.
+    pub fn append_shift_implementation_outputs(
+        &self,
+        input: Value<'ctx, 'sco>,
+    ) -> Result<(Value<'ctx, 'sco>, Value<'ctx, 'sco>)> {
+        let location = self.unknown_location();
+        let word = self.append_lowest_bits_felt(input, 16)?;
+        let shift_amount = self.append_shifted_low_bits(input, 16, 5)?;
+        let is_right = self.append_field_is_nonzero(self.append_shifted_low_bits(input, 21, 1)?)?;
+        let input_high = self.append_op_with_result(felt::shl(
+            location,
+            word,
+            self.get_felt_constant_from_start(16)?,
+        )?)?;
+        let right_shifted =
+            self.append_op_with_result(felt::shr(location, input_high, shift_amount)?)?;
+        let left_shifted = self.append_op_with_result(felt::shl(location, word, shift_amount)?)?;
+        let in_place = self.append_select_value(
+            is_right,
+            self.append_shifted_low_bits(right_shifted, 16, 16)?,
+            self.append_lowest_bits_felt(left_shifted, 16)?,
+        )?;
+        let overflow = self.append_select_value(
+            is_right,
+            self.append_lowest_bits_felt(right_shifted, 16)?,
+            self.append_shifted_low_bits(left_shifted, 16, 16)?,
+        )?;
+        Ok((in_place, overflow))
+    }
+
+    /// Select the 32-bit sign-fill mask for a five-bit shift amount.
+    pub fn append_u32_mask_from_shift_amount(
+        &self,
+        shift_amount: Value<'ctx, 'sco>,
+    ) -> Result<(Value<'ctx, 'sco>, Value<'ctx, 'sco>)> {
+        let mut selected_low = self.get_felt_constant_from_start(0)?;
+        let mut selected_high = self.get_felt_constant_from_start(0)?;
+
+        for shift in 1u32..32 {
+            let mask = u32::MAX << (32 - shift);
+            let case = self.append_field_eq_constant(shift_amount, u64::from(shift))?;
+            selected_low = self.append_select_value(
+                case,
+                self.get_felt_constant_from_start(u64::from(mask & 0xffff))?,
+                selected_low,
+            )?;
+            selected_high = self.append_select_value(
+                case,
+                self.get_felt_constant_from_start(u64::from(mask >> 16))?,
+                selected_high,
+            )?;
+        }
+
+        Ok((selected_low, selected_high))
+    }
+
+    /// Compute the `(low, high)` outputs for the `SRASignFiller` table.
+    pub fn append_sra_sign_filler_outputs(
+        &self,
+        input: Value<'ctx, 'sco>,
+    ) -> Result<(Value<'ctx, 'sco>, Value<'ctx, 'sco>)> {
+        let location = self.unknown_location();
+        let sign = self.append_field_is_nonzero(self.append_lowest_bits_felt(input, 1)?)?;
+        let is_sra = self.append_field_is_nonzero(self.append_shifted_low_bits(input, 1, 1)?)?;
+        let shift_amount = self.append_shifted_low_bits(input, 2, 5)?;
+        let apply_fill = self.append_op_with_result(bool::and(
+            location,
+            sign,
+            self.append_op_with_result(bool::and(
+                location,
+                is_sra,
+                self.append_field_is_nonzero(shift_amount)?,
+            )?)?,
+        )?)?;
+        let (mask_low, mask_high) = self.append_u32_mask_from_shift_amount(shift_amount)?;
+
+        Ok((
+            self.append_select_value(apply_fill, mask_low, self.get_felt_constant_from_start(0)?)?,
+            self.append_select_value(apply_fill, mask_high, self.get_felt_constant_from_start(0)?)?,
+        ))
+    }
+
+    /// Compute the `(should_branch, should_store)` outputs for the
+    /// `ConditionalOpAllConditionsResolver` table.
+    pub fn append_conditional_op_all_conditions_outputs(
+        &self,
+        input: Value<'ctx, 'sco>,
+    ) -> Result<(Value<'ctx, 'sco>, Value<'ctx, 'sco>)> {
+        let location = self.unknown_location();
+        let funct3 = self.append_lowest_bits_felt(input, 3)?;
+        let unsigned_lt =
+            self.append_field_is_nonzero(self.append_shifted_low_bits(input, 3, 1)?)?;
+        let eq = self.append_field_is_nonzero(self.append_shifted_low_bits(input, 4, 1)?)?;
+        let src1_sign = self.append_field_is_nonzero(self.append_shifted_low_bits(input, 5, 1)?)?;
+        let src2_sign = self.append_field_is_nonzero(self.append_shifted_low_bits(input, 6, 1)?)?;
+        let sign_diff = self.append_op_with_result(bool::or(
+            location,
+            self.append_op_with_result(bool::and(
+                location,
+                src1_sign,
+                self.append_op_with_result(bool::not(location, src2_sign)?)?,
+            )?)?,
+            self.append_op_with_result(bool::and(
+                location,
+                self.append_op_with_result(bool::not(location, src1_sign)?)?,
+                src2_sign,
+            )?)?,
+        )?)?;
+        let signed_lt = self.append_select_value(sign_diff, src1_sign, unsigned_lt)?;
+        let false_bool = self.get_bool_constant_from_start(false)?;
+        let expected_branch = self.append_select_value(
+            self.append_field_eq_constant(funct3, 0b000)?,
+            eq,
+            self.append_select_value(
+                self.append_field_eq_constant(funct3, 0b001)?,
+                self.append_op_with_result(bool::not(location, eq)?)?,
+                self.append_select_value(
+                    self.append_field_eq_constant(funct3, 0b100)?,
+                    signed_lt,
+                    self.append_select_value(
+                        self.append_field_eq_constant(funct3, 0b101)?,
+                        self.append_op_with_result(bool::not(location, signed_lt)?)?,
+                        self.append_select_value(
+                            self.append_field_eq_constant(funct3, 0b110)?,
+                            unsigned_lt,
+                            self.append_select_value(
+                                self.append_field_eq_constant(funct3, 0b111)?,
+                                self.append_op_with_result(bool::not(location, unsigned_lt)?)?,
+                                false_bool,
+                            )?,
+                        )?,
+                    )?,
+                )?,
+            )?,
+        )?;
+        let expected_store = self.append_select_value(
+            self.append_field_eq_constant(funct3, 0b010)?,
+            signed_lt,
+            self.append_select_value(
+                self.append_field_eq_constant(funct3, 0b011)?,
+                unsigned_lt,
+                false_bool,
+            )?,
+        )?;
+
+        Ok((
+            self.append_bool_to_field(expected_branch)?,
+            self.append_bool_to_field(expected_store)?,
+        ))
+    }
+
+    /// Compute the `(low, high)` outputs for the generic 16-bit logical shift tables.
+    pub fn append_logical_shift_16_bit_outputs<
+        const INPUT_IS_HIGH: bool,
+        const IS_RIGHT_SHIFT: bool,
+    >(
+        &self,
+        input: Value<'ctx, 'sco>,
+    ) -> Result<(Value<'ctx, 'sco>, Value<'ctx, 'sco>)> {
+        let location = self.unknown_location();
+        let word = self.append_lowest_bits_felt(input, 16)?;
+        let shift_amount = self.append_shifted_low_bits(input, 16, 5)?;
+        let reconstructed = if INPUT_IS_HIGH {
+            self.append_op_with_result(felt::shl(
+                location,
+                word,
+                self.get_felt_constant_from_start(16)?,
+            )?)?
+        } else {
+            word
+        };
+        let shifted = if IS_RIGHT_SHIFT {
+            self.append_op_with_result(felt::shr(location, reconstructed, shift_amount)?)?
+        } else {
+            self.append_op_with_result(felt::shl(location, word, shift_amount)?)?
+        };
+
+        Ok((
+            self.append_lowest_bits_felt(shifted, 16)?,
+            self.append_shifted_low_bits(shifted, 16, 16)?,
+        ))
+    }
+
+    /// Compute the `(low, high)` outputs for the `Sra16BitInputSignFill` table.
+    pub fn append_sra_16_bit_input_sign_fill_outputs(
+        &self,
+        input: Value<'ctx, 'sco>,
+    ) -> Result<(Value<'ctx, 'sco>, Value<'ctx, 'sco>)> {
+        let location = self.unknown_location();
+        let word = self.append_lowest_bits_felt(input, 16)?;
+        let shift_amount = self.append_shifted_low_bits(input, 16, 5)?;
+        let sign = self.append_field_is_nonzero(self.append_shifted_low_bits(word, 15, 1)?)?;
+        let apply_fill = self.append_op_with_result(bool::and(
+            location,
+            sign,
+            self.append_field_is_nonzero(shift_amount)?,
+        )?)?;
+        let (expected_low, expected_high) = self.append_u32_mask_from_shift_amount(shift_amount)?;
+
+        Ok((
+            self.append_select_value(
+                apply_fill,
+                expected_low,
+                self.get_felt_constant_from_start(0)?,
+            )?,
+            self.append_select_value(
+                apply_fill,
+                expected_high,
+                self.get_felt_constant_from_start(0)?,
+            )?,
+        ))
     }
 
     /// Append a multiplication by the given constant felt value using `felt.mul`.
@@ -577,6 +1498,15 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
             self.get_felt_constant_from_start(const_coeff)?,
             val,
         )?)
+    }
+
+    /// Append a multiplication by the given constant felt value at the current location.
+    pub fn append_const_scaling_here(
+        &self,
+        const_coeff: u64,
+        val: Value<'ctx, 'sco>,
+    ) -> Result<Value<'ctx, 'sco>> {
+        self.append_const_scaling(self.current_location(), const_coeff, val)
     }
 
     /// Create a vector of N `felt.type` nondets constrained such that:
@@ -601,6 +1531,11 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
             self.get_felt_constant_from_start(1)?,
         ))?;
         Ok(bits)
+    }
+
+    /// Create a one-hot vector at the current semantic location.
+    pub fn append_one_hot_here(&self, bits: usize) -> Result<Vec<Value<'ctx, 'sco>>> {
+        self.append_one_hot(self.current_location(), bits)
     }
 
     /// Convert a one-hot bit vector into the original single value.
@@ -633,13 +1568,21 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
             .ok_or_else(|| anyhow!("must provide non-empty bits slice"))??;
         Ok(res)
     }
+
+    /// Reconstruct a one-hot vector at the current semantic location.
+    pub fn append_one_hot_reconstruction_here(
+        &self,
+        bits: &[Value<'ctx, 'sco>],
+    ) -> Result<Value<'ctx, 'sco>> {
+        self.append_one_hot_reconstruction(self.current_location(), bits)
+    }
 }
 
 impl<'ctx, 'sco, F: FieldInfo> Deref for OpsBuilder<'ctx, 'sco, F> {
-    type Target = ModuleBuilder<'ctx, F>;
+    type Target = ModuleEnv<'ctx, F>;
 
     fn deref(&self) -> &Self::Target {
-        self.builder
+        self.env
     }
 }
 
@@ -651,25 +1594,31 @@ macro_rules! as_op {
 }
 
 /// Builder for creating structs.
-pub struct StructBuilder<'ctx, 'str> {
-    /// Reference to the context.
-    context: &'ctx Context,
-    /// Location for the struct and its direct child ops.
+pub struct StructBuilder<'ctx, 'str, F: FieldInfo> {
+    /// Shared module-scoped helper used for type construction and module insertion.
+    env: &'ctx ModuleEnv<'ctx, F>,
+    /// Location for the struct definition itself.
     location: Option<Location<'ctx>>,
+    /// Location for the generated `@compute` function.
+    compute_location: Option<Location<'ctx>>,
+    /// Location for the generated `@constrain` function.
+    constrain_location: Option<Location<'ctx>>,
     /// Name of the struct.
     name: &'str str,
-    /// Inputs of the struct (excluding self in @constrain).
-    inputs: Vec<Type<'ctx>>,
+    /// Inputs shared by both `@compute` and `@constrain` (excluding `self` in `@constrain`).
+    inputs: Vec<(Type<'ctx>, Option<Location<'ctx>>)>,
     /// List of members. Contains the name, type and whether is marked public or not.
-    members: Vec<(String, Type<'ctx>, bool)>,
+    members: Vec<(String, Type<'ctx>, bool, Option<Location<'ctx>>)>,
 }
 
-impl<'ctx, 'str> StructBuilder<'ctx, 'str> {
+impl<'ctx, 'str, F: FieldInfo> StructBuilder<'ctx, 'str, F> {
     /// Creates a new builder.
-    pub fn new(context: &'ctx Context, name: &'str str) -> Self {
+    pub fn new(env: &'ctx ModuleEnv<'ctx, F>, name: &'str str) -> Self {
         Self {
-            context,
+            env,
             location: None,
+            compute_location: None,
+            constrain_location: None,
             name,
             inputs: vec![],
             members: vec![],
@@ -678,7 +1627,17 @@ impl<'ctx, 'str> StructBuilder<'ctx, 'str> {
 
     /// Adds an input to the list.
     pub fn with_input(&mut self, input: Type<'ctx>) -> &mut Self {
-        self.inputs.push(input);
+        self.inputs.push((input, None));
+        self
+    }
+
+    /// Adds an input with an explicit debug location.
+    pub fn with_input_location(
+        &mut self,
+        input: Type<'ctx>,
+        location: Location<'ctx>,
+    ) -> &mut Self {
+        self.inputs.push((input, Some(location)));
         self
     }
 
@@ -689,33 +1648,70 @@ impl<'ctx, 'str> StructBuilder<'ctx, 'str> {
         self
     }
 
+    /// Sets the location of the generated `@compute` function.
+    pub fn with_compute_location(&mut self, location: Location<'ctx>) -> &mut Self {
+        self.compute_location = Some(location);
+        self
+    }
+
+    /// Sets the location of the generated `@constrain` function.
+    pub fn with_constrain_location(&mut self, location: Location<'ctx>) -> &mut Self {
+        self.constrain_location = Some(location);
+        self
+    }
+
     /// Adds a member to the struct.
     pub fn with_member(&mut self, name: String, r#type: Type<'ctx>, is_public: bool) -> &mut Self {
-        self.members.push((name, r#type, is_public));
+        self.members.push((name, r#type, is_public, None));
+        self
+    }
+
+    /// Adds a member with an explicit debug location.
+    pub fn with_member_location(
+        &mut self,
+        name: String,
+        r#type: Type<'ctx>,
+        is_public: bool,
+        location: Location<'ctx>,
+    ) -> &mut Self {
+        self.members.push((name, r#type, is_public, Some(location)));
         self
     }
 
     /// Create the struct type for this struct builder.
     fn struct_type(&self) -> StructType<'ctx> {
-        StructType::from_str(self.context, self.name)
+        StructType::from_str(self.context(), self.name)
     }
 
     fn location(&self) -> Location<'ctx> {
         self.location
-            .unwrap_or_else(|| Location::unknown(self.context))
+            .unwrap_or_else(|| Location::unknown(self.context()))
+    }
+
+    fn compute_location(&self) -> Location<'ctx> {
+        self.compute_location.unwrap_or_else(|| self.location())
+    }
+
+    fn constrain_location(&self) -> Location<'ctx> {
+        self.constrain_location.unwrap_or_else(|| self.location())
     }
 
     /// Creates a struct using the build data.
     pub fn build(&self) -> Result<StructDefOp<'ctx>, LlzkError> {
-        let inputs = self
+        let constrain_inputs = self
             .inputs
             .iter()
-            .map(|arg| (*arg, self.location()))
+            .map(|(arg, location)| (*arg, location.unwrap_or_else(|| self.constrain_location())))
+            .collect::<Vec<_>>();
+        let compute_inputs = self
+            .inputs
+            .iter()
+            .map(|(arg, location)| (*arg, location.unwrap_or_else(|| self.compute_location())))
             .collect::<Vec<_>>();
 
-        let members = self.members.iter().map(|(name, typ, is_pub)| {
+        let members = self.members.iter().map(|(name, typ, is_pub, location)| {
             as_op!(dialect::r#struct::member(
-                self.location(),
+                location.unwrap_or_else(|| self.location()),
                 name,
                 *typ,
                 true,
@@ -724,15 +1720,15 @@ impl<'ctx, 'str> StructBuilder<'ctx, 'str> {
         });
 
         let compute = as_op!(dialect::r#struct::helpers::compute_fn(
-            self.location(),
+            self.compute_location(),
             self.struct_type(),
-            &inputs,
+            &compute_inputs,
             None,
         ));
         let constrain = as_op!(dialect::r#struct::helpers::constrain_fn(
-            self.location(),
+            self.constrain_location(),
             self.struct_type(),
-            &inputs,
+            &constrain_inputs,
             None,
         ));
 
@@ -745,12 +1741,121 @@ impl<'ctx, 'str> StructBuilder<'ctx, 'str> {
     }
 
     /// Builds the struct, inserts it into the module, then returns a reference to it.
-    pub fn build_in_module<'m>(
-        &self,
-        module: &'m Module<'ctx>,
-    ) -> Result<StructDefOpRef<'ctx, 'm>, LlzkError> {
+    pub fn build_in_module(&self) -> Result<StructDefOpRef<'ctx, 'ctx>, LlzkError> {
         let op = self.build()?;
-        let op_ref = module.body().append_operation(op.into());
+        let op_ref = self.module().body().append_operation(op.into());
         op_ref.try_into()
+    }
+}
+
+impl<'ctx, 'str, F: FieldInfo> Deref for StructBuilder<'ctx, 'str, F> {
+    type Target = ModuleEnv<'ctx, F>;
+
+    fn deref(&self) -> &Self::Target {
+        self.env
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use llzk::operation::verify_operation_with_diags;
+    use prover::field::Mersenne31Field;
+
+    fn count_named_top_level_functions(module: &Module<'_>, name: &str) -> usize {
+        let mut count = 0;
+        let mut current = module.body().first_operation();
+        while let Some(op) = current {
+            if dialect::function::is_func_def(&op)
+                && op
+                    .attribute("sym_name")
+                    .and_then(StringAttribute::try_from)
+                    .map(|attr| attr.value() == name)
+                    .unwrap_or(false)
+            {
+                count += 1;
+            }
+            current = op.next_in_block();
+        }
+        count
+    }
+
+    #[test]
+    fn module_contains_top_level_function_ignores_nested_struct_functions() {
+        let ctx = LlzkContext::new();
+        let module = llzk_module(Location::unknown(&ctx));
+        let env = ModuleEnv::<Mersenne31Field>::new(&ctx, &module, DebugLocationStyle::Named);
+
+        let builder = StructBuilder::new(&env, "nested_fns_only");
+        module
+            .body()
+            .append_operation(builder.build().unwrap().into());
+
+        assert!(!env.module_contains_top_level_function("compute").unwrap());
+        assert!(!env.module_contains_top_level_function("constrain").unwrap());
+
+        env.declare_private_extern_function("top_level_hook", &[], &[])
+            .unwrap();
+        assert!(env
+            .module_contains_top_level_function("top_level_hook")
+            .unwrap());
+
+        verify_operation_with_diags(&module.as_operation()).unwrap();
+    }
+
+    #[test]
+    fn declare_private_extern_function_is_idempotent() {
+        let ctx = LlzkContext::new();
+        let module = llzk_module(Location::unknown(&ctx));
+        let env = ModuleEnv::<Mersenne31Field>::new(&ctx, &module, DebugLocationStyle::Named);
+        let felt = env.felt_type();
+
+        env.declare_private_extern_function("read_oracle_field", &[felt], &[felt])
+            .unwrap();
+        env.declare_private_extern_function("read_oracle_field", &[felt], &[felt])
+            .unwrap();
+
+        assert_eq!(
+            count_named_top_level_functions(&module, "read_oracle_field"),
+            1
+        );
+        assert!(env
+            .module_contains_top_level_function("read_oracle_field")
+            .unwrap());
+
+        verify_operation_with_diags(&module.as_operation()).unwrap();
+    }
+
+    #[test]
+    fn semantic_location_uses_virtual_llzk_paths() {
+        let ctx = LlzkContext::new();
+        let module = llzk_module(Location::unknown(&ctx));
+        let env = ModuleEnv::<Mersenne31Field>::new(&ctx, &module, DebugLocationStyle::Named);
+
+        let location =
+            env.semantic_location(SemanticLocation::constrain_constraint(3).with_column_offset(2));
+        assert_eq!(
+            location.to_string(),
+            "loc(\"llzk://constrain/constraints\":3:2)"
+        );
+
+        let location = env.semantic_location(SemanticLocation::compute_ssa(5));
+        assert_eq!(location.to_string(), "loc(\"llzk://compute/ssa\":5:0)");
+
+        let location = env.semantic_location(SemanticLocation::compute_runtime(
+            "llzk://compute/runtime/oracle_u32",
+            5,
+        ));
+        assert_eq!(
+            location.to_string(),
+            "loc(\"llzk://compute/runtime/oracle_u32\":5:0)"
+        );
+
+        let location =
+            env.semantic_name_location("Variable(30)", SemanticLocation::layout_argument());
+        assert_eq!(
+            location.to_string(),
+            "loc(\"Variable(30)\"(\"llzk://layout/argument\":0:0))"
+        );
     }
 }

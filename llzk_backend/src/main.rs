@@ -2,25 +2,41 @@ use anyhow::Result;
 use clap::Parser;
 use clap::Subcommand;
 use clap::ValueEnum;
+use llzk_backend::config::DebugLocationStyle;
+use llzk_backend::config::LlzkStructLayout;
+use llzk_backend::config::OptLevel;
 use llzk_backend::gen_add_sub_lui_auipc_mop;
 use llzk_backend::gen_jump_branch_slt;
 use llzk_backend::gen_load_store_subword_only;
+use llzk_backend::gen_load_store_word_only;
+use llzk_backend::gen_mul_div;
+use llzk_backend::gen_shift_binary_csr;
+use llzk_backend::gen_unified_reduced_machine;
 use llzk_backend::output_format::OutputFormat;
-use llzk_backend::setup_logging;
-use llzk_backend::OptLevel;
 
 #[derive(ValueEnum, Clone, Copy, PartialEq, Eq)]
 enum Circuits {
     AddSubLuiAuipcMop,
     JumpBranchSlt,
     LoadStoreSubwordOnly,
+    LoadStoreWordOnly,
+    MulDiv,
+    ShiftBinaryCsr,
+    UnifiedReducedMachine,
 }
 
-type CircuitFnTuple = (Circuits, fn(&str, OutputFormat, OptLevel) -> Result<()>);
+type CircuitFnTuple = (
+    Circuits,
+    fn(&str, OutputFormat, OptLevel, LlzkStructLayout, DebugLocationStyle) -> Result<()>,
+);
 const CIRCUITS: &[CircuitFnTuple] = &[
     (Circuits::AddSubLuiAuipcMop, gen_add_sub_lui_auipc_mop),
     (Circuits::JumpBranchSlt, gen_jump_branch_slt),
     (Circuits::LoadStoreSubwordOnly, gen_load_store_subword_only),
+    (Circuits::LoadStoreWordOnly, gen_load_store_word_only),
+    (Circuits::MulDiv, gen_mul_div),
+    (Circuits::ShiftBinaryCsr, gen_shift_binary_csr),
+    (Circuits::UnifiedReducedMachine, gen_unified_reduced_machine),
 ];
 
 #[derive(Parser)]
@@ -43,7 +59,19 @@ enum Commands {
         format: OutputFormat,
         #[arg(short = 'O', default_value_t = OptLevel::O1)]
         opt_level: OptLevel,
+        #[arg(long, default_value_t = LlzkStructLayout::ComputeConstrain)]
+        layout: LlzkStructLayout,
+        #[arg(long, default_value_t = DebugLocationStyle::FileLineCol)]
+        debug_location_style: DebugLocationStyle,
     },
+}
+
+pub fn setup_logging() {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format_timestamp_millis()
+        .format_module_path(false)
+        .format_target(false)
+        .init();
 }
 
 fn main() -> Result<()> {
@@ -55,12 +83,18 @@ fn main() -> Result<()> {
             circuit,
             format,
             opt_level,
+            layout,
+            debug_location_style,
         } => {
             CIRCUITS
                 .iter()
                 .find_map(|(name, handler)| (name == circuit).then_some(handler))
                 .expect("circuit without a handler function")(
-                output, *format, *opt_level
+                output,
+                *format,
+                *opt_level,
+                *layout,
+                *debug_location_style,
             )?;
         }
     }

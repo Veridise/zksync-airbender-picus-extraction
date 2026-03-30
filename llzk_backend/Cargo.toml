@@ -17,6 +17,11 @@ llzk = { git = "https://github.com/project-llzk/llzk-rs", package = "llzk", feat
 add_sub_lui_auipc_mop = { path = "../circuit_defs/unrolled_circuits/add_sub_lui_auipc_mop" }
 jump_branch_slt = { path = "../circuit_defs/unrolled_circuits/jump_branch_slt"}
 load_store_subword_only = { path = "../circuit_defs/unrolled_circuits/load_store_subword_only" }
+load_store_word_only = { path = "../circuit_defs/unrolled_circuits/load_store_word_only" }
+mul_div = { path = "../circuit_defs/unrolled_circuits/mul_div" }
+mul_div_unsigned = { path = "../circuit_defs/unrolled_circuits/mul_div_unsigned" }
+shift_binary_csr = { path = "../circuit_defs/unrolled_circuits/shift_binary_csr" }
+unified_reduced_machine = { path = "../circuit_defs/unrolled_circuits/unified_reduced_machine" }
 
 
 env_logger = "0.11"

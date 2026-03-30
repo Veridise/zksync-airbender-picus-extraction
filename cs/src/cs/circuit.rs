@@ -133,20 +133,20 @@ pub struct LookupQuery<F: PrimeField> {
     pub table: LookupQueryTableType,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DisjunctiveLookupCase<F: PrimeField> {
     pub flag: Boolean,
     pub row: [LookupInput<F>; COMMON_TABLE_WIDTH],
     pub table: Num<F>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DisjunctiveLookup<F: PrimeField> {
     pub relation_index: usize,
     pub cases: Vec<DisjunctiveLookupCase<F>>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct PicusExtractionMetadata<F: PrimeField> {
     pub disjunctive_lookups: Vec<DisjunctiveLookup<F>>,
 }
