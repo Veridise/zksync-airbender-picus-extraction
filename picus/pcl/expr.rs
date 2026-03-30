@@ -510,6 +510,8 @@ pub enum PicusConstraint {
     And(Box<PicusConstraint>, Box<PicusConstraint>),
     /// p || q
     Or(Box<PicusConstraint>, Box<PicusConstraint>),
+    /// Determinism predicate over an expression
+    Det(Box<PicusExpr>),
     /// Canonical equality-to-zero form: `Eq(e)` represents `e = 0`.
     Eq(Box<PicusExpr>),
 }
@@ -552,6 +554,12 @@ impl PicusConstraint {
     #[must_use]
     pub fn new_geq(left: PicusExpr, right: PicusExpr) -> PicusConstraint {
         PicusConstraint::Geq(Box::new(left), Box::new(right))
+    }
+
+    /// Build a determinism predicate `Det(expr)`.
+    #[must_use]
+    pub fn new_det(expr: PicusExpr) -> PicusConstraint {
+        PicusConstraint::Det(Box::new(expr))
     }
 
     /// Assumes ``l`` and ``u`` fit into the prime
@@ -616,6 +624,7 @@ impl PicusConstraint {
                 let new_right = r.apply_multiplier(multiplier);
                 PicusConstraint::Or(Box::new(new_left), Box::new(new_right))
             }
+            Det(e) => PicusConstraint::Det(Box::new(*e.clone())),
             Eq(e) => {
                 let new_e = multiplier.clone() * (*e.clone());
                 PicusConstraint::Eq(Box::new(new_e))

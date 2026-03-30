@@ -188,6 +188,15 @@ pub fn subst_constraint(
             }
         }
 
+        Det(e) => {
+            let ee = subst_expr(e, env);
+            match ee {
+                // Determinism of constants is tautological.
+                PicusExpr::Const(_) => None,
+                _ => keep(Det(Box::new(ee))),
+            }
+        }
+
         Not(p) => {
             // Push inside and simplify:
             match subst_constraint(p, env) {
