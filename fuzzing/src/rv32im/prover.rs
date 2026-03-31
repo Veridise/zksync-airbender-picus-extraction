@@ -64,21 +64,7 @@ const NUM_DELEGATION_CYCLES: usize = (1 << 20) - 1;
 const LDE_FACTOR: usize = 2;
 const TREE_CAP_SIZE: usize = 32;
 const TRACE_LEN: usize = 1 << TRACE_LEN_LOG2;
-const DEFAULT_CYCLES: usize = 32_000_000;
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct AddSubLuiAuipcMopSmokeCache {
-    pub text_section: Vec<u32>,
-    pub opcode_trace:
-        Vec<prover::risc_v_simulator::machine_mode_only_unrolled::NonMemoryOpcodeTracingDataWithTimestamp>,
-}
-
-pub struct SmokeProofResult {
-    pub layout: CompiledCircuitArtifact<Mersenne31Field>,
-    pub proof: UnrolledModeProof,
-}
-
-type DecoderConfig = FullUnsignedMachineDecoderConfig;
+const DEFAULT_WORKERS: usize = 1;
 
 #[derive(Clone)]
 pub(crate) struct PreparedExecution {
@@ -151,7 +137,7 @@ impl Prover {
         let default_security_config =
             prover_stages::ProofSecurityConfig::for_queries_only(5, 28, 63);
 
-        let worker = Worker::new_with_num_threads(1);
+        let worker = Worker::new_with_num_threads(DEFAULT_WORKERS);
         Self {
             default_security_config,
             worker,
@@ -224,6 +210,7 @@ impl Prover {
         T: MerkleTreeConstructor,
         A: GoodAllocator + Clone,
     {
+        #[cfg(feature = "prover-messages")]
         println!("Trying to prove");
 
         let now = std::time::Instant::now();
@@ -242,6 +229,7 @@ impl Prover {
             self.default_security_config(),
             self.worker(),
         );
+        #[cfg(feature = "prover-messages")]
         println!("Proving time is {:?}", now.elapsed());
         proof
     }
@@ -252,6 +240,7 @@ pub(crate) fn prepare_execution(snapshot: VMSnapshot, worker: &Worker) -> Prepar
 
     let exact_cycles_passed = (snapshot.state().timestamp - INITIAL_TIMESTAMP) / TIMESTAMP_STEP;
 
+    #[cfg(feature = "prover-messages")]
     println!("Passed exactly {} cycles", exact_cycles_passed);
 
     let counters = snapshot
@@ -270,6 +259,7 @@ pub(crate) fn prepare_execution(snapshot: VMSnapshot, worker: &Worker) -> Prepar
         .map(|el| el.len())
         .sum();
 
+    #[cfg(feature = "prover-messages")]
     println!("Touched {} unique addresses", total_unique_teardowns);
 
     let (num_trivial, inits_and_teardowns) = chunk_lazy_init_and_teardown::<Global, _>(
@@ -285,9 +275,12 @@ pub(crate) fn prepare_execution(snapshot: VMSnapshot, worker: &Worker) -> Prepar
         .flatten()
         .collect();
 
-    println!("Finished at PC = 0x{:08x}", snapshot.state().pc);
-    for (reg_idx, reg) in snapshot.state().registers.iter().enumerate() {
-        println!("x{} = {}", reg_idx, reg.value);
+    #[cfg(feature = "prover-messages")]
+    {
+        println!("Finished at PC = 0x{:08x}", snapshot.state().pc);
+        for (reg_idx, reg) in snapshot.state().registers.iter().enumerate() {
+            println!("x{} = {}", reg_idx, reg.value);
+        }
     }
 
     let mut expected_final_state = snapshot.state();

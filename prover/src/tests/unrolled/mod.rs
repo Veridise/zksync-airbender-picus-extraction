@@ -382,7 +382,6 @@ pub(crate) unsafe fn parse_shuffle_ram_accesses(
             }
 
             let to_read = (is_register, address, read_ts, read_value);
-            println!("Inserting {to_read:?}");
             let is_unique = read_set.insert(to_read);
             if is_unique == false {
                 dbg!(trace_row);

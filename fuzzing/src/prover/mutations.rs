@@ -13,6 +13,7 @@ pub struct MutationRecord {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum MutationKind {
+    NoOp,
     ByteFlip,
     FieldReplace,
     Truncate,
@@ -28,6 +29,18 @@ pub struct MutatedInput {
 }
 
 pub fn mutate_seed_case(seed_case: &SeedCase, rng: &mut StdRng) -> MutatedInput {
-    let _ = (seed_case, rng);
-    todo!("mutate a seed proof input and record the applied mutations")
+    let _ = rng;
+
+    MutatedInput {
+        original: SeedCaseRef {
+            seed_program: seed_case.seed_program.clone(),
+            circuit: seed_case.circuit,
+        },
+        mutated_input: seed_case.base_input.clone(),
+        mutations: vec![MutationRecord {
+            kind: MutationKind::NoOp,
+            target: "proof_input".to_owned(),
+            summary: "left seed input unchanged".to_owned(),
+        }],
+    }
 }

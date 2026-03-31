@@ -91,7 +91,7 @@ pub enum GeneratedProof {
 
 /// Runs the prover fuzzer scaffold from parsed CLI arguments.
 pub fn run(cli: Cli) {
-    let config = cli.into_config();
+    let config = cli.into();
     let mut fuzzer = Fuzzer::new(config);
 
     if let Err(err) = fuzzer.initialize().and_then(|()| fuzzer.run_loop()) {
@@ -99,17 +99,17 @@ pub fn run(cli: Cli) {
     }
 }
 
-impl Cli {
+impl From<Cli> for FuzzerConfig {
     /// Expands CLI arguments into the runtime configuration shape used by the fuzzer.
-    fn into_config(self) -> FuzzerConfig {
+    fn from(cli: Cli) -> Self {
         FuzzerConfig {
-            cache_dir: self.output_dir.join("cache"),
-            crash_dir: self.output_dir.join("crashes"),
-            input_dir: self.input_dir,
-            output_dir: self.output_dir,
-            iterations: self.iterations,
-            samples: self.samples,
-            seed: self.seed,
+            cache_dir: cli.output_dir.join("cache"),
+            crash_dir: cli.output_dir.join("crashes"),
+            input_dir: cli.input_dir,
+            output_dir: cli.output_dir,
+            iterations: cli.iterations,
+            samples: cli.samples,
+            seed: cli.seed,
         }
     }
 }
