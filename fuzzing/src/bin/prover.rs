@@ -1,10 +1,21 @@
+use std::process::ExitCode;
+
 use clap::Parser;
 use fuzzing::prover::run;
 use fuzzing::prover::Cli;
 use fuzzing::setup_logging;
 
-fn main() {
+fn main() -> ExitCode {
     setup_logging();
     let cli = Cli::parse();
-    run(cli);
+    match run(cli) {
+        Ok(_) => {
+            println!("Fuzzing finished!");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("Fuzzer encountered a fatal error: {err}");
+            ExitCode::FAILURE
+        }
+    }
 }

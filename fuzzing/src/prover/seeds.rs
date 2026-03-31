@@ -199,6 +199,27 @@ pub struct SeedCase {
     pub base_input: StoredProofInputs,
 }
 
+impl std::fmt::Display for SeedCase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}({})",
+            self.seed_program,
+            match self.circuit {
+                CircuitKind::AddSubLuiAuipcMop => "ADD/SUB/LUI/AUIPC/MOP",
+                CircuitKind::JumpBranchSlt => todo!(),
+                CircuitKind::XorAndOrShiftCsr => todo!(),
+                CircuitKind::MulDiv => todo!(),
+                CircuitKind::LoadStore => todo!(),
+                CircuitKind::SubwordLoadStore => todo!(),
+                CircuitKind::InitsAndTeardowns => todo!(),
+                CircuitKind::BlakeDelegation => todo!(),
+                CircuitKind::KeccakDelegation => todo!(),
+            }
+        )
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum StoredProofInputs {
     AddSubLuiAuipcMop(ProofInputs<NonMemoryOpcodeTracingDataWithTimestamp>),
@@ -240,13 +261,6 @@ pub fn expand_seed_cases(entries: impl IntoIterator<Item = CacheEntry>) -> Vec<S
             })
         })
         .collect()
-}
-
-pub fn choose_seed_case(seed_cases: &[SeedCase], rng: &mut StdRng) -> io::Result<SeedCase> {
-    seed_cases
-        .choose(rng)
-        .cloned()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no seed cases available"))
 }
 
 fn file_stem_string(path: &Path) -> Option<String> {

@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
@@ -11,13 +12,44 @@ use crate::prover::seeds::SeedCase;
 use crate::prover::seeds::SeedProgram;
 use crate::prover::FuzzerConfig;
 
+#[derive(Debug, Default)]
+enum FuzzingStep {
+    #[default]
+    Idle,
+    SeedCheck,
+    ProofGeneration,
+    ProofValidation,
+}
+
+#[derive(Default, Debug)]
+struct CrashId {
+    id: RefCell<u64>,
+}
+
+impl CrashId {
+    fn new(id: u64) -> Self {
+        Self {
+            id: RefCell::new(id),
+        }
+    }
+
+    fn next(&self) -> u64 {
+        let id = *self.id.borrow();
+        {
+            *self.id.borrow_mut() += 1;
+        }
+        id
+    }
+}
+
 /// In-memory state accumulated across a fuzzing run.
 #[derive(Debug, Default)]
 pub struct FuzzerState {
     /// Flattened per-circuit seed cases derived from the cache.
-    pub seed_cases: Vec<SeedCase>,
+    seed_cases: Vec<SeedCase>,
     /// Next crash id to allocate when persisting a bug report.
-    next_crash_id: u64,
+    next_crash_id: CrashId,
+    step: FuzzingStep,
 }
 
 impl FuzzerState {
@@ -28,24 +60,36 @@ impl FuzzerState {
             .map(|program| CacheEntry::load_or_create(program, registry, &config.cache_dir))
             .collect::<Result<Vec<_>, _>>()?;
         let seed_cases = expand_seed_cases(cache_entries);
-        let next_crash_id = discover_next_crash_id(&config.crash_dir)?;
+        let next_crash_id = CrashId::new(discover_next_crash_id(&config.crash_dir)?);
 
         Ok(Self {
             seed_cases,
             next_crash_id,
+            step: FuzzingStep::Idle,
         })
     }
 
     /// Allocates a new crash id, persists the corresponding artifact, and returns its path.
-    pub fn save_bug(&mut self, report: BugReport, crash_dir: &Path) -> io::Result<PathBuf> {
-        let crash_id = self.next_crash_id;
-        self.next_crash_id += 1;
+    pub fn save_bug(&self, report: BugReport, crash_dir: &Path) -> io::Result<PathBuf> {
+        let crash_id = self.next_crash_id.next();
 
         let artifact = CrashArtifact::new(crash_id, report);
         let path = crash_dir.join(artifact.file_name());
         artifact.write(&path)?;
 
         Ok(path)
+    }
+
+    pub fn seed_cases(&self) -> &[SeedCase] {
+        &self.seed_cases
+    }
+
+    pub fn step(&self) -> &FuzzingStep {
+        &self.step
+    }
+
+    pub fn set_step(&mut self, step: FuzzingStep) {
+        self.step = step;
     }
 }
 

@@ -1,24 +1,13 @@
 use rand::rngs::StdRng;
+use rand::seq::IndexedRandom;
 
-use crate::prover::SeedCaseRef;
 use crate::prover::seeds::SeedCase;
 use crate::prover::seeds::StoredProofInputs;
+use crate::prover::SeedCaseRef;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MutationRecord {
-    pub kind: MutationKind,
-    pub target: String,
-    pub summary: String,
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub enum MutationKind {
-    NoOp,
-    ByteFlip,
-    FieldReplace,
-    Truncate,
-    Splice,
-    Custom(String),
+    summary: String,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -28,19 +17,53 @@ pub struct MutatedInput {
     pub mutations: Vec<MutationRecord>,
 }
 
-pub fn mutate_seed_case(seed_case: &SeedCase, rng: &mut StdRng) -> MutatedInput {
-    let _ = rng;
+pub trait Mutator {
+    fn mutate(&self, seed_case: &SeedCase, rng: &mut StdRng) -> MutatedInput;
+}
 
-    MutatedInput {
-        original: SeedCaseRef {
-            seed_program: seed_case.seed_program.clone(),
-            circuit: seed_case.circuit,
-        },
-        mutated_input: seed_case.base_input.clone(),
-        mutations: vec![MutationRecord {
-            kind: MutationKind::NoOp,
-            target: "proof_input".to_owned(),
-            summary: "left seed input unchanged".to_owned(),
-        }],
+pub struct NoOpMutator;
+
+impl Mutator for NoOpMutator {
+    fn mutate(&self, seed_case: &SeedCase, _: &mut StdRng) -> MutatedInput {
+        MutatedInput {
+            original: SeedCaseRef {
+                seed_program: seed_case.seed_program.clone(),
+                circuit: seed_case.circuit,
+            },
+            mutated_input: seed_case.base_input.clone(),
+            mutations: vec![MutationRecord {
+                summary: "no-op mutator".to_owned(),
+            }],
+        }
+    }
+}
+
+pub struct MutatorRegistry {
+    mutators: Vec<Box<dyn Mutator>>,
+}
+
+impl MutatorRegistry {
+    /// Empty registry used for seed validation.
+    ///
+    /// It actually has one mutator, the [`NoOpMutator`].
+    pub fn empty() -> Self {
+        Self {
+            mutators: vec![Box::new(NoOpMutator)],
+        }
+    }
+
+    pub fn new() -> Self {
+        Self {
+            /// TODO: Change with actual mutators
+            mutators: vec![Box::new(NoOpMutator)],
+        }
+    }
+
+    /// Chooses a mutator from the registry at random.
+    pub fn choose(&self, rng: &mut StdRng) -> &dyn Mutator {
+        self.mutators
+            .choose(rng)
+            .map(|b| b.as_ref())
+            .expect("registry not empty")
     }
 }

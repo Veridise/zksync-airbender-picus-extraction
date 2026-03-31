@@ -1,5 +1,7 @@
+use std::cell::RefCell;
 use std::fs;
 use std::io;
+use std::ops::ControlFlow;
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -13,15 +15,19 @@ mod mutations;
 mod seeds;
 mod state;
 
-use circuits::attempt_proof_generation;
-use circuits::classify_generated_proof;
 use circuits::CircuitKind;
 use circuits::CircuitRegistry;
 use circuits::ProverAttempt;
 use crashes::BugReport;
 use crashes::ExecutionOutcome;
-use mutations::mutate_seed_case;
+use rand::seq::IndexedRandom as _;
 use state::FuzzerState;
+
+use crate::prover::crashes::BugType;
+use crate::prover::mutations::MutatedInput;
+use crate::prover::mutations::Mutator;
+use crate::prover::mutations::MutatorRegistry;
+use crate::prover::seeds::SeedCase;
 
 /// Command-line arguments for the prover fuzzer scaffold.
 #[derive(Debug, Parser)]
@@ -41,6 +47,8 @@ pub struct Cli {
     /// RNG seed used to make scaffold behavior reproducible.
     #[arg(long, default_value_t = 1)]
     pub seed: u64,
+    #[arg(long, default_value_t = false)]
+    pub skip_validation: bool,
 }
 
 /// Resolved runtime configuration derived from the CLI.
@@ -90,13 +98,18 @@ pub enum GeneratedProof {
 }
 
 /// Runs the prover fuzzer scaffold from parsed CLI arguments.
-pub fn run(cli: Cli) {
+pub fn run(cli: Cli) -> anyhow::Result<()> {
+    let skip_validation = cli.skip_validation;
     let config = cli.into();
     let mut fuzzer = Fuzzer::new(config);
 
-    if let Err(err) = fuzzer.initialize().and_then(|()| fuzzer.run_loop()) {
-        panic!("prover-fuzz failed: {err}");
+    fuzzer.initialize()?;
+    if !skip_validation {
+        fuzzer.validate_seeds()?;
     }
+    fuzzer.run_loop()?;
+
+    Ok(())
 }
 
 impl From<Cli> for FuzzerConfig {
@@ -135,28 +148,76 @@ impl Fuzzer {
 
     /// Executes the main fuzz loop for the configured number of iterations.
     fn run_loop(&mut self) -> io::Result<()> {
-        for iteration in 0..self.config.iterations {
-            let outcome = self.run_one_iteration(iteration)?;
+        let m = MutatorRegistry::new();
+
+        log::info!("Fuzzing for {} iterations", self.config.iterations);
+        for n in 0..self.config.iterations {
+            let seed_case = self.state.seed_cases().choose(&mut self.rng).unwrap();
+            log::info!("[{}/{}] Picked {seed_case}", n + 1, self.config.iterations);
+            let mutated = m.choose(&mut self.rng).mutate(&seed_case, &mut self.rng);
+            let outcome = self.run_one_iteration(mutated);
             if let ExecutionOutcome::Interesting(report) = outcome {
+                log::info!("[{}/{}] Found crash!", n + 1, self.config.iterations);
                 self.state.save_bug(report, &self.config.crash_dir)?;
             }
         }
+        Ok(())
+    }
 
+    /// Runs each seed e2e to check that they are valid.
+    fn validate_seeds(&mut self) -> anyhow::Result<()> {
+        let m = MutatorRegistry::empty();
+        let mut failed = false;
+        let seed_cases = self.state.seed_cases();
+        log::info!("Validating {} seeds", seed_cases.len());
+        for (n, seed) in seed_cases.iter().enumerate() {
+            let mutated = m.choose(&mut self.rng).mutate(&seed, &mut self.rng);
+            let outcome = self.run_one_iteration(mutated);
+            match outcome {
+                // Prover failed to generate proof from seed.
+                ExecutionOutcome::DiscardedProverCrash => {
+                    log::error!(
+                        "[{}/{}] Seed {seed} failed during proof generation",
+                        n + 1,
+                        seed_cases.len()
+                    );
+                    failed = true;
+                }
+                ExecutionOutcome::Interesting(bug_report) => match &bug_report.bug_type {
+                    // Validator failed with the given proof.
+                    BugType::ProofGenerationBug => {
+                        log::error!(
+                            "[{}/{}] Seed {seed} failed during proof validation",
+                            n + 1,
+                            seed_cases.len()
+                        );
+                        failed = true;
+                    }
+                    // All good
+                    BugType::ValidationBug => {
+                        log::info!(
+                            "[{}/{}] Seed {seed} validated successfuly",
+                            n + 1,
+                            seed_cases.len()
+                        );
+                    }
+                },
+            }
+        }
+
+        if failed {
+            anyhow::bail!("Seed validation failed");
+        }
         Ok(())
     }
 
     /// Runs one fuzz iteration: choose a seed, mutate it, attempt proving, and classify the result.
-    fn run_one_iteration(&mut self, _iteration: usize) -> io::Result<ExecutionOutcome> {
-        let seed_case = seeds::choose_seed_case(&self.state.seed_cases, &mut self.rng)?;
-        let mutated = mutate_seed_case(&seed_case, &mut self.rng);
-
-        match attempt_proof_generation(&mutated, &self.registry) {
-            ProverAttempt::Crash => Ok(ExecutionOutcome::DiscardedProverCrash),
+    fn run_one_iteration(&self, mutated: MutatedInput) -> ExecutionOutcome {
+        match self.registry.prove(&mutated.mutated_input) {
+            ProverAttempt::Crash => ExecutionOutcome::DiscardedProverCrash,
             ProverAttempt::Success(proof) => {
-                let bug_type = classify_generated_proof(&mutated, &proof, &self.registry);
-                Ok(ExecutionOutcome::Interesting(BugReport::new(
-                    mutated, bug_type,
-                )))
+                let bug_type = self.registry.validate(&mutated.mutated_input, &proof);
+                ExecutionOutcome::Interesting(BugReport::new(mutated, bug_type))
             }
         }
     }

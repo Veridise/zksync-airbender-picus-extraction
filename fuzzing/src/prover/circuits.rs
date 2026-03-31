@@ -11,9 +11,9 @@ use crate::prover::crashes::BugType;
 use crate::prover::mutations::MutatedInput;
 use crate::prover::seeds::StoredProofInputs;
 use crate::prover::GeneratedProof;
-use crate::rv32im::prover::circuits::add_sub_lui_auipc_mop::AddSubLuiAuipcMop;
 use crate::rv32im::prover::circuits::add_sub_lui_auipc_mop::prove_add_sub_lui_auipc_mop_from_inputs;
 use crate::rv32im::prover::circuits::add_sub_lui_auipc_mop::validate_add_sub_lui_auipc_mop_proof;
+use crate::rv32im::prover::circuits::add_sub_lui_auipc_mop::AddSubLuiAuipcMop;
 use crate::rv32im::prover::circuits::CircuitProver;
 use crate::rv32im::prover::PreparedExecution;
 use crate::rv32im::vm::VMSnapshot;
@@ -136,11 +136,11 @@ impl CircuitRegistry {
 
     pub fn prove(&self, input: &StoredProofInputs) -> ProverAttempt {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match input {
-            StoredProofInputs::AddSubLuiAuipcMop(inputs) => ProverAttempt::Success(
-                GeneratedProof::AddSubLuiAuipcMop(prove_add_sub_lui_auipc_mop_from_inputs(
-                    inputs.clone(),
-                )),
-            ),
+            StoredProofInputs::AddSubLuiAuipcMop(inputs) => {
+                ProverAttempt::Success(GeneratedProof::AddSubLuiAuipcMop(
+                    prove_add_sub_lui_auipc_mop_from_inputs(inputs.clone()),
+                ))
+            }
             StoredProofInputs::JumpBranchSlt(_) => todo!(),
             StoredProofInputs::XorAndOrShiftCsr(_) => todo!(),
             StoredProofInputs::MulDiv(_) => todo!(),
@@ -172,18 +172,6 @@ impl CircuitRegistry {
             ),
         }
     }
-}
-
-pub fn attempt_proof_generation(input: &MutatedInput, registry: &CircuitRegistry) -> ProverAttempt {
-    registry.prove(&input.mutated_input)
-}
-
-pub fn classify_generated_proof(
-    input: &MutatedInput,
-    proof: &GeneratedProof,
-    registry: &CircuitRegistry,
-) -> BugType {
-    registry.validate(&input.mutated_input, proof)
 }
 
 #[cfg(test)]
