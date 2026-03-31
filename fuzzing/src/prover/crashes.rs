@@ -15,7 +15,9 @@ pub enum ExecutionOutcome {
 
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum BugType {
+    // Completeness
     ProofGenerationBug,
+    // Soundness
     ValidationBug,
 }
 
@@ -87,7 +89,10 @@ impl CrashArtifact {
         let payload = serde_json::to_vec_pretty(self).map_err(|err| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("failed to serialize crash artifact `{}`: {err}", path.display()),
+                format!(
+                    "failed to serialize crash artifact `{}`: {err}",
+                    path.display()
+                ),
             )
         })?;
         fs::write(path, payload)

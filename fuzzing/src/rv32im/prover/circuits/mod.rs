@@ -104,11 +104,11 @@ type FullTrace<A, const N: usize> = WitnessEvaluationDataForExecutionFamily<N, A
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ProofInputs<T> {
-    family_idx: u8,
-    circuit: CompiledCircuitArtifact<Mersenne31Field>,
-    decoder_table_data: Vec<[Mersenne31Field; 10]>,
-    witness_gen_data: Vec<ExecutorFamilyDecoderData>,
-    buffer: Vec<T>,
+    pub(crate) family_idx: u8,
+    pub(crate) circuit: CompiledCircuitArtifact<Mersenne31Field>,
+    pub(crate) decoder_table_data: Vec<[Mersenne31Field; 10]>,
+    pub(crate) witness_gen_data: Vec<ExecutorFamilyDecoderData>,
+    pub(crate) buffer: Vec<T>,
 }
 
 impl<T> ProofInputs<T> {
