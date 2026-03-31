@@ -1,5 +1,3 @@
-use std::mem::MaybeUninit;
-
 use prover::common_constants::ADD_SUB_LUI_AUIPC_MOP_CIRCUIT_FAMILY_IDX;
 use prover::common_constants::INITS_AND_TEARDOWNS_FORMAL_CIRCUIT_FAMILY_IDX;
 use prover::common_constants::JUMP_BRANCH_SLT_CIRCUIT_FAMILY_IDX;
@@ -8,18 +6,15 @@ use prover::common_constants::LOAD_STORE_WORD_ONLY_CIRCUIT_FAMILY_IDX;
 use prover::common_constants::MUL_DIV_CIRCUIT_FAMILY_IDX;
 use prover::common_constants::SHIFT_BINARY_CSR_CIRCUIT_FAMILY_IDX;
 use prover::cs::tables::TableDriver;
-use prover::nd_source_std::set_iterator;
 use prover::prover_stages::unrolled_prover::UnrolledModeProof;
-use prover::risc_v_simulator::machine_mode_only_unrolled::NonMemoryOpcodeTracingDataWithTimestamp;
-use verifier_common::proof_flattener::flatten_query;
-use verifier_common::proof_flattener::flatten_unrolled_circuits_proof_for_skeleton;
 
 use crate::prover::crashes::BugType;
-use crate::prover::mutations::MutatedInput;
 use crate::prover::seeds::StoredProofInputs;
 use crate::rv32im::prover::circuits::add_sub_lui_auipc_mop::AddSubLuiAuipcMop;
 use crate::rv32im::prover::circuits::jump_branch_slt::JumpBranchSltCircuit;
+use crate::rv32im::prover::circuits::load_store::LoadStoreWordCircuit;
 use crate::rv32im::prover::circuits::mul_div::MulDivCircuit;
+use crate::rv32im::prover::circuits::subword_load_store::LoadStoreSubwordCircuit;
 use crate::rv32im::prover::circuits::xor_and_or_shift_csr::XorAndOrShiftCsrCircuit;
 use crate::rv32im::prover::circuits::CircuitProver;
 use crate::rv32im::prover::circuits::ProofInputs;
@@ -63,8 +58,8 @@ impl CircuitKind {
             Self::JumpBranchSlt,
             Self::XorAndOrShiftCsr,
             Self::MulDiv,
-            // Self::LoadStore,
-            // Self::SubwordLoadStore,
+            Self::LoadStore,
+            Self::SubwordLoadStore,
             // Self::InitsAndTeardowns,
             // Self::BlakeDelegation,
             // Self::KeccakDelegation,
@@ -147,8 +142,22 @@ impl CircuitRegistry {
                 prepared,
                 &mut table_driver,
             )),
-            CircuitKind::LoadStore => todo!(),
-            CircuitKind::SubwordLoadStore => todo!(),
+            CircuitKind::LoadStore => StoredProofInputs::LoadStore(
+                LoadStoreWordCircuit::new(snapshot.binary()).create_proof_input(
+                    snapshot,
+                    prepared,
+                    &mut table_driver,
+                ),
+                snapshot.binary().to_vec(),
+            ),
+            CircuitKind::SubwordLoadStore => StoredProofInputs::SubwordLoadStore(
+                LoadStoreSubwordCircuit::new(snapshot.binary()).create_proof_input(
+                    snapshot,
+                    prepared,
+                    &mut table_driver,
+                ),
+                snapshot.binary().to_vec(),
+            ),
             CircuitKind::InitsAndTeardowns => todo!(),
             CircuitKind::BlakeDelegation => todo!(),
             CircuitKind::KeccakDelegation => todo!(),
@@ -169,8 +178,12 @@ impl CircuitRegistry {
             StoredProofInputs::MulDiv(inputs) => {
                 ProverAttempt::Success(self.prove_impl(MulDivCircuit, inputs))
             }
-            StoredProofInputs::LoadStore(_) => todo!(),
-            StoredProofInputs::SubwordLoadStore(_) => todo!(),
+            StoredProofInputs::LoadStore(inputs, bytecode) => ProverAttempt::Success(
+                self.prove_impl(LoadStoreWordCircuit::new(&bytecode), inputs),
+            ),
+            StoredProofInputs::SubwordLoadStore(inputs, bytecode) => ProverAttempt::Success(
+                self.prove_impl(LoadStoreSubwordCircuit::new(&bytecode), inputs),
+            ),
             StoredProofInputs::InitsAndTeardowns(_) => todo!(),
             StoredProofInputs::BlakeDelegation(_) => todo!(),
             StoredProofInputs::KeccakDelegation(_) => todo!(),
@@ -208,8 +221,12 @@ impl CircuitRegistry {
             StoredProofInputs::JumpBranchSlt(inputs) => {
                 classify(JumpBranchSltCircuit::validate_proof(inputs, proof))
             }
-            StoredProofInputs::LoadStore(_) => todo!(),
-            StoredProofInputs::SubwordLoadStore(_) => todo!(),
+            StoredProofInputs::LoadStore(inputs, _) => {
+                classify(LoadStoreWordCircuit::validate_proof(inputs, proof))
+            }
+            StoredProofInputs::SubwordLoadStore(inputs, _) => {
+                classify(LoadStoreSubwordCircuit::validate_proof(inputs, proof))
+            }
             StoredProofInputs::InitsAndTeardowns(_) => todo!(),
             StoredProofInputs::BlakeDelegation(_) => todo!(),
             StoredProofInputs::KeccakDelegation(_) => todo!(),

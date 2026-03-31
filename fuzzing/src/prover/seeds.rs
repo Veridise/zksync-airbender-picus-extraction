@@ -6,6 +6,7 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 
+use prover::risc_v_simulator::machine_mode_only_unrolled::MemoryOpcodeTracingDataWithTimestamp;
 use prover::risc_v_simulator::machine_mode_only_unrolled::NonMemoryOpcodeTracingDataWithTimestamp;
 use prover::worker::Worker;
 use rand::prelude::IndexedRandom;
@@ -210,8 +211,8 @@ impl std::fmt::Display for SeedCase {
                 CircuitKind::JumpBranchSlt => "JUMP/BRANCH/SLT",
                 CircuitKind::XorAndOrShiftCsr => "XOR/AND/OR/SHIFT/CSR",
                 CircuitKind::MulDiv => "MUL/DIV",
-                CircuitKind::LoadStore => todo!(),
-                CircuitKind::SubwordLoadStore => todo!(),
+                CircuitKind::LoadStore => "word LOAD/STORE",
+                CircuitKind::SubwordLoadStore => "subword LOAD/STORE",
                 CircuitKind::InitsAndTeardowns => todo!(),
                 CircuitKind::BlakeDelegation => todo!(),
                 CircuitKind::KeccakDelegation => todo!(),
@@ -226,8 +227,8 @@ pub enum StoredProofInputs {
     JumpBranchSlt(ProofInputs<NonMemoryOpcodeTracingDataWithTimestamp>),
     XorAndOrShiftCsr(ProofInputs<NonMemoryOpcodeTracingDataWithTimestamp>),
     MulDiv(ProofInputs<NonMemoryOpcodeTracingDataWithTimestamp>),
-    LoadStore(()),
-    SubwordLoadStore(()),
+    LoadStore(ProofInputs<MemoryOpcodeTracingDataWithTimestamp>, Vec<u32>),
+    SubwordLoadStore(ProofInputs<MemoryOpcodeTracingDataWithTimestamp>, Vec<u32>),
     InitsAndTeardowns(()),
     BlakeDelegation(()),
     KeccakDelegation(()),
@@ -241,8 +242,10 @@ impl StoredProofInputs {
             | Self::XorAndOrShiftCsr(inputs)
             | Self::AddSubLuiAuipcMop(inputs) => CircuitKind::from_family_idx(inputs.family_idx())
                 .expect("stored proof inputs contain an unsupported circuit family idx"),
-            Self::LoadStore(_) => CircuitKind::LoadStore,
-            Self::SubwordLoadStore(_) => CircuitKind::SubwordLoadStore,
+            Self::SubwordLoadStore(inputs, _) | Self::LoadStore(inputs, _) => {
+                CircuitKind::from_family_idx(inputs.family_idx())
+                    .expect("stored proof inputs contain an unsupported circuit family idx")
+            }
             Self::InitsAndTeardowns(_) => CircuitKind::InitsAndTeardowns,
             Self::BlakeDelegation(_) => CircuitKind::BlakeDelegation,
             Self::KeccakDelegation(_) => CircuitKind::KeccakDelegation,

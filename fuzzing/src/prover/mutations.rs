@@ -1,9 +1,12 @@
 use rand::rngs::StdRng;
 use rand::seq::IndexedRandom;
 
+use crate::prover::mutations::nop::NoOpMutator;
 use crate::prover::seeds::SeedCase;
 use crate::prover::seeds::StoredProofInputs;
 use crate::prover::SeedCaseRef;
+
+mod nop;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MutationRecord {
@@ -19,23 +22,6 @@ pub struct MutatedInput {
 
 pub trait Mutator {
     fn mutate(&self, seed_case: &SeedCase, rng: &mut StdRng) -> MutatedInput;
-}
-
-pub struct NoOpMutator;
-
-impl Mutator for NoOpMutator {
-    fn mutate(&self, seed_case: &SeedCase, _: &mut StdRng) -> MutatedInput {
-        MutatedInput {
-            original: SeedCaseRef {
-                seed_program: seed_case.seed_program.clone(),
-                circuit: seed_case.circuit,
-            },
-            mutated_input: seed_case.base_input.clone(),
-            mutations: vec![MutationRecord {
-                summary: "no-op mutator".to_owned(),
-            }],
-        }
-    }
 }
 
 pub struct MutatorRegistry {
@@ -54,7 +40,7 @@ impl MutatorRegistry {
 
     pub fn new() -> Self {
         Self {
-            /// TODO: Change with actual mutators
+            // TODO: Change with actual mutators
             mutators: vec![Box::new(NoOpMutator)],
         }
     }

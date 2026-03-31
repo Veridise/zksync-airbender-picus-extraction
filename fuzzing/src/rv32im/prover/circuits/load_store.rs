@@ -1,215 +1,187 @@
 use std::alloc::Global;
+use std::mem::MaybeUninit;
 
-use prover::check_satisfied;
+use load_store_word_only_verifier::verify_with_configuration;
 use prover::common_constants;
-use prover::common_constants::ADD_SUB_LUI_AUIPC_MOP_CIRCUIT_FAMILY_IDX;
 use prover::common_constants::LOAD_STORE_WORD_ONLY_CIRCUIT_FAMILY_IDX;
 use prover::cs::cs::circuit::Circuit as _;
+use prover::cs::cs::oracle::ExecutorFamilyDecoderData;
 use prover::cs::machine::ops::unrolled::compile_unrolled_circuit_state_transition;
 use prover::cs::machine::ops::unrolled::load_store_word_only::create_word_only_load_store_special_tables;
 use prover::cs::machine::ops::unrolled::load_store_word_only::word_only_load_store_circuit_with_preprocessed_bytecode;
 use prover::cs::machine::ops::unrolled::load_store_word_only::word_only_load_store_table_addition_fn;
 use prover::cs::machine::ops::unrolled::load_store_word_only::word_only_load_store_table_driver_fn;
-use prover::cs::machine::ops::unrolled::materialize_flattened_decoder_table;
+use prover::cs::one_row_compiler::CompiledCircuitArtifact;
+use prover::cs::tables::LookupWrapper;
 use prover::cs::tables::TableDriver;
-use prover::fft::LdePrecomputations;
-use prover::fft::Twiddles;
+use prover::cs::tables::TableType;
 use prover::field::Field as _;
 use prover::field::Mersenne31Field;
 use prover::field::Mersenne31Quartic;
-use prover::merkle_trees::DefaultTreeConstructor;
-use prover::prover_stages::SetupPrecomputations;
+use prover::nd_source_std::set_iterator;
+use prover::nd_source_std::ThreadLocalBasedSource;
+use prover::prover_stages::unrolled_prover::UnrolledModeProof;
 use prover::risc_v_simulator::machine_mode_only_unrolled::MemoryOpcodeTracingDataWithTimestamp;
-use prover::risc_v_simulator::machine_mode_only_unrolled::NonMemoryOpcodeTracingDataWithTimestamp;
-use prover::tests::unrolled::add_sub_lui_auipc_mod;
-use prover::tests::unrolled::ensure_memory_trace_consistency;
-use prover::tests::unrolled::parse_shuffle_ram_accesses_from_full_trace;
-use prover::tests::unrolled::parse_state_permutation_elements_from_full_trace;
 use prover::tests::unrolled::word_load_store;
-use prover::unrolled::evaluate_memory_witness_for_executor_family;
-use prover::unrolled::evaluate_witness_for_executor_family;
 use prover::unrolled::MemoryCircuitOracle;
-use prover::unrolled::NonMemoryCircuitOracle;
-use riscv_transpiler::replayer::ReplayerRam;
-use riscv_transpiler::replayer::ReplayerVM;
-use riscv_transpiler::vm::Counters as _;
-use riscv_transpiler::vm::DelegationsAndFamiliesCounters;
-use riscv_transpiler::vm::ReplayBuffer as _;
-use riscv_transpiler::vm::SimpleSnapshotter;
-use riscv_transpiler::vm::SimpleTape;
-use riscv_transpiler::vm::State;
+use prover::SimpleWitnessProxy;
+use prover::DEFAULT_TRACE_PADDING_MULTIPLE;
 use riscv_transpiler::witness::MemDestinationHolder;
-use riscv_transpiler::witness::NonMemDestinationHolder;
+use verifier_common::proof_flattener::flatten_query;
+use verifier_common::proof_flattener::flatten_unrolled_circuits_proof_for_skeleton;
+use verifier_common::DefaultLeafInclusionVerifier;
+use verifier_common::ProofPublicInputs;
 
 use crate::rv32im::prover::accumulators::Accumulators;
-use crate::rv32im::prover::factories::PreprocessingData;
+use crate::rv32im::prover::circuits::traces::FullAndMemTraces;
+use crate::rv32im::prover::circuits::CircuitProver;
+use crate::rv32im::prover::circuits::ProofInputs;
 use crate::rv32im::prover::sets::ReadSets;
 use crate::rv32im::prover::sets::WriteSets;
+use crate::rv32im::prover::PreparedExecution;
 use crate::rv32im::prover::Prover;
-use crate::rv32im::prover::LDE_FACTOR;
-use crate::rv32im::prover::NUM_CYCLES_PER_CHUNK;
-use crate::rv32im::prover::TRACE_LEN;
 use crate::rv32im::prover::TRACE_LEN_LOG2;
-use crate::rv32im::prover::TREE_CAP_SIZE;
-use crate::rv32im::types::CountersT;
+use crate::rv32im::vm::VMSnapshot;
 
 impl Prover {
     pub fn prove_load_store(
         &self,
         accumulators: &mut Accumulators,
-        snapshotter: &SimpleSnapshotter<CountersT, { common_constants::ROM_SECOND_WORD_BITS }>,
-        counters: &DelegationsAndFamiliesCounters,
-        tape: &SimpleTape,
-        cycles_bound: usize,
-        expected_final_state: State<CountersT>,
+        snapshot: VMSnapshot,
+        prepared: &PreparedExecution,
         read_sets: &mut ReadSets,
         write_sets: &mut WriteSets,
-        preprocessing_data: &PreprocessingData,
-        bytecode: &[u32],
     ) {
-        println!("Will try to prove word LOAD/STORE circuit");
+        let circuit = LoadStoreWordCircuit::new(snapshot.binary());
+        circuit.prove(
+            snapshot,
+            prepared,
+            accumulators,
+            read_sets,
+            write_sets,
+            self,
+            self.worker(),
+        );
+    }
+}
 
+pub struct LoadStoreWordCircuit {
+    extra_tables: [(TableType, LookupWrapper<Mersenne31Field>); 2],
+}
+
+impl LoadStoreWordCircuit {
+    pub fn new(bytecode: &[u32]) -> Self {
         let extra_tables = create_word_only_load_store_special_tables::<
             _,
             { common_constants::ROM_SECOND_WORD_BITS },
         >(bytecode);
-        let word_load_store_circuit = {
-            compile_unrolled_circuit_state_transition::<Mersenne31Field>(
-                &|cs| {
-                    word_only_load_store_table_addition_fn(cs);
-                    for (table_type, table) in extra_tables.clone() {
-                        cs.add_table_with_content(table_type, table);
-                    }
-                },
-                &|cs| {
-                    word_only_load_store_circuit_with_preprocessed_bytecode::<
-                        _,
-                        _,
-                        { common_constants::ROM_SECOND_WORD_BITS },
-                    >(cs)
-                },
-                1 << 20,
-                TRACE_LEN_LOG2,
-            )
-        };
+        Self { extra_tables }
+    }
 
-        let mut table_driver = TableDriver::<Mersenne31Field>::new();
-        word_only_load_store_table_driver_fn(&mut table_driver);
-        for (table_type, table) in extra_tables.clone() {
-            table_driver.add_table_with_content(table_type, table);
+    pub fn validate_proof(
+        inputs: &ProofInputs<MemoryOpcodeTracingDataWithTimestamp>,
+        proof: &UnrolledModeProof,
+    ) -> Result<(), ()> {
+        let mut oracle_data =
+            flatten_unrolled_circuits_proof_for_skeleton(proof, inputs.compiled_circuit());
+        for query in proof.queries.iter() {
+            oracle_data.extend(flatten_query(query));
         }
 
-        let num_calls =
-            counters.get_calls_to_circuit_family::<LOAD_STORE_WORD_ONLY_CIRCUIT_FAMILY_IDX>();
-        dbg!(num_calls);
+        std::thread::Builder::new()
+        .name("word-load-store-verifier".to_string())
+        .stack_size(1 << 27)
+        .spawn(move || {
+            set_iterator(oracle_data.into_iter());
 
-        let mut state = snapshotter.initial_snapshot.state;
-        let mut ram_log_buffers = snapshotter
-            .reads_buffer
-            .make_range(0..snapshotter.reads_buffer.len());
+            #[allow(invalid_value)]
+            unsafe {
+                verify_with_configuration::<ThreadLocalBasedSource, DefaultLeafInclusionVerifier>(
+                    &mut MaybeUninit::uninit().assume_init(),
+                    &mut ProofPublicInputs::uninit(),
+                )
+            };
+        })
+        .expect("must spawn verifier thread")
+        .join()
+        .map_err(|_| ())
+    }
+}
 
-        let mut ram = ReplayerRam::<{ common_constants::ROM_SECOND_WORD_BITS }> {
-            ram_log: &mut ram_log_buffers,
-        };
+impl CircuitProver<LOAD_STORE_WORD_ONLY_CIRCUIT_FAMILY_IDX> for LoadStoreWordCircuit {
+    type BufferElt = MemoryOpcodeTracingDataWithTimestamp;
+    type Tracer<'t> = MemDestinationHolder<'t, LOAD_STORE_WORD_ONLY_CIRCUIT_FAMILY_IDX>;
+    type Oracle<'o> = MemoryCircuitOracle<'o>;
+    type TracesFactory<'o, 'r>
+        = FullAndMemTraces<Global, DEFAULT_TRACE_PADDING_MULTIPLE>
+    where
+        MemoryCircuitOracle<'o>: 'r;
 
-        let mut buffer = vec![MemoryOpcodeTracingDataWithTimestamp::default(); num_calls];
-        let mut buffers = vec![&mut buffer[..]];
-        let mut tracer = MemDestinationHolder::<LOAD_STORE_WORD_ONLY_CIRCUIT_FAMILY_IDX> {
-            buffers: &mut buffers[..],
-        };
+    fn compile_circuit(&self) -> CompiledCircuitArtifact<Mersenne31Field> {
+        compile_unrolled_circuit_state_transition::<Mersenne31Field>(
+            &|cs| {
+                word_only_load_store_table_addition_fn(cs);
+                for (table_type, table) in self.extra_tables.clone() {
+                    cs.add_table_with_content(table_type, table);
+                }
+            },
+            &|cs| {
+                word_only_load_store_circuit_with_preprocessed_bytecode::<
+                    _,
+                    _,
+                    { common_constants::ROM_SECOND_WORD_BITS },
+                >(cs)
+            },
+            1 << 20,
+            TRACE_LEN_LOG2,
+        )
+    }
 
-        ReplayerVM::<CountersT>::replay_basic_unrolled::<_, _>(
-            &mut state,
-            &mut ram,
-            tape,
-            &mut (),
-            cycles_bound,
-            &mut tracer,
-        );
-        assert_eq!(expected_final_state, state);
+    fn name(&self) -> &str {
+        "word LOAD/STORE"
+    }
 
-        let (decoder_table_data, witness_gen_data) =
-            &preprocessing_data[&LOAD_STORE_WORD_ONLY_CIRCUIT_FAMILY_IDX];
-        let decoder_table_data = materialize_flattened_decoder_table(decoder_table_data);
+    fn fill_table(&self, table_driver: &mut TableDriver<Mersenne31Field>) {
+        word_only_load_store_table_driver_fn(table_driver);
+        for (table_type, table) in self.extra_tables.clone() {
+            table_driver.add_table_with_content(table_type, table);
+        }
+    }
 
-        let oracle = MemoryCircuitOracle {
-            inner: &buffer[..],
-            decoder_table: witness_gen_data,
-        };
+    fn create_buffer(&self, size: usize) -> Vec<Self::BufferElt> {
+        vec![Self::BufferElt::default(); size]
+    }
 
-        let is_empty = oracle.inner.is_empty();
+    fn create_tracer<'t>(&self, buffers: &'t mut [&'t mut [Self::BufferElt]]) -> Self::Tracer<'t> {
+        MemDestinationHolder { buffers }
+    }
 
-        let memory_trace = evaluate_memory_witness_for_executor_family::<_, Global>(
-            &word_load_store_circuit,
-            NUM_CYCLES_PER_CHUNK,
-            &oracle,
-            self.worker(),
-            Global,
-        );
+    fn create_oracle<'o>(
+        &self,
+        inner: &'o [Self::BufferElt],
+        decoder_table: &'o [ExecutorFamilyDecoderData],
+    ) -> Self::Oracle<'o> {
+        MemoryCircuitOracle {
+            inner,
+            decoder_table,
+        }
+    }
 
-        let full_trace = evaluate_witness_for_executor_family::<_, Global>(
-            &word_load_store_circuit,
-            word_load_store::witness_eval_fn,
-            NUM_CYCLES_PER_CHUNK,
-            &oracle,
-            &table_driver,
-            self.worker(),
-            Global,
-        );
+    fn witness_eval(w: &mut SimpleWitnessProxy<Self::Oracle<'_>>) {
+        word_load_store::witness_eval_fn(w)
+    }
 
-        ensure_memory_trace_consistency(&memory_trace, &full_trace);
-
-        parse_state_permutation_elements_from_full_trace(
-            &word_load_store_circuit,
-            &full_trace,
-            write_sets.write_set_mut(),
-            read_sets.read_set_mut(),
-        );
-        parse_shuffle_ram_accesses_from_full_trace(
-            &word_load_store_circuit,
-            &full_trace,
-            write_sets.memory_write_set_mut(),
-            read_sets.memory_read_set_mut(),
-        );
-
-        let is_satisfied = check_satisfied(
-            &word_load_store_circuit,
-            &full_trace.exec_trace,
-            full_trace.num_witness_columns,
-        );
-        assert!(is_satisfied);
-
-        let twiddles: Twiddles<_, Global> = Twiddles::new(TRACE_LEN, self.worker());
-        let lde_precomputations =
-            LdePrecomputations::new(TRACE_LEN, LDE_FACTOR, &[0, 1], self.worker());
-        let setup = SetupPrecomputations::from_tables_and_trace_len_with_decoder_table(
-            &table_driver,
-            &decoder_table_data,
-            TRACE_LEN,
-            &word_load_store_circuit.setup_layout,
-            &twiddles,
-            &lde_precomputations,
-            LDE_FACTOR,
-            TREE_CAP_SIZE,
-            self.worker(),
-        );
-
-        let (_, proof) = self.run_prover::<_, DefaultTreeConstructor, _>(
-            &word_load_store_circuit,
-            full_trace,
-            &setup,
-            &twiddles,
-            &lde_precomputations,
-        );
-
-        if is_empty {
+    fn check_constraints(&self, proof: &UnrolledModeProof, oracle: &Self::Oracle<'_>) {
+        if oracle.inner.is_empty() {
             assert_eq!(
                 proof.permutation_grand_product_accumulator,
                 Mersenne31Quartic::ONE
             );
         }
         assert!(proof.delegation_argument_accumulator.is_none());
+    }
 
+    fn accumulate(&self, accumulators: &mut Accumulators, proof: &UnrolledModeProof) {
         accumulators
             .permutation_argument_mut()
             .mul_assign(&proof.permutation_grand_product_accumulator);

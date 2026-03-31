@@ -340,28 +340,18 @@ pub fn prove_vm_result(snapshot: VMSnapshot) {
 
     prover.prove_load_store(
         &mut accumulators,
-        snapshot.snapshotter(),
-        &prepared.counters,
-        snapshot.tape(),
-        snapshot.cycles_bound(),
-        prepared.expected_final_state,
+        snapshot,
+        &prepared,
         &mut read_sets,
         &mut write_sets,
-        &prepared.preprocessing_data,
-        snapshot.binary(),
     );
 
     prover.prove_subword_load_store(
         &mut accumulators,
-        snapshot.snapshotter(),
-        &prepared.counters,
-        snapshot.tape(),
-        snapshot.cycles_bound(),
-        prepared.expected_final_state,
+        snapshot,
+        &prepared,
         &mut read_sets,
         &mut write_sets,
-        &prepared.preprocessing_data,
-        snapshot.binary(),
     );
     // Machine state permutation ended
     validate_sets(&read_sets, &write_sets);
