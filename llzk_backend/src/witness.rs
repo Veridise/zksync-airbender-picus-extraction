@@ -15,6 +15,7 @@
 //! 5. lower remaing ROM and memory-subtree accesses as explicit runtime hooks.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::ops::Deref;
 
@@ -252,6 +253,12 @@ pub(crate) struct WitnessComputation<F: FieldInfo> {
     special_csr_properties: Option<SpecialCsrPropertiesMetadata>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct WitnessVariableUsage {
+    pub read_vars: BTreeSet<Variable>,
+    pub write_vars: BTreeSet<Variable>,
+}
+
 impl<F: FieldInfo> WitnessComputation<F> {
     /// Create a new witness computation plan from the one-row compiler output, witness SSA, and
     /// placeholder substitution map.
@@ -272,6 +279,15 @@ impl<F: FieldInfo> WitnessComputation<F> {
             substitutions,
             special_csr_properties,
         }
+    }
+
+    /// Collect logical variable reads and writes from the witness SSA.
+    pub(crate) fn logical_variable_usage(&self) -> WitnessVariableUsage {
+        let mut usage = WitnessVariableUsage::default();
+        for expr in self.ssa.iter().flatten() {
+            collect_raw_expression_usage(expr, &mut usage);
+        }
+        usage
     }
 
     /// Declare runtime hooks if they are needed by the emitted LLZK module.
@@ -330,6 +346,13 @@ impl<F: FieldInfo> WitnessComputation<F> {
     ) -> Result<()> {
         let has_runtime_memory_reads = self.has_runtime_memory_reads(vars);
         let self_value = builder.get_compute_self_value()?;
+        if vars.has_compiled_storage() {
+            vars.seed_compute_compiled_inputs(
+                builder,
+                self_value,
+                &self.compiled.variable_mapping,
+            )?;
+        }
         let mut expr_idx = 0usize;
         for block in &self.ssa {
             let mut lowering = ComputeLowering::new(
@@ -369,6 +392,208 @@ impl<F: FieldInfo> WitnessComputation<F> {
             .iter()
             .flatten()
             .any(|expr| expr.uses_runtime_memory(&self.compiled.variable_mapping, vars))
+    }
+}
+
+fn collect_raw_expression_usage<F: FieldInfo>(
+    expr: &RawExpression<F>,
+    usage: &mut WitnessVariableUsage,
+) {
+    match expr {
+        RawExpression::Bool(expr) => collect_bool_expression_usage(expr, usage),
+        RawExpression::Field(expr) => collect_field_expression_usage(expr, usage),
+        RawExpression::Integer(expr) => collect_integer_expression_usage(expr, usage),
+        RawExpression::PerformLookup { .. }
+        | RawExpression::MaybePerformLookup { .. }
+        | RawExpression::AccessLookup { .. } => {}
+        RawExpression::WriteVariable {
+            into_variable,
+            source_subexpr,
+            ..
+        } => {
+            usage.write_vars.insert(*into_variable);
+            collect_typed_expression_usage(source_subexpr, usage);
+        }
+    }
+}
+
+fn collect_typed_expression_usage<F: FieldInfo>(
+    expr: &Expression<F>,
+    usage: &mut WitnessVariableUsage,
+) {
+    match expr {
+        Expression::Bool(expr) => collect_bool_expression_usage(expr, usage),
+        Expression::Field(expr) => collect_field_expression_usage(expr, usage),
+        Expression::U8(expr) | Expression::U16(expr) | Expression::U32(expr) => {
+            collect_integer_expression_usage(expr, usage)
+        }
+    }
+}
+
+fn collect_field_expression_usage<F: FieldInfo>(
+    expr: &FieldNodeExpression<F>,
+    usage: &mut WitnessVariableUsage,
+) {
+    match expr {
+        FieldNodeExpression::Place(variable) => {
+            usage.read_vars.insert(*variable);
+        }
+        FieldNodeExpression::SubExpression(..)
+        | FieldNodeExpression::Constant(..)
+        | FieldNodeExpression::OracleValue { .. }
+        | FieldNodeExpression::LookupOutput { .. }
+        | FieldNodeExpression::MaybeLookupOutput { .. } => {}
+        FieldNodeExpression::FromInteger(inner) => {
+            collect_integer_expression_usage(inner, usage);
+        }
+        FieldNodeExpression::InverseUnchecked(inner)
+        | FieldNodeExpression::InverseOrZero(inner) => {
+            collect_field_expression_usage(inner, usage);
+        }
+        FieldNodeExpression::FromMask(inner) => collect_bool_expression_usage(inner, usage),
+        FieldNodeExpression::Add { lhs, rhs }
+        | FieldNodeExpression::Sub { lhs, rhs }
+        | FieldNodeExpression::Mul { lhs, rhs } => {
+            collect_field_expression_usage(lhs, usage);
+            collect_field_expression_usage(rhs, usage);
+        }
+        FieldNodeExpression::AddProduct {
+            additive_term,
+            mul_0,
+            mul_1,
+        } => {
+            collect_field_expression_usage(additive_term, usage);
+            collect_field_expression_usage(mul_0, usage);
+            collect_field_expression_usage(mul_1, usage);
+        }
+        FieldNodeExpression::Select {
+            selector,
+            if_true,
+            if_false,
+        } => {
+            collect_bool_expression_usage(selector, usage);
+            collect_field_expression_usage(if_true, usage);
+            collect_field_expression_usage(if_false, usage);
+        }
+    }
+}
+
+fn collect_bool_expression_usage<F: FieldInfo>(
+    expr: &BoolNodeExpression<F>,
+    usage: &mut WitnessVariableUsage,
+) {
+    match expr {
+        BoolNodeExpression::Place(variable) => {
+            usage.read_vars.insert(*variable);
+        }
+        BoolNodeExpression::SubExpression(..)
+        | BoolNodeExpression::Constant(..)
+        | BoolNodeExpression::OracleValue { .. } => {}
+        BoolNodeExpression::FromGenericInteger(inner) => {
+            collect_integer_expression_usage(inner, usage);
+        }
+        BoolNodeExpression::FromGenericIntegerEquality { lhs, rhs }
+        | BoolNodeExpression::FromGenericIntegerCarry { lhs, rhs }
+        | BoolNodeExpression::FromGenericIntegerBorrow { lhs, rhs } => {
+            collect_integer_expression_usage(lhs, usage);
+            collect_integer_expression_usage(rhs, usage);
+        }
+        BoolNodeExpression::FromField(inner) => collect_field_expression_usage(inner, usage),
+        BoolNodeExpression::FromFieldEquality { lhs, rhs } => {
+            collect_field_expression_usage(lhs, usage);
+            collect_field_expression_usage(rhs, usage);
+        }
+        BoolNodeExpression::And { lhs, rhs } | BoolNodeExpression::Or { lhs, rhs } => {
+            collect_bool_expression_usage(lhs, usage);
+            collect_bool_expression_usage(rhs, usage);
+        }
+        BoolNodeExpression::Select {
+            selector,
+            if_true,
+            if_false,
+        } => {
+            collect_bool_expression_usage(selector, usage);
+            collect_bool_expression_usage(if_true, usage);
+            collect_bool_expression_usage(if_false, usage);
+        }
+        BoolNodeExpression::Negate(inner) => collect_bool_expression_usage(inner, usage),
+    }
+}
+
+fn collect_integer_expression_usage<F: FieldInfo>(
+    expr: &FixedWidthIntegerNodeExpression<F>,
+    usage: &mut WitnessVariableUsage,
+) {
+    match expr {
+        FixedWidthIntegerNodeExpression::U8Place(variable)
+        | FixedWidthIntegerNodeExpression::U16Place(variable) => {
+            usage.read_vars.insert(*variable);
+        }
+        FixedWidthIntegerNodeExpression::U8SubExpression(..)
+        | FixedWidthIntegerNodeExpression::U16SubExpression(..)
+        | FixedWidthIntegerNodeExpression::U32SubExpression(..)
+        | FixedWidthIntegerNodeExpression::U32OracleValue { .. }
+        | FixedWidthIntegerNodeExpression::U16OracleValue { .. }
+        | FixedWidthIntegerNodeExpression::U8OracleValue { .. }
+        | FixedWidthIntegerNodeExpression::ConstantU8(..)
+        | FixedWidthIntegerNodeExpression::ConstantU16(..)
+        | FixedWidthIntegerNodeExpression::ConstantU32(..) => {}
+        FixedWidthIntegerNodeExpression::U32FromMask(inner) => {
+            collect_bool_expression_usage(inner, usage);
+        }
+        FixedWidthIntegerNodeExpression::U32FromField(inner) => {
+            collect_field_expression_usage(inner, usage);
+        }
+        FixedWidthIntegerNodeExpression::WidenFromU8(inner)
+        | FixedWidthIntegerNodeExpression::WidenFromU16(inner)
+        | FixedWidthIntegerNodeExpression::TruncateFromU16(inner)
+        | FixedWidthIntegerNodeExpression::TruncateFromU32(inner)
+        | FixedWidthIntegerNodeExpression::I32FromU32(inner)
+        | FixedWidthIntegerNodeExpression::U32FromI32(inner)
+        | FixedWidthIntegerNodeExpression::WrappingShl { lhs: inner, .. }
+        | FixedWidthIntegerNodeExpression::WrappingShr { lhs: inner, .. }
+        | FixedWidthIntegerNodeExpression::BinaryNot(inner) => {
+            collect_integer_expression_usage(inner, usage);
+        }
+        FixedWidthIntegerNodeExpression::WrappingAdd { lhs, rhs }
+        | FixedWidthIntegerNodeExpression::WrappingSub { lhs, rhs }
+        | FixedWidthIntegerNodeExpression::MulLow { lhs, rhs }
+        | FixedWidthIntegerNodeExpression::MulHigh { lhs, rhs }
+        | FixedWidthIntegerNodeExpression::DivAssumeNonzero { lhs, rhs }
+        | FixedWidthIntegerNodeExpression::RemAssumeNonzero { lhs, rhs }
+        | FixedWidthIntegerNodeExpression::SignedDivAssumeNonzeroNoOverflowBits { lhs, rhs }
+        | FixedWidthIntegerNodeExpression::SignedRemAssumeNonzeroNoOverflowBits { lhs, rhs }
+        | FixedWidthIntegerNodeExpression::SignedMulLowBits { lhs, rhs }
+        | FixedWidthIntegerNodeExpression::SignedMulHighBits { lhs, rhs }
+        | FixedWidthIntegerNodeExpression::SignedByUnsignedMulLowBits { lhs, rhs }
+        | FixedWidthIntegerNodeExpression::SignedByUnsignedMulHighBits { lhs, rhs }
+        | FixedWidthIntegerNodeExpression::BinaryAnd { lhs, rhs }
+        | FixedWidthIntegerNodeExpression::BinaryOr { lhs, rhs }
+        | FixedWidthIntegerNodeExpression::BinaryXor { lhs, rhs } => {
+            collect_integer_expression_usage(lhs, usage);
+            collect_integer_expression_usage(rhs, usage);
+        }
+        FixedWidthIntegerNodeExpression::AddProduct {
+            additive_term,
+            mul_0,
+            mul_1,
+        } => {
+            collect_integer_expression_usage(additive_term, usage);
+            collect_integer_expression_usage(mul_0, usage);
+            collect_integer_expression_usage(mul_1, usage);
+        }
+        FixedWidthIntegerNodeExpression::Select {
+            selector,
+            if_true,
+            if_false,
+        } => {
+            collect_bool_expression_usage(selector, usage);
+            collect_integer_expression_usage(if_true, usage);
+            collect_integer_expression_usage(if_false, usage);
+        }
+        FixedWidthIntegerNodeExpression::LowestBits { value, .. } => {
+            collect_integer_expression_usage(value, usage);
+        }
     }
 }
 
@@ -782,6 +1007,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         source_subexpr: &Expression<F>,
         condition_subexpr_idx: Option<usize>,
     ) -> Result<()> {
+        let compiled_address = self.variable_mapping.get(into_variable).copied();
         if self.vars.has_compute_input(into_variable) && !self.vars.has_member(into_variable) {
             if self.strict_store_origin_for_expression(source_subexpr) == Some(*into_variable) {
                 // Some witness programs redundantly "write" an input-backed boundary variable back
@@ -789,6 +1015,19 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
                 // nothing, and if the guard is true we would still store the exact same boundary
                 // value. Skip those cases entirely so `@compute` does not accumulate vacuous
                 // `bool.assert %arg == %arg` checks.
+                if self.vars.has_compiled_storage() {
+                    if let Some(
+                        ColumnAddress::WitnessSubtree(_) | ColumnAddress::MemorySubtree(_),
+                    ) = compiled_address
+                    {
+                        let boundary_value = self.vars.get_compute_val(
+                            self.builder,
+                            self.self_value,
+                            into_variable,
+                        )?;
+                        self.assign_write_targets(into_variable, boundary_value)?;
+                    }
+                }
                 return Ok(());
             }
 
@@ -796,6 +1035,19 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
                 // Outside of the legacy query-2 shuffle write slot, input-backed writes are just
                 // redundant witness-program rematerializations. LLZK models those values as
                 // ordinary inputs and does not need a second proof obligation in `@compute`.
+                if self.vars.has_compiled_storage() {
+                    if let Some(
+                        ColumnAddress::WitnessSubtree(_) | ColumnAddress::MemorySubtree(_),
+                    ) = compiled_address
+                    {
+                        let boundary_value = self.vars.get_compute_val(
+                            self.builder,
+                            self.self_value,
+                            into_variable,
+                        )?;
+                        self.assign_write_targets(into_variable, boundary_value)?;
+                    }
+                }
                 return Ok(());
             }
 
@@ -835,26 +1087,6 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             return Ok(());
         }
 
-        if self.vars.has_member(into_variable) {
-            let mut value = self.expression_to_store_value(source_subexpr)?;
-            if let Some(condition_idx) = condition_subexpr_idx {
-                let condition = self.slot_as_bool(condition_idx)?;
-                let existing =
-                    self.vars
-                        .get_compute_val(self.builder, self.self_value, into_variable)?;
-                value = self
-                    .builder
-                    .append_select_value(condition, value, existing)?;
-            }
-
-            return self.vars.assign_compute_member(
-                self.builder,
-                self.self_value,
-                into_variable,
-                value,
-            );
-        }
-
         if self.should_omit_seed_memory_write(
             into_variable,
             source_subexpr,
@@ -863,44 +1095,16 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             return Ok(());
         }
 
-        match self.variable_mapping[into_variable] {
-            ColumnAddress::SetupSubtree(..) => {
-                unreachable!("setup columns are read-only during witness lowering")
-            }
-            ColumnAddress::MemorySubtree(offset) => {
-                let mut value = self.expression_to_store_value(source_subexpr)?;
-                if let Some(condition_idx) = condition_subexpr_idx {
-                    let condition = self.slot_as_bool(condition_idx)?;
-                    let existing = self.read_memory_subtree(offset)?;
-                    value = self
-                        .builder
-                        .append_select_value(condition, value, existing)?;
-                }
-                return self.write_memory_subtree(offset, value);
-            }
-            ColumnAddress::WitnessSubtree(..) | ColumnAddress::OptimizedOut(..) => {
-                // These placements do not need a separate runtime hook. Witness-subtree values
-                // are materialized through the returned LLZK struct, and `OptimizedOut` means the
-                // one-row compiler eliminated any distinct backing column to update. So we fall
-                // through to the struct-member write below instead of bailing here; if the
-                // variable is not actually exposed on the LLZK boundary, that write will error and
-                // surface a real mapping bug.
-            }
-        }
-
         let mut value = self.expression_to_store_value(source_subexpr)?;
         if let Some(condition_idx) = condition_subexpr_idx {
             let condition = self.slot_as_bool(condition_idx)?;
-            let existing =
-                self.vars
-                    .get_compute_val(self.builder, self.self_value, into_variable)?;
+            let existing = self.current_write_target_value(into_variable)?;
             value = self
                 .builder
                 .append_select_value(condition, value, existing)?;
         }
 
-        self.vars
-            .assign_compute_member(self.builder, self.self_value, into_variable, value)
+        self.assign_write_targets(into_variable, value)
     }
 
     /// Return `true` when this write is a pure boundary-to-memory seeding copy that can be omitted
@@ -949,6 +1153,91 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         self.computed_value_to_store(value)
     }
 
+    /// Read the currently materialized value that a conditional write would overwrite.
+    ///
+    /// This follows the same precedence as write-back:
+    /// - logical struct members when present
+    /// - compiled witness/memory columns in compiled mode
+    /// - runtime memory-subtree storage in logical mode
+    fn current_write_target_value(&self, variable: &Variable) -> Result<Value<'ctx, 'sco>> {
+        if self.vars.has_member(variable) {
+            self.vars
+                .get_compute_val(self.builder, self.self_value, variable)
+        } else if self.vars.has_compiled_storage() {
+            match self.variable_mapping.get(variable).copied() {
+                Some(
+                    address @ (ColumnAddress::WitnessSubtree(_) | ColumnAddress::MemorySubtree(_)),
+                ) => self
+                    .vars
+                    .get_compute_compiled_column(self.builder, self.self_value, address),
+                other => Err(anyhow!(
+                    "variable {variable:?} is not exposed to compiled @compute storage (column {other:?})"
+                )),
+            }
+        } else {
+            match self.variable_mapping.get(variable).copied() {
+                Some(ColumnAddress::MemorySubtree(offset)) => self.read_memory_subtree(offset),
+                other => Err(anyhow!(
+                    "variable {variable:?} is not exposed to @compute write-back (column {other:?})"
+                )),
+            }
+        }
+    }
+
+    /// Write a logical variable everywhere it must live in the emitted `@compute`.
+    ///
+    /// In compiled mode, logical LLZK members that have compiled witness/memory column mappings
+    /// are written through a single path so the logical/public member and its compiled-column
+    /// mirror stay synchronized.
+    fn assign_write_targets(&self, variable: &Variable, value: Value<'ctx, 'sco>) -> Result<()> {
+        if self.vars.has_member(variable) {
+            return self.vars.assign_compute_member_and_bridge(
+                self.builder,
+                self.self_value,
+                variable,
+                value,
+            );
+        }
+
+        if self.vars.has_compiled_storage() {
+            return match self.variable_mapping.get(variable).copied() {
+                Some(
+                    address @ (ColumnAddress::WitnessSubtree(_) | ColumnAddress::MemorySubtree(_)),
+                ) => self.vars.assign_compute_compiled_column(
+                    self.builder,
+                    self.self_value,
+                    address,
+                    value,
+                ),
+                Some(ColumnAddress::OptimizedOut(_)) => Ok(()),
+                Some(ColumnAddress::SetupSubtree(..)) => {
+                    unreachable!("setup columns are read-only during witness lowering")
+                }
+                other => Err(anyhow!(
+                    "variable {variable:?} is not exposed to compiled @compute storage (column {other:?})"
+                )),
+            };
+        }
+
+        match self.variable_mapping.get(variable).copied() {
+            Some(ColumnAddress::MemorySubtree(offset)) => self.write_memory_subtree(offset, value),
+            Some(ColumnAddress::SetupSubtree(..)) => {
+                unreachable!("setup columns are read-only during witness lowering")
+            }
+            Some(ColumnAddress::WitnessSubtree(..) | ColumnAddress::OptimizedOut(..)) => self
+                .vars
+                .assign_compute_member(self.builder, self.self_value, variable, value),
+            other => self
+                .vars
+                .assign_compute_member(self.builder, self.self_value, variable, value)
+                .map_err(|_| {
+                    anyhow!(
+                        "variable {variable:?} is not exposed to @compute write-back (column {other:?})"
+                    )
+                }),
+        }
+    }
+
     /// Read `variable` as the felt value currently visible to `@compute`.
     fn read_variable(&self, variable: Variable) -> Result<Value<'ctx, 'sco>> {
         if let Some(value) =
@@ -956,6 +1245,17 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
                 .try_get_compute_val(self.builder, self.self_value, &variable)?
         {
             Ok(value)
+        } else if self.vars.has_compiled_storage() {
+            match self.variable_mapping.get(&variable) {
+                Some(
+                    address @ (ColumnAddress::WitnessSubtree(_) | ColumnAddress::MemorySubtree(_)),
+                ) => self
+                    .vars
+                    .get_compute_compiled_column(self.builder, self.self_value, *address),
+                other => Err(anyhow!(
+                    "variable {variable:?} is not exposed to @compute (column {other:?})"
+                )),
+            }
         } else {
             match self.variable_mapping.get(&variable) {
                 Some(ColumnAddress::MemorySubtree(offset)) => self.read_memory_subtree(*offset),
@@ -968,6 +1268,13 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
 
     /// Read a compiled memory-subtree column through the LLZK runtime hook.
     fn read_memory_subtree(&self, offset: usize) -> Result<Value<'ctx, 'sco>> {
+        if self.vars.has_compiled_storage() {
+            return self.vars.get_compute_compiled_column(
+                self.builder,
+                self.self_value,
+                ColumnAddress::MemorySubtree(offset),
+            );
+        }
         self.with_runtime_location(ComputeRuntimeHookKind::MemoryRead, || {
             let location = self.current_location();
             let index_type = self.index_type();
@@ -984,6 +1291,14 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
 
     /// Write a compiled memory-subtree column through the LLZK runtime hook.
     fn write_memory_subtree(&self, offset: usize, value: Value<'ctx, 'sco>) -> Result<()> {
+        if self.vars.has_compiled_storage() {
+            return self.vars.assign_compute_compiled_column(
+                self.builder,
+                self.self_value,
+                ColumnAddress::MemorySubtree(offset),
+                value,
+            );
+        }
         self.with_runtime_location(ComputeRuntimeHookKind::MemoryWrite, || {
             let location = self.current_location();
             let index_type = self.index_type();

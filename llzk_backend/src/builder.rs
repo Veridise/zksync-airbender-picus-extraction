@@ -14,6 +14,7 @@ use std::ops::Deref;
 use anyhow::anyhow;
 use anyhow::Result;
 use llzk::builder::OpBuilder;
+use llzk::dialect::array::ArrayCtor;
 use llzk::dialect::bool;
 use llzk::dialect::constrain;
 use llzk::dialect::felt;
@@ -23,6 +24,7 @@ use llzk::prelude::dialect::r#struct;
 use llzk::prelude::melior_dialects::arith;
 use llzk::prelude::*;
 use llzk::utils::IsA;
+use melior::ir::operation::OperationMutLike;
 use melior::ir::Identifier;
 use prover::cs::definitions::REGISTER_SIZE;
 
@@ -83,9 +85,44 @@ impl SemanticLocation {
         Self::new("llzk://constrain/constraints", index, 0)
     }
 
+    /// Location family for compiled degree-1 constraints.
+    pub fn constrain_compiled_degree1(index: usize) -> Self {
+        Self::new("llzk://constrain/compiled/degree1", index, 0)
+    }
+
+    /// Location family for compiled degree-2 constraints.
+    pub fn constrain_compiled_degree2(index: usize) -> Self {
+        Self::new("llzk://constrain/compiled/degree2", index, 0)
+    }
+
+    /// Location family for equalities bridging logical LLZK members back to compiled columns.
+    pub fn constrain_compiled_member_bridge(index: usize) -> Self {
+        Self::new("llzk://constrain/compiled/member_bridge", index, 0)
+    }
+
+    /// Location family for equalities bridging explicit LLZK input args to compiled columns.
+    pub fn constrain_compiled_input_bridge(index: usize) -> Self {
+        Self::new("llzk://constrain/compiled/input_bridge", index, 0)
+    }
+
+    /// Location family for compiler-added variable linkage equalities.
+    pub fn constrain_linked_variable(index: usize) -> Self {
+        Self::new("llzk://constrain/linked_variables", index, 0)
+    }
+
+    /// Location family for compiler-derived executor timestamp constraints.
+    pub fn constrain_executor_timestamp() -> Self {
+        Self::new("llzk://constrain/executor_timestamp", 0, 0)
+    }
+
     /// Location family for top-level witness SSA expressions lowered into `@compute`.
     pub fn compute_ssa(index: usize) -> Self {
         Self::new("llzk://compute/ssa", index, 0)
+    }
+
+    /// Location family for compiler-derived executor timestamp lowering in `@compute`.
+    pub fn compute_executor_timestamp() -> Self {
+        Self::new("llzk://compute/executor_timestamp", 0, 0)
     }
 
     /// Location family for runtime hooks used by one witness SSA expression.
@@ -261,6 +298,11 @@ impl<'ctx, F: FieldInfo> ModuleEnv<'ctx, F> {
             )],
         )
         .into()
+    }
+
+    /// Get a one-dimensional array type with static length `len`.
+    pub fn felt_array_type(&self, len: usize) -> Result<Type<'ctx>> {
+        Ok(ArrayType::new(self.felt_type(), &[self.index_attr(i64::try_from(len)?)]).into())
     }
 
     /// Declare a private module-level external function if it is not already present.
@@ -849,6 +891,26 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
     ) -> Result<()> {
         let op = r#struct::writem(location, component, member_name, value)?;
         self.append_op_with_no_results(op)
+    }
+
+    /// Append an uninitialized one-dimensional felt array allocation.
+    pub fn append_new_felt_array(
+        &self,
+        location: Location<'ctx>,
+        len: usize,
+    ) -> Result<Value<'ctx, 'sco>> {
+        let array_ty = ArrayType::try_from(self.felt_array_type(len)?)?;
+        self.append_op_with_result(array::new(
+            &OpBuilder::new(self.context),
+            location,
+            array_ty,
+            ArrayCtor::Empty,
+        ))
+    }
+
+    /// Append an uninitialized one-dimensional felt array allocation at the current location.
+    pub fn append_new_felt_array_here(&self, len: usize) -> Result<Value<'ctx, 'sco>> {
+        self.append_new_felt_array(self.current_location(), len)
     }
 
     /// Append an array read operation and return the read value.
@@ -1593,6 +1655,20 @@ macro_rules! as_op {
     };
 }
 
+#[derive(Clone, Copy)]
+struct StructInput<'ctx> {
+    r#type: Type<'ctx>,
+    location: Option<Location<'ctx>>,
+}
+
+struct StructMember<'ctx> {
+    name: String,
+    r#type: Type<'ctx>,
+    is_public: bool,
+    location: Option<Location<'ctx>>,
+    is_signal: bool,
+}
+
 /// Builder for creating structs.
 pub struct StructBuilder<'ctx, 'str, F: FieldInfo> {
     /// Shared module-scoped helper used for type construction and module insertion.
@@ -1606,9 +1682,9 @@ pub struct StructBuilder<'ctx, 'str, F: FieldInfo> {
     /// Name of the struct.
     name: &'str str,
     /// Inputs shared by both `@compute` and `@constrain` (excluding `self` in `@constrain`).
-    inputs: Vec<(Type<'ctx>, Option<Location<'ctx>>)>,
-    /// List of members. Contains the name, type and whether is marked public or not.
-    members: Vec<(String, Type<'ctx>, bool, Option<Location<'ctx>>)>,
+    inputs: Vec<StructInput<'ctx>>,
+    /// Members together with their public/signal classification.
+    members: Vec<StructMember<'ctx>>,
 }
 
 impl<'ctx, 'str, F: FieldInfo> StructBuilder<'ctx, 'str, F> {
@@ -1627,7 +1703,10 @@ impl<'ctx, 'str, F: FieldInfo> StructBuilder<'ctx, 'str, F> {
 
     /// Adds an input to the list.
     pub fn with_input(&mut self, input: Type<'ctx>) -> &mut Self {
-        self.inputs.push((input, None));
+        self.inputs.push(StructInput {
+            r#type: input,
+            location: None,
+        });
         self
     }
 
@@ -1637,8 +1716,28 @@ impl<'ctx, 'str, F: FieldInfo> StructBuilder<'ctx, 'str, F> {
         input: Type<'ctx>,
         location: Location<'ctx>,
     ) -> &mut Self {
-        self.inputs.push((input, Some(location)));
+        self.inputs.push(StructInput {
+            r#type: input,
+            location: Some(location),
+        });
         self
+    }
+
+    /// Adds an input that corresponds to a proof-system signal.
+    ///
+    /// LLZK currently serializes `signal` on `struct.member` ops, not on function block
+    /// arguments. Signal inputs are therefore represented structurally as ordinary parameters.
+    pub fn with_signal_input(&mut self, input: Type<'ctx>) -> &mut Self {
+        self.with_input(input)
+    }
+
+    /// Adds a signal input with an explicit debug location.
+    pub fn with_signal_input_location(
+        &mut self,
+        input: Type<'ctx>,
+        location: Location<'ctx>,
+    ) -> &mut Self {
+        self.with_input_location(input, location)
     }
 
     /// Sets the location of the struct.
@@ -1662,7 +1761,13 @@ impl<'ctx, 'str, F: FieldInfo> StructBuilder<'ctx, 'str, F> {
 
     /// Adds a member to the struct.
     pub fn with_member(&mut self, name: String, r#type: Type<'ctx>, is_public: bool) -> &mut Self {
-        self.members.push((name, r#type, is_public, None));
+        self.members.push(StructMember {
+            name,
+            r#type,
+            is_public,
+            location: None,
+            is_signal: false,
+        });
         self
     }
 
@@ -1674,7 +1779,48 @@ impl<'ctx, 'str, F: FieldInfo> StructBuilder<'ctx, 'str, F> {
         is_public: bool,
         location: Location<'ctx>,
     ) -> &mut Self {
-        self.members.push((name, r#type, is_public, Some(location)));
+        self.members.push(StructMember {
+            name,
+            r#type,
+            is_public,
+            location: Some(location),
+            is_signal: false,
+        });
+        self
+    }
+
+    /// Adds a member that corresponds to a proof-system signal.
+    pub fn with_signal_member(
+        &mut self,
+        name: String,
+        r#type: Type<'ctx>,
+        is_public: bool,
+    ) -> &mut Self {
+        self.members.push(StructMember {
+            name,
+            r#type,
+            is_public,
+            location: None,
+            is_signal: true,
+        });
+        self
+    }
+
+    /// Adds a signal member with an explicit debug location.
+    pub fn with_signal_member_location(
+        &mut self,
+        name: String,
+        r#type: Type<'ctx>,
+        is_public: bool,
+        location: Location<'ctx>,
+    ) -> &mut Self {
+        self.members.push(StructMember {
+            name,
+            r#type,
+            is_public,
+            location: Some(location),
+            is_signal: true,
+        });
         self
     }
 
@@ -1701,22 +1847,35 @@ impl<'ctx, 'str, F: FieldInfo> StructBuilder<'ctx, 'str, F> {
         let constrain_inputs = self
             .inputs
             .iter()
-            .map(|(arg, location)| (*arg, location.unwrap_or_else(|| self.constrain_location())))
+            .map(|input| {
+                (
+                    input.r#type,
+                    input.location.unwrap_or_else(|| self.constrain_location()),
+                )
+            })
             .collect::<Vec<_>>();
         let compute_inputs = self
             .inputs
             .iter()
-            .map(|(arg, location)| (*arg, location.unwrap_or_else(|| self.compute_location())))
+            .map(|input| {
+                (
+                    input.r#type,
+                    input.location.unwrap_or_else(|| self.compute_location()),
+                )
+            })
             .collect::<Vec<_>>();
-
-        let members = self.members.iter().map(|(name, typ, is_pub, location)| {
-            as_op!(dialect::r#struct::member(
-                location.unwrap_or_else(|| self.location()),
-                name,
-                *typ,
+        let members = self.members.iter().map(|member| {
+            let mut op = dialect::r#struct::member(
+                member.location.unwrap_or_else(|| self.location()),
+                &member.name,
+                member.r#type,
                 true,
-                *is_pub
-            ))
+                member.is_public,
+            )?;
+            if member.is_signal {
+                op.set_attribute("signal", Attribute::unit(self.context()));
+            }
+            Ok(Operation::from(op))
         });
 
         let compute = as_op!(dialect::r#struct::helpers::compute_fn(
@@ -1760,6 +1919,7 @@ impl<'ctx, 'str, F: FieldInfo> Deref for StructBuilder<'ctx, 'str, F> {
 mod tests {
     use super::*;
     use llzk::operation::verify_operation_with_diags;
+    use melior::ir::operation::OperationPrintingFlags;
     use prover::field::Mersenne31Field;
 
     fn count_named_top_level_functions(module: &Module<'_>, name: &str) -> usize {
@@ -1857,5 +2017,30 @@ mod tests {
             location.to_string(),
             "loc(\"Variable(30)\"(\"llzk://layout/argument\":0:0))"
         );
+    }
+
+    #[test]
+    fn struct_builder_marks_signal_inputs_and_members() {
+        let ctx = LlzkContext::new();
+        let module = llzk_module(Location::unknown(&ctx));
+        let env = ModuleEnv::<Mersenne31Field>::new(&ctx, &module, DebugLocationStyle::Named);
+        let mut builder = StructBuilder::new(&env, "signal_attrs");
+        let felt = env.felt_type();
+
+        builder.with_signal_input(felt);
+        builder.with_input(felt);
+        builder.with_signal_member("sig_member".to_string(), felt, false);
+        builder.with_member("tmp_member".to_string(), felt, false);
+        let struct_op = builder.build_in_module().unwrap();
+        let sig_member = struct_op.get_member_def("sig_member").unwrap();
+
+        let ir = module
+            .as_operation()
+            .to_string_with_flags(OperationPrintingFlags::new())
+            .unwrap();
+
+        assert!(sig_member.attribute("signal").is_ok());
+        assert!(ir.contains("signal"));
+        verify_operation_with_diags(&module.as_operation()).unwrap();
     }
 }

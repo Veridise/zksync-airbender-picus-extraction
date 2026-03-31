@@ -1,18 +1,15 @@
 use anyhow::Result;
+use clap::Args;
 use clap::Parser;
 use clap::Subcommand;
 use clap::ValueEnum;
+use llzk_backend::config::ConstraintLoweringMode;
 use llzk_backend::config::DebugLocationStyle;
 use llzk_backend::config::LlzkStructLayout;
 use llzk_backend::config::OptLevel;
-use llzk_backend::gen_add_sub_lui_auipc_mop;
-use llzk_backend::gen_jump_branch_slt;
-use llzk_backend::gen_load_store_subword_only;
-use llzk_backend::gen_load_store_word_only;
-use llzk_backend::gen_mul_div;
-use llzk_backend::gen_shift_binary_csr;
-use llzk_backend::gen_unified_reduced_machine;
+use llzk_backend::config::UnusedVariablePolicy;
 use llzk_backend::output_format::OutputFormat;
+use llzk_backend::CircuitGenerationConfig;
 
 #[derive(ValueEnum, Clone, Copy, PartialEq, Eq)]
 enum Circuits {
@@ -25,19 +22,70 @@ enum Circuits {
     UnifiedReducedMachine,
 }
 
-type CircuitFnTuple = (
-    Circuits,
-    fn(&str, OutputFormat, OptLevel, LlzkStructLayout, DebugLocationStyle) -> Result<()>,
-);
+type CircuitFnTuple = (Circuits, fn(&CircuitGenerationConfig) -> Result<()>);
 const CIRCUITS: &[CircuitFnTuple] = &[
-    (Circuits::AddSubLuiAuipcMop, gen_add_sub_lui_auipc_mop),
-    (Circuits::JumpBranchSlt, gen_jump_branch_slt),
-    (Circuits::LoadStoreSubwordOnly, gen_load_store_subword_only),
-    (Circuits::LoadStoreWordOnly, gen_load_store_word_only),
-    (Circuits::MulDiv, gen_mul_div),
-    (Circuits::ShiftBinaryCsr, gen_shift_binary_csr),
-    (Circuits::UnifiedReducedMachine, gen_unified_reduced_machine),
+    (
+        Circuits::AddSubLuiAuipcMop,
+        CircuitGenerationConfig::gen_add_sub_lui_auipc_mop,
+    ),
+    (
+        Circuits::JumpBranchSlt,
+        CircuitGenerationConfig::gen_jump_branch_slt,
+    ),
+    (
+        Circuits::LoadStoreSubwordOnly,
+        CircuitGenerationConfig::gen_load_store_subword_only,
+    ),
+    (
+        Circuits::LoadStoreWordOnly,
+        CircuitGenerationConfig::gen_load_store_word_only,
+    ),
+    (Circuits::MulDiv, CircuitGenerationConfig::gen_mul_div),
+    (
+        Circuits::ShiftBinaryCsr,
+        CircuitGenerationConfig::gen_shift_binary_csr,
+    ),
+    (
+        Circuits::UnifiedReducedMachine,
+        CircuitGenerationConfig::gen_unified_reduced_machine,
+    ),
 ];
+
+#[derive(Args, Clone)]
+struct GenerateArgs {
+    /// Output directory or output file name
+    #[arg(short, long)]
+    output: String,
+    #[arg(short, long, default_value_t = OutputFormat::Pcl)]
+    format: OutputFormat,
+    #[arg(short = 'O', default_value_t = OptLevel::O1)]
+    opt_level: OptLevel,
+    #[arg(long, default_value_t = LlzkStructLayout::ComputeConstrain)]
+    layout: LlzkStructLayout,
+    #[arg(long, default_value_t = DebugLocationStyle::FileLineCol)]
+    debug_location_style: DebugLocationStyle,
+    #[arg(long, default_value_t = ConstraintLoweringMode::Logical)]
+    constraint_lowering_mode: ConstraintLoweringMode,
+    #[arg(long, default_value_t = UnusedVariablePolicy::Warn)]
+    unused_variable_policy: UnusedVariablePolicy,
+    #[arg(long, default_value_t = false)]
+    emit_suspicious_unused: bool,
+}
+
+impl GenerateArgs {
+    fn generation_config(&self) -> CircuitGenerationConfig {
+        CircuitGenerationConfig {
+            output: self.output.clone(),
+            format: self.format,
+            opt_level: self.opt_level,
+            layout: self.layout,
+            debug_location_style: self.debug_location_style,
+            constraint_lowering_mode: self.constraint_lowering_mode,
+            unused_variable_policy: self.unused_variable_policy,
+            emit_suspicious_unused: self.emit_suspicious_unused,
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(version, about, long_about=None)]
@@ -50,19 +98,15 @@ struct Cli {
 enum Commands {
     /// Generate the specified output for the specified circuit
     GenCircuit {
-        /// Output directory or output file name
-        #[arg(short, long)]
-        output: String,
         #[arg(long)]
         circuit: Circuits,
-        #[arg(short, long, default_value_t = OutputFormat::Pcl)]
-        format: OutputFormat,
-        #[arg(short = 'O', default_value_t = OptLevel::O1)]
-        opt_level: OptLevel,
-        #[arg(long, default_value_t = LlzkStructLayout::ComputeConstrain)]
-        layout: LlzkStructLayout,
-        #[arg(long, default_value_t = DebugLocationStyle::FileLineCol)]
-        debug_location_style: DebugLocationStyle,
+        #[command(flatten)]
+        args: GenerateArgs,
+    },
+    /// Generate outputs for all supported circuits
+    GenAllCircuits {
+        #[command(flatten)]
+        args: GenerateArgs,
     },
 }
 
@@ -78,24 +122,18 @@ fn main() -> Result<()> {
     setup_logging();
     let cli = Cli::parse();
     match &cli.command {
-        Commands::GenCircuit {
-            output,
-            circuit,
-            format,
-            opt_level,
-            layout,
-            debug_location_style,
-        } => {
+        Commands::GenCircuit { circuit, args } => {
+            let config = args.generation_config();
             CIRCUITS
                 .iter()
                 .find_map(|(name, handler)| (name == circuit).then_some(handler))
-                .expect("circuit without a handler function")(
-                output,
-                *format,
-                *opt_level,
-                *layout,
-                *debug_location_style,
-            )?;
+                .expect("circuit without a handler function")(&config)?;
+        }
+        Commands::GenAllCircuits { args } => {
+            let config = args.generation_config();
+            for (_, handler) in CIRCUITS {
+                handler(&config)?;
+            }
         }
     }
     Ok(())
