@@ -1,10 +1,7 @@
 use std::cell::OnceCell;
-use std::collections::hash_map::DefaultHasher;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
-use std::hash::Hash;
-use std::hash::Hasher;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
@@ -13,6 +10,8 @@ use prover::risc_v_simulator::machine_mode_only_unrolled::NonMemoryOpcodeTracing
 use prover::worker::Worker;
 use rand::prelude::IndexedRandom;
 use rand::rngs::StdRng;
+use sha2::Digest;
+use sha2::Sha256;
 
 use crate::prover::circuits::CircuitKind;
 use crate::prover::circuits::CircuitRegistry;
@@ -257,8 +256,12 @@ fn file_stem_string(path: &Path) -> Option<String> {
 }
 
 fn short_program_hash(bin_bytes: &[u8], text_bytes: &[u8]) -> String {
-    let mut hasher = DefaultHasher::new();
-    bin_bytes.hash(&mut hasher);
-    text_bytes.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())[..8].to_owned()
+    let mut hasher = Sha256::new();
+    hasher.update(bin_bytes);
+    hasher.update(text_bytes);
+    let digest = hasher.finalize();
+    digest[..4]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }

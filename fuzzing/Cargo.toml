@@ -32,6 +32,7 @@ serde_json = "*"
 prover = { workspace = true, features = ["prover"] }
 add_sub_lui_auipc_mop = { path = "../circuit_defs/unrolled_circuits/add_sub_lui_auipc_mop" }
 rand = "0.10"
+sha2 = "0.10"
 verifier_common = { workspace = true, features = ["proof_utils", "replace_csr"] }
 add_sub_lui_auipc_mop_verifier = { path = "../circuit_defs/unrolled_circuits/add_sub_lui_auipc_mop/verifier", features = ["proof_utils", "replace_csr"] }
 inits_and_teardowns_verifier = { path = "../circuit_defs/unrolled_circuits/inits_and_teardowns/verifier", features = ["proof_utils", "replace_csr"] }
