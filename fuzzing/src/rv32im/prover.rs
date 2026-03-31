@@ -132,12 +132,20 @@ pub(crate) struct Prover {
     external_challenges: ExternalChallenges,
 }
 
+fn make_worker() -> Worker {
+    let n = std::env::var("PROVER_WORKERS")
+        .ok()
+        .map(|s| usize::from_str_radix(&s, 10).unwrap())
+        .unwrap_or(DEFAULT_WORKERS);
+    Worker::new_with_num_threads(n)
+}
+
 impl Prover {
     fn new() -> Self {
         let default_security_config =
             prover_stages::ProofSecurityConfig::for_queries_only(5, 28, 63);
 
-        let worker = Worker::new_with_num_threads(DEFAULT_WORKERS);
+        let worker = make_worker();
         Self {
             default_security_config,
             worker,
