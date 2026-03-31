@@ -1,3 +1,5 @@
+use std::mem::MaybeUninit;
+
 use prover::common_constants::ADD_SUB_LUI_AUIPC_MOP_CIRCUIT_FAMILY_IDX;
 use prover::common_constants::INITS_AND_TEARDOWNS_FORMAL_CIRCUIT_FAMILY_IDX;
 use prover::common_constants::JUMP_BRANCH_SLT_CIRCUIT_FAMILY_IDX;
@@ -6,16 +8,23 @@ use prover::common_constants::LOAD_STORE_WORD_ONLY_CIRCUIT_FAMILY_IDX;
 use prover::common_constants::MUL_DIV_CIRCUIT_FAMILY_IDX;
 use prover::common_constants::SHIFT_BINARY_CSR_CIRCUIT_FAMILY_IDX;
 use prover::cs::tables::TableDriver;
+use prover::nd_source_std::set_iterator;
+use prover::prover_stages::unrolled_prover::UnrolledModeProof;
+use prover::risc_v_simulator::machine_mode_only_unrolled::NonMemoryOpcodeTracingDataWithTimestamp;
+use verifier_common::proof_flattener::flatten_query;
+use verifier_common::proof_flattener::flatten_unrolled_circuits_proof_for_skeleton;
 
 use crate::prover::crashes::BugType;
 use crate::prover::mutations::MutatedInput;
 use crate::prover::seeds::StoredProofInputs;
-use crate::prover::GeneratedProof;
-use crate::rv32im::prover::circuits::add_sub_lui_auipc_mop::prove_add_sub_lui_auipc_mop_from_inputs;
-use crate::rv32im::prover::circuits::add_sub_lui_auipc_mop::validate_add_sub_lui_auipc_mop_proof;
 use crate::rv32im::prover::circuits::add_sub_lui_auipc_mop::AddSubLuiAuipcMop;
+use crate::rv32im::prover::circuits::jump_branch_slt::JumpBranchSltCircuit;
+use crate::rv32im::prover::circuits::mul_div::MulDivCircuit;
+use crate::rv32im::prover::circuits::xor_and_or_shift_csr::XorAndOrShiftCsrCircuit;
 use crate::rv32im::prover::circuits::CircuitProver;
+use crate::rv32im::prover::circuits::ProofInputs;
 use crate::rv32im::prover::PreparedExecution;
+use crate::rv32im::prover::Prover;
 use crate::rv32im::vm::VMSnapshot;
 
 const BLAKE_DELEGATION_KIND_MASK: u8 = 0x20;
@@ -44,16 +53,16 @@ pub struct CircuitRegistry {
 #[derive(Clone, Debug)]
 pub enum ProverAttempt {
     Crash,
-    Success(GeneratedProof),
+    Success(UnrolledModeProof),
 }
 
 impl CircuitKind {
     pub fn all() -> &'static [CircuitKind] {
         &[
             Self::AddSubLuiAuipcMop,
-            // Self::JumpBranchSlt,
-            // Self::XorAndOrShiftCsr,
-            // Self::MulDiv,
+            Self::JumpBranchSlt,
+            Self::XorAndOrShiftCsr,
+            Self::MulDiv,
             // Self::LoadStore,
             // Self::SubwordLoadStore,
             // Self::InitsAndTeardowns,
@@ -123,9 +132,21 @@ impl CircuitRegistry {
             CircuitKind::AddSubLuiAuipcMop => StoredProofInputs::AddSubLuiAuipcMop(
                 AddSubLuiAuipcMop.create_proof_input(snapshot, prepared, &mut table_driver),
             ),
-            CircuitKind::JumpBranchSlt => todo!(),
-            CircuitKind::XorAndOrShiftCsr => todo!(),
-            CircuitKind::MulDiv => todo!(),
+            CircuitKind::JumpBranchSlt => StoredProofInputs::MulDiv(
+                JumpBranchSltCircuit.create_proof_input(snapshot, prepared, &mut table_driver),
+            ),
+            CircuitKind::XorAndOrShiftCsr => StoredProofInputs::XorAndOrShiftCsr(
+                XorAndOrShiftCsrCircuit::new().create_proof_input(
+                    snapshot,
+                    prepared,
+                    &mut table_driver,
+                ),
+            ),
+            CircuitKind::MulDiv => StoredProofInputs::MulDiv(MulDivCircuit.create_proof_input(
+                snapshot,
+                prepared,
+                &mut table_driver,
+            )),
             CircuitKind::LoadStore => todo!(),
             CircuitKind::SubwordLoadStore => todo!(),
             CircuitKind::InitsAndTeardowns => todo!(),
@@ -137,13 +158,17 @@ impl CircuitRegistry {
     pub fn prove(&self, input: &StoredProofInputs) -> ProverAttempt {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match input {
             StoredProofInputs::AddSubLuiAuipcMop(inputs) => {
-                ProverAttempt::Success(GeneratedProof::AddSubLuiAuipcMop(
-                    prove_add_sub_lui_auipc_mop_from_inputs(inputs.clone()),
-                ))
+                ProverAttempt::Success(self.prove_impl(AddSubLuiAuipcMop, inputs))
             }
-            StoredProofInputs::JumpBranchSlt(_) => todo!(),
-            StoredProofInputs::XorAndOrShiftCsr(_) => todo!(),
-            StoredProofInputs::MulDiv(_) => todo!(),
+            StoredProofInputs::JumpBranchSlt(inputs) => {
+                ProverAttempt::Success(self.prove_impl(JumpBranchSltCircuit, inputs))
+            }
+            StoredProofInputs::XorAndOrShiftCsr(inputs) => {
+                ProverAttempt::Success(self.prove_impl(XorAndOrShiftCsrCircuit::new(), inputs))
+            }
+            StoredProofInputs::MulDiv(inputs) => {
+                ProverAttempt::Success(self.prove_impl(MulDivCircuit, inputs))
+            }
             StoredProofInputs::LoadStore(_) => todo!(),
             StoredProofInputs::SubwordLoadStore(_) => todo!(),
             StoredProofInputs::InitsAndTeardowns(_) => todo!(),
@@ -157,20 +182,46 @@ impl CircuitRegistry {
         }
     }
 
-    pub fn validate(&self, input: &StoredProofInputs, proof: &GeneratedProof) -> BugType {
-        match (input, proof) {
-            (
-                StoredProofInputs::AddSubLuiAuipcMop(inputs),
-                GeneratedProof::AddSubLuiAuipcMop(proof),
-            ) => match validate_add_sub_lui_auipc_mop_proof(inputs, proof) {
-                Ok(()) => BugType::ValidationBug,
-                Err(()) => BugType::ProofGenerationBug,
-            },
-            _ => panic!(
-                "proof/input circuit mismatch during validation: input={:?}",
-                input.circuit()
-            ),
+    fn prove_impl<const N: u8, C: CircuitProver<N>>(
+        &self,
+        cprover: C,
+        inputs: &ProofInputs<C::BufferElt>,
+    ) -> UnrolledModeProof
+    where
+        ProofInputs<C::BufferElt>: Clone,
+    {
+        let prover = Prover::new();
+        cprover.prove_from_inputs(inputs.clone(), &prover, prover.worker())
+    }
+
+    pub fn validate(&self, input: &StoredProofInputs, proof: &UnrolledModeProof) -> BugType {
+        match input {
+            StoredProofInputs::AddSubLuiAuipcMop(inputs) => {
+                classify(AddSubLuiAuipcMop::validate_proof(inputs, proof))
+            }
+            StoredProofInputs::XorAndOrShiftCsr(inputs) => {
+                classify(XorAndOrShiftCsrCircuit::validate_proof(inputs, proof))
+            }
+            StoredProofInputs::MulDiv(inputs) => {
+                classify(MulDivCircuit::validate_proof(inputs, proof))
+            }
+            StoredProofInputs::JumpBranchSlt(inputs) => {
+                classify(JumpBranchSltCircuit::validate_proof(inputs, proof))
+            }
+            StoredProofInputs::LoadStore(_) => todo!(),
+            StoredProofInputs::SubwordLoadStore(_) => todo!(),
+            StoredProofInputs::InitsAndTeardowns(_) => todo!(),
+            StoredProofInputs::BlakeDelegation(_) => todo!(),
+            StoredProofInputs::KeccakDelegation(_) => todo!(),
         }
+    }
+}
+
+#[inline]
+fn classify(r: Result<(), ()>) -> BugType {
+    match r {
+        Ok(()) => BugType::ValidationBug,
+        Err(()) => BugType::ProofGenerationBug,
     }
 }
 

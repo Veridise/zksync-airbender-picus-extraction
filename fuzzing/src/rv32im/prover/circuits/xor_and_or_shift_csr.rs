@@ -1,3 +1,5 @@
+use std::mem::MaybeUninit;
+
 use prover::common_constants;
 use prover::common_constants::BLAKE2S_DELEGATION_CSR_REGISTER;
 use prover::common_constants::KECCAK_SPECIAL5_CSR_REGISTER;
@@ -13,7 +15,10 @@ use prover::cs::tables::TableType;
 use prover::field::Field as _;
 use prover::field::Mersenne31Field;
 use prover::field::Mersenne31Quartic;
+use prover::nd_source_std::set_iterator;
+use prover::nd_source_std::ThreadLocalBasedSource;
 use prover::prover_stages::unrolled_prover::UnrolledModeProof;
+use prover::risc_v_simulator::machine_mode_only_unrolled::NonMemoryOpcodeTracingDataWithTimestamp;
 use prover::tests::unrolled::shift_binop_csrrw;
 use prover::unrolled::NonMemoryCircuitOracle;
 use prover::SimpleWitnessProxy;
@@ -21,10 +26,16 @@ use riscv_transpiler::vm::DelegationsAndFamiliesCounters;
 use riscv_transpiler::vm::SimpleSnapshotter;
 use riscv_transpiler::vm::SimpleTape;
 use riscv_transpiler::vm::State;
+use shift_binary_csr_verifier::verify_with_configuration;
+use verifier_common::proof_flattener::flatten_query;
+use verifier_common::proof_flattener::flatten_unrolled_circuits_proof_for_skeleton;
+use verifier_common::DefaultLeafInclusionVerifier;
+use verifier_common::ProofPublicInputs;
 
 use crate::rv32im::prover::accumulators::Accumulators;
 use crate::rv32im::prover::circuits::CircuitProver;
 use crate::rv32im::prover::circuits::NonMemoryCircuitProver;
+use crate::rv32im::prover::circuits::ProofInputs;
 use crate::rv32im::prover::factories::PreprocessingData;
 use crate::rv32im::prover::sets::ReadSets;
 use crate::rv32im::prover::sets::WriteSets;
@@ -36,7 +47,7 @@ use crate::rv32im::vm::VMSnapshot;
 
 use prover::cs::machine::ops::unrolled::shift_binary_csr::*;
 
-struct XorAndOrShiftCsrCircuit {
+pub struct XorAndOrShiftCsrCircuit {
     csr_table: LookupTable<Mersenne31Field, 3>,
 }
 
@@ -52,6 +63,35 @@ impl XorAndOrShiftCsrCircuit {
                 TableType::SpecialCSRProperties.to_table_id(),
             ),
         }
+    }
+
+    pub fn validate_proof(
+        inputs: &ProofInputs<NonMemoryOpcodeTracingDataWithTimestamp>,
+        proof: &UnrolledModeProof,
+    ) -> Result<(), ()> {
+        let mut oracle_data =
+            flatten_unrolled_circuits_proof_for_skeleton(proof, inputs.compiled_circuit());
+        for query in proof.queries.iter() {
+            oracle_data.extend(flatten_query(query));
+        }
+
+        std::thread::Builder::new()
+        .name("xor-and-or-shift-csr-verifier".to_string())
+        .stack_size(1 << 27)
+        .spawn(move || {
+            set_iterator(oracle_data.into_iter());
+
+            #[allow(invalid_value)]
+            unsafe {
+                verify_with_configuration::<ThreadLocalBasedSource, DefaultLeafInclusionVerifier>(
+                    &mut MaybeUninit::uninit().assume_init(),
+                    &mut ProofPublicInputs::uninit(),
+                )
+            };
+        })
+        .expect("must spawn verifier thread")
+        .join()
+        .map_err(|_| ())
     }
 }
 

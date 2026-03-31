@@ -11,9 +11,6 @@ use prover::fft::LdePrecomputations;
 use prover::fft::Twiddles;
 use prover::field::Mersenne31Complex;
 use prover::field::Mersenne31Field;
-use prover::field::PrimeField;
-use prover::field::TwoAdicField;
-use prover::merkle_trees::DefaultTreeConstructor;
 use prover::merkle_trees::MerkleTreeConstructor;
 use prover::prover_stages;
 use prover::prover_stages::unrolled_prover::prove_configured_for_unrolled_circuits;
@@ -23,17 +20,9 @@ use prover::prover_stages::SetupPrecomputations;
 use prover::worker::Worker;
 use prover::ShuffleRamSetupAndTeardown;
 use prover::WitnessEvaluationDataForExecutionFamily;
-use prover::DEFAULT_TRACE_PADDING_MULTIPLE;
-use riscv_transpiler::ir::preprocess_bytecode;
-use riscv_transpiler::ir::FullUnsignedMachineDecoderConfig;
-use riscv_transpiler::vm::RamWithRomRegion;
-use riscv_transpiler::vm::SimpleSnapshotter;
-use riscv_transpiler::vm::SimpleTape;
 use riscv_transpiler::vm::State;
-use riscv_transpiler::vm::VM;
 use std::alloc::Allocator;
 use std::alloc::Global;
-use std::borrow::Cow;
 
 use crate::rv32im::prover::checks::validate_inits_and_teardowns;
 use crate::rv32im::prover::checks::validate_sets;
@@ -141,7 +130,7 @@ fn make_worker() -> Worker {
 }
 
 impl Prover {
-    fn new() -> Self {
+    pub fn new() -> Self {
         let default_security_config =
             prover_stages::ProofSecurityConfig::for_queries_only(5, 28, 63);
 
@@ -157,7 +146,7 @@ impl Prover {
         &self.external_challenges
     }
 
-    fn worker(&self) -> &Worker {
+    pub fn worker(&self) -> &Worker {
         &self.worker
     }
 
@@ -222,6 +211,7 @@ impl Prover {
         println!("Trying to prove");
 
         let now = std::time::Instant::now();
+        let _ = &now;
         let proof = prove_configured_for_unrolled_circuits::<N, A, T>(
             compiled_circuit,
             &vec![],
@@ -326,14 +316,10 @@ pub fn prove_vm_result(snapshot: VMSnapshot) {
 
     prover.prove_jump_branch_slt(
         &mut accumulators,
-        snapshot.snapshotter(),
-        &prepared.counters,
-        snapshot.tape(),
-        snapshot.cycles_bound(),
-        prepared.expected_final_state,
+        snapshot,
+        &prepared,
         &mut read_sets,
         &mut write_sets,
-        &prepared.preprocessing_data,
     );
 
     prover.prove_xor_and_or_shift_csr(
@@ -346,14 +332,10 @@ pub fn prove_vm_result(snapshot: VMSnapshot) {
 
     prover.prove_mul_div(
         &mut accumulators,
-        snapshot.snapshotter(),
-        &prepared.counters,
-        snapshot.tape(),
-        snapshot.cycles_bound(),
-        prepared.expected_final_state,
+        snapshot,
+        &prepared,
         &mut read_sets,
         &mut write_sets,
-        &prepared.preprocessing_data,
     );
 
     prover.prove_load_store(

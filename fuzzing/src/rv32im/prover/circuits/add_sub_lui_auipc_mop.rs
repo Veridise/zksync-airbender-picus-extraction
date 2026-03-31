@@ -40,24 +40,18 @@ use crate::rv32im::vm::VMSnapshot;
 
 pub struct AddSubLuiAuipcMop;
 
-pub fn prove_add_sub_lui_auipc_mop_from_inputs(
-    inputs: ProofInputs<NonMemoryOpcodeTracingDataWithTimestamp>,
-) -> UnrolledModeProof {
-    let prover = Prover::new();
-    AddSubLuiAuipcMop.prove_from_inputs(inputs, &prover, prover.worker())
-}
+impl AddSubLuiAuipcMop {
+    pub fn validate_proof(
+        inputs: &ProofInputs<NonMemoryOpcodeTracingDataWithTimestamp>,
+        proof: &UnrolledModeProof,
+    ) -> Result<(), ()> {
+        let mut oracle_data =
+            flatten_unrolled_circuits_proof_for_skeleton(proof, inputs.compiled_circuit());
+        for query in proof.queries.iter() {
+            oracle_data.extend(flatten_query(query));
+        }
 
-pub fn validate_add_sub_lui_auipc_mop_proof(
-    inputs: &ProofInputs<NonMemoryOpcodeTracingDataWithTimestamp>,
-    proof: &UnrolledModeProof,
-) -> Result<(), ()> {
-    let mut oracle_data =
-        flatten_unrolled_circuits_proof_for_skeleton(proof, inputs.compiled_circuit());
-    for query in proof.queries.iter() {
-        oracle_data.extend(flatten_query(query));
-    }
-
-    std::thread::Builder::new()
+        std::thread::Builder::new()
         .name("add-sub-lui-auipc-mop-verifier".to_string())
         .stack_size(1 << 27)
         .spawn(move || {
@@ -74,6 +68,7 @@ pub fn validate_add_sub_lui_auipc_mop_proof(
         .expect("must spawn verifier thread")
         .join()
         .map_err(|_| ())
+    }
 }
 
 impl NonMemoryCircuitProver<ADD_SUB_LUI_AUIPC_MOP_CIRCUIT_FAMILY_IDX> for AddSubLuiAuipcMop {

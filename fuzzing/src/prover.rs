@@ -5,7 +5,6 @@ use std::ops::ControlFlow;
 use std::path::PathBuf;
 
 use clap::Parser;
-use prover::prover_stages::unrolled_prover::UnrolledModeProof;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 
@@ -89,12 +88,6 @@ pub struct SeedCaseRef {
     pub seed_program: String,
     /// Circuit family targeted by the mutated input.
     pub circuit: CircuitKind,
-}
-
-/// Proof object returned by the current scaffold.
-#[derive(Clone, Debug)]
-pub enum GeneratedProof {
-    AddSubLuiAuipcMop(UnrolledModeProof),
 }
 
 /// Runs the prover fuzzer scaffold from parsed CLI arguments.

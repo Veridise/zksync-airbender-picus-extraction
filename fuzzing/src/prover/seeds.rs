@@ -207,9 +207,9 @@ impl std::fmt::Display for SeedCase {
             self.seed_program,
             match self.circuit {
                 CircuitKind::AddSubLuiAuipcMop => "ADD/SUB/LUI/AUIPC/MOP",
-                CircuitKind::JumpBranchSlt => todo!(),
-                CircuitKind::XorAndOrShiftCsr => todo!(),
-                CircuitKind::MulDiv => todo!(),
+                CircuitKind::JumpBranchSlt => "JUMP/BRANCH/SLT",
+                CircuitKind::XorAndOrShiftCsr => "XOR/AND/OR/SHIFT/CSR",
+                CircuitKind::MulDiv => "MUL/DIV",
                 CircuitKind::LoadStore => todo!(),
                 CircuitKind::SubwordLoadStore => todo!(),
                 CircuitKind::InitsAndTeardowns => todo!(),
@@ -223,9 +223,9 @@ impl std::fmt::Display for SeedCase {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum StoredProofInputs {
     AddSubLuiAuipcMop(ProofInputs<NonMemoryOpcodeTracingDataWithTimestamp>),
-    JumpBranchSlt(()),
-    XorAndOrShiftCsr(()),
-    MulDiv(()),
+    JumpBranchSlt(ProofInputs<NonMemoryOpcodeTracingDataWithTimestamp>),
+    XorAndOrShiftCsr(ProofInputs<NonMemoryOpcodeTracingDataWithTimestamp>),
+    MulDiv(ProofInputs<NonMemoryOpcodeTracingDataWithTimestamp>),
     LoadStore(()),
     SubwordLoadStore(()),
     InitsAndTeardowns(()),
@@ -236,11 +236,11 @@ pub enum StoredProofInputs {
 impl StoredProofInputs {
     pub fn circuit(&self) -> CircuitKind {
         match self {
-            Self::AddSubLuiAuipcMop(inputs) => CircuitKind::from_family_idx(inputs.family_idx())
+            Self::JumpBranchSlt(inputs)
+            | Self::MulDiv(inputs)
+            | Self::XorAndOrShiftCsr(inputs)
+            | Self::AddSubLuiAuipcMop(inputs) => CircuitKind::from_family_idx(inputs.family_idx())
                 .expect("stored proof inputs contain an unsupported circuit family idx"),
-            Self::JumpBranchSlt(_) => CircuitKind::JumpBranchSlt,
-            Self::XorAndOrShiftCsr(_) => CircuitKind::XorAndOrShiftCsr,
-            Self::MulDiv(_) => CircuitKind::MulDiv,
             Self::LoadStore(_) => CircuitKind::LoadStore,
             Self::SubwordLoadStore(_) => CircuitKind::SubwordLoadStore,
             Self::InitsAndTeardowns(_) => CircuitKind::InitsAndTeardowns,
