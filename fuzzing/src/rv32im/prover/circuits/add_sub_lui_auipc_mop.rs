@@ -1,12 +1,21 @@
+use std::mem::MaybeUninit;
+
+use add_sub_lui_auipc_mop_verifier::verify_with_configuration;
+use add_sub_lui_auipc_mop_verifier::ProofPublicInputs;
 use prover::common_constants;
 use prover::common_constants::ADD_SUB_LUI_AUIPC_MOP_CIRCUIT_FAMILY_IDX;
+use prover::cs::machine::ops::unrolled::add_sub_lui_auipc_mop::*;
 use prover::cs::machine::ops::unrolled::compile_unrolled_circuit_state_transition;
 use prover::cs::one_row_compiler::CompiledCircuitArtifact;
 use prover::cs::tables::TableDriver;
 use prover::field::Field as _;
 use prover::field::Mersenne31Field;
 use prover::field::Mersenne31Quartic;
+use prover::nd_source_std;
+use prover::nd_source_std::set_iterator;
+use prover::nd_source_std::ThreadLocalBasedSource;
 use prover::prover_stages::unrolled_prover::UnrolledModeProof;
+use prover::risc_v_simulator::machine_mode_only_unrolled::NonMemoryOpcodeTracingDataWithTimestamp;
 use prover::tests::unrolled::add_sub_lui_auipc_mod;
 use prover::unrolled::NonMemoryCircuitOracle;
 use prover::SimpleWitnessProxy;
@@ -14,24 +23,61 @@ use riscv_transpiler::vm::DelegationsAndFamiliesCounters;
 use riscv_transpiler::vm::SimpleSnapshotter;
 use riscv_transpiler::vm::SimpleTape;
 use riscv_transpiler::vm::State;
+use verifier_common::proof_flattener::flatten_query;
+use verifier_common::proof_flattener::flatten_unrolled_circuits_proof_for_skeleton;
+use verifier_common::DefaultLeafInclusionVerifier;
 
 use crate::rv32im::prover::accumulators::Accumulators;
 use crate::rv32im::prover::circuits::CircuitProver;
 use crate::rv32im::prover::circuits::NonMemoryCircuitProver;
-use crate::rv32im::prover::factories::PreprocessingData;
+use crate::rv32im::prover::circuits::ProofInputs;
 use crate::rv32im::prover::sets::ReadSets;
 use crate::rv32im::prover::sets::WriteSets;
 use crate::rv32im::prover::PreparedExecution;
 use crate::rv32im::prover::Prover;
 use crate::rv32im::prover::TRACE_LEN_LOG2;
-use crate::rv32im::types::CountersT;
 use crate::rv32im::vm::VMSnapshot;
 
 pub struct AddSubLuiAuipcMop;
 
+pub fn prove_add_sub_lui_auipc_mop_from_inputs(
+    inputs: ProofInputs<NonMemoryOpcodeTracingDataWithTimestamp>,
+) -> UnrolledModeProof {
+    let prover = Prover::new();
+    AddSubLuiAuipcMop.prove_from_inputs(inputs, &prover, prover.worker())
+}
+
+pub fn validate_add_sub_lui_auipc_mop_proof(
+    inputs: &ProofInputs<NonMemoryOpcodeTracingDataWithTimestamp>,
+    proof: &UnrolledModeProof,
+) -> Result<(), ()> {
+    let mut oracle_data =
+        flatten_unrolled_circuits_proof_for_skeleton(proof, inputs.compiled_circuit());
+    for query in proof.queries.iter() {
+        oracle_data.extend(flatten_query(query));
+    }
+
+    std::thread::Builder::new()
+        .name("add-sub-lui-auipc-mop-verifier".to_string())
+        .stack_size(1 << 27)
+        .spawn(move || {
+            set_iterator(oracle_data.into_iter());
+
+            #[allow(invalid_value)]
+            unsafe {
+                verify_with_configuration::<ThreadLocalBasedSource, DefaultLeafInclusionVerifier>(
+                    &mut MaybeUninit::uninit().assume_init(),
+                    &mut ProofPublicInputs::uninit(),
+                )
+            };
+        })
+        .expect("must spawn verifier thread")
+        .join()
+        .map_err(|_| ())
+}
+
 impl NonMemoryCircuitProver<ADD_SUB_LUI_AUIPC_MOP_CIRCUIT_FAMILY_IDX> for AddSubLuiAuipcMop {
     fn compile_circuit(&self) -> CompiledCircuitArtifact<Mersenne31Field> {
-        use prover::cs::machine::ops::unrolled::add_sub_lui_auipc_mop::*;
         compile_unrolled_circuit_state_transition::<Mersenne31Field>(
             &|cs| add_sub_lui_auipc_mop_table_addition_fn(cs),
             &|cs| add_sub_lui_auipc_mop_circuit_with_preprocessed_bytecode(cs),

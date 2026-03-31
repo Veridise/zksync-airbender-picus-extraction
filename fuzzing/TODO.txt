@@ -1,0 +1,6 @@
+- The hash function does not use sha256.
+- Don't load the program's bytes until you really need them.
+- Cache entries should be kept in memory during the fuzzing loop.
+- Move stuff into modules
+- Make the iterations cli parameter optional, and if it's not present 
+  run the fuzzer in an infinite loop.

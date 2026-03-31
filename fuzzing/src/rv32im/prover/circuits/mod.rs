@@ -112,9 +112,13 @@ impl<T> ProofInputs<T> {
     pub fn family_idx(&self) -> u8 {
         self.family_idx
     }
+
+    pub fn compiled_circuit(&self) -> &CompiledCircuitArtifact<Mersenne31Field> {
+        &self.circuit
+    }
 }
 
-pub trait CircuitProver<const CIRCUIT_FAMILY_IDX: u8> {
+pub(crate) trait CircuitProver<const CIRCUIT_FAMILY_IDX: u8> {
     type BufferElt: serde::Serialize + for<'de> serde::Deserialize<'de>;
     type Tracer<'t>: WitnessTracer;
     type Oracle<'o>: Oracle<Mersenne31Field>;
@@ -166,16 +170,16 @@ pub trait CircuitProver<const CIRCUIT_FAMILY_IDX: u8> {
     }
 
     /// Pass None to table_driver if the proof inputs come from deserialized data.
-    fn check_proof(
+    fn generate_proof(
         &self,
-        inputs: ProofInputs<Self::BufferElt>,
-        accumulators: &mut Accumulators,
-        read_sets: &mut ReadSets,
-        write_sets: &mut WriteSets,
+        inputs: &ProofInputs<Self::BufferElt>,
         prover: &Prover,
         worker: &Worker,
+        oracle: &Self::Oracle<'_>,
+        read_sets: &mut ReadSets,
+        write_sets: &mut WriteSets,
         table_driver: Option<&TableDriver<Mersenne31Field>>,
-    ) {
+    ) -> UnrolledModeProof {
         let mut local_table_driver = TableDriver::new();
         let table_driver = match table_driver {
             Some(table_driver) => table_driver,
@@ -184,10 +188,9 @@ pub trait CircuitProver<const CIRCUIT_FAMILY_IDX: u8> {
                 &local_table_driver
             }
         };
-        let oracle = self.create_oracle(&inputs.buffer, &inputs.witness_gen_data);
         let traces = Self::TracesFactory::new(
             &inputs.circuit,
-            (&oracle, Self::witness_eval, read_sets, write_sets),
+            (oracle, Self::witness_eval, read_sets, write_sets),
             table_driver,
             worker,
         );
@@ -201,8 +204,50 @@ pub trait CircuitProver<const CIRCUIT_FAMILY_IDX: u8> {
             &aux_data,
             worker,
         ));
+        proof
+    }
+
+    /// Pass None to table_driver if the proof inputs come from deserialized data.
+    fn check_proof(
+        &self,
+        inputs: ProofInputs<Self::BufferElt>,
+        accumulators: &mut Accumulators,
+        read_sets: &mut ReadSets,
+        write_sets: &mut WriteSets,
+        prover: &Prover,
+        worker: &Worker,
+        table_driver: Option<&TableDriver<Mersenne31Field>>,
+    ) {
+        let oracle = self.create_oracle(&inputs.buffer, &inputs.witness_gen_data);
+        let proof = self.generate_proof(
+            &inputs,
+            prover,
+            worker,
+            &oracle,
+            read_sets,
+            write_sets,
+            table_driver,
+        );
         self.check_constraints(&proof, &oracle);
         self.accumulate(accumulators, &proof);
+    }
+
+    fn prove_from_inputs(
+        &self,
+        inputs: ProofInputs<Self::BufferElt>,
+        prover: &Prover,
+        worker: &Worker,
+    ) -> UnrolledModeProof {
+        let oracle = self.create_oracle(&inputs.buffer, &inputs.witness_gen_data);
+        self.generate_proof(
+            &inputs,
+            prover,
+            worker,
+            &oracle,
+            &mut ReadSets::empty(),
+            &mut WriteSets::empty(),
+            None,
+        )
     }
 
     fn prove(

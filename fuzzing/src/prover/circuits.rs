@@ -1,5 +1,3 @@
-use std::io;
-
 use prover::common_constants::ADD_SUB_LUI_AUIPC_MOP_CIRCUIT_FAMILY_IDX;
 use prover::common_constants::INITS_AND_TEARDOWNS_FORMAL_CIRCUIT_FAMILY_IDX;
 use prover::common_constants::JUMP_BRANCH_SLT_CIRCUIT_FAMILY_IDX;
@@ -8,14 +6,14 @@ use prover::common_constants::LOAD_STORE_WORD_ONLY_CIRCUIT_FAMILY_IDX;
 use prover::common_constants::MUL_DIV_CIRCUIT_FAMILY_IDX;
 use prover::common_constants::SHIFT_BINARY_CSR_CIRCUIT_FAMILY_IDX;
 use prover::cs::tables::TableDriver;
-use prover::worker::Worker;
 
 use crate::prover::crashes::BugType;
 use crate::prover::mutations::MutatedInput;
-use crate::prover::seeds::SeedProgram;
 use crate::prover::seeds::StoredProofInputs;
 use crate::prover::GeneratedProof;
 use crate::rv32im::prover::circuits::add_sub_lui_auipc_mop::AddSubLuiAuipcMop;
+use crate::rv32im::prover::circuits::add_sub_lui_auipc_mop::prove_add_sub_lui_auipc_mop_from_inputs;
+use crate::rv32im::prover::circuits::add_sub_lui_auipc_mop::validate_add_sub_lui_auipc_mop_proof;
 use crate::rv32im::prover::circuits::CircuitProver;
 use crate::rv32im::prover::PreparedExecution;
 use crate::rv32im::vm::VMSnapshot;
@@ -137,13 +135,42 @@ impl CircuitRegistry {
     }
 
     pub fn prove(&self, input: &StoredProofInputs) -> ProverAttempt {
-        let _ = input;
-        todo!("run the prover for a mutated circuit input")
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match input {
+            StoredProofInputs::AddSubLuiAuipcMop(inputs) => ProverAttempt::Success(
+                GeneratedProof::AddSubLuiAuipcMop(prove_add_sub_lui_auipc_mop_from_inputs(
+                    inputs.clone(),
+                )),
+            ),
+            StoredProofInputs::JumpBranchSlt(_) => todo!(),
+            StoredProofInputs::XorAndOrShiftCsr(_) => todo!(),
+            StoredProofInputs::MulDiv(_) => todo!(),
+            StoredProofInputs::LoadStore(_) => todo!(),
+            StoredProofInputs::SubwordLoadStore(_) => todo!(),
+            StoredProofInputs::InitsAndTeardowns(_) => todo!(),
+            StoredProofInputs::BlakeDelegation(_) => todo!(),
+            StoredProofInputs::KeccakDelegation(_) => todo!(),
+        }));
+
+        match result {
+            Ok(attempt) => attempt,
+            Err(_) => ProverAttempt::Crash,
+        }
     }
 
     pub fn validate(&self, input: &StoredProofInputs, proof: &GeneratedProof) -> BugType {
-        let _ = (input, proof);
-        todo!("validate a generated proof and classify the outcome")
+        match (input, proof) {
+            (
+                StoredProofInputs::AddSubLuiAuipcMop(inputs),
+                GeneratedProof::AddSubLuiAuipcMop(proof),
+            ) => match validate_add_sub_lui_auipc_mop_proof(inputs, proof) {
+                Ok(()) => BugType::ValidationBug,
+                Err(()) => BugType::ProofGenerationBug,
+            },
+            _ => panic!(
+                "proof/input circuit mismatch during validation: input={:?}",
+                input.circuit()
+            ),
+        }
     }
 }
 

@@ -3,6 +3,7 @@ use std::io;
 use std::path::PathBuf;
 
 use clap::Parser;
+use prover::prover_stages::unrolled_prover::UnrolledModeProof;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 
@@ -82,9 +83,11 @@ pub struct SeedCaseRef {
     pub circuit: CircuitKind,
 }
 
-/// Placeholder proof object returned by the current scaffold.
-#[derive(Clone, Debug, Default)]
-pub struct GeneratedProof;
+/// Proof object returned by the current scaffold.
+#[derive(Clone, Debug)]
+pub enum GeneratedProof {
+    AddSubLuiAuipcMop(UnrolledModeProof),
+}
 
 /// Runs the prover fuzzer scaffold from parsed CLI arguments.
 pub fn run(cli: Cli) {
@@ -92,7 +95,7 @@ pub fn run(cli: Cli) {
     let mut fuzzer = Fuzzer::new(config);
 
     if let Err(err) = fuzzer.initialize().and_then(|()| fuzzer.run_loop()) {
-        panic!("prover-fuzz scaffold failed: {err}");
+        panic!("prover-fuzz failed: {err}");
     }
 }
 
@@ -157,7 +160,6 @@ impl Fuzzer {
             }
         }
     }
-
 }
 
 /// Ensures the fuzzer output root and its required subdirectories exist.

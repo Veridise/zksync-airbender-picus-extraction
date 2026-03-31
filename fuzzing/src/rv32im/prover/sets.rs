@@ -14,6 +14,13 @@ pub struct ReadSets {
 }
 
 impl ReadSets {
+    pub fn empty() -> Self {
+        Self {
+            read_set: BTreeSet::new(),
+            memory_read_set: BTreeSet::new(),
+        }
+    }
+
     pub fn new(state: State<CountersT>) -> Self {
         let final_pc = state.pc;
         let final_timestamp = state.timestamp;
@@ -64,6 +71,13 @@ pub struct WriteSets {
 }
 
 impl WriteSets {
+    pub fn empty() -> Self {
+        Self {
+            write_set: BTreeSet::new(),
+            memory_write_set: BTreeSet::new(),
+        }
+    }
+
     pub fn new() -> Self {
         let mut write_set = BTreeSet::<(u32, TimestampScalar)>::new();
 

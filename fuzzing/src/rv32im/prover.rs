@@ -140,7 +140,7 @@ where
     }
 }
 
-struct Prover {
+pub(crate) struct Prover {
     worker: Worker,
     default_security_config: prover_stages::ProofSecurityConfig,
     external_challenges: ExternalChallenges,
