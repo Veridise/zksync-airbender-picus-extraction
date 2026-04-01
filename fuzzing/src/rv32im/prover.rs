@@ -1,5 +1,3 @@
-use prover::common_constants::INITIAL_TIMESTAMP;
-use prover::common_constants::TIMESTAMP_STEP;
 use prover::common_constants::{self};
 use prover::cs::definitions::EXECUTOR_FAMILY_CIRCUIT_DECODER_TABLE_WIDTH;
 use prover::cs::one_row_compiler::CompiledCircuitArtifact;
@@ -28,6 +26,7 @@ use crate::rv32im::prover::checks::validate_inits_and_teardowns;
 use crate::rv32im::prover::checks::validate_sets;
 use crate::rv32im::types::CountersT;
 use crate::rv32im::vm::VMSnapshot;
+use crate::utils::env_conf;
 
 mod accumulators;
 mod checks;
@@ -121,20 +120,12 @@ pub(crate) struct Prover {
     external_challenges: ExternalChallenges,
 }
 
-fn make_worker() -> Worker {
-    let n = std::env::var("PROVER_WORKERS")
-        .ok()
-        .map(|s| usize::from_str_radix(&s, 10).unwrap())
-        .unwrap_or(DEFAULT_WORKERS);
-    Worker::new_with_num_threads(n)
-}
-
 impl Prover {
     pub fn new() -> Self {
         let default_security_config =
             prover_stages::ProofSecurityConfig::for_queries_only(5, 28, 63);
 
-        let worker = make_worker();
+        let worker = Worker::new_with_num_threads(env_conf("PROVER_WORKERS", DEFAULT_WORKERS));
         Self {
             default_security_config,
             worker,
@@ -172,28 +163,6 @@ impl Prover {
         )
     }
 
-    fn run_prover<A, T, const N: usize>(
-        &self,
-        compiled_circuit: &CompiledCircuitArtifact<Mersenne31Field>,
-        full_trace: WitnessEvaluationDataForExecutionFamily<N, A>,
-        setup: &SetupPrecomputations<N, A, T>,
-        twiddles: &Twiddles<Mersenne31Complex, A>,
-        lde_precomputations: &LdePrecomputations<A>,
-    ) -> (ProverData<N, A, T>, UnrolledModeProof)
-    where
-        T: MerkleTreeConstructor,
-        A: GoodAllocator + Clone,
-    {
-        self.run_prover_with_auxdata(
-            compiled_circuit,
-            full_trace,
-            setup,
-            twiddles,
-            lde_precomputations,
-            &[],
-        )
-    }
-
     fn run_prover_with_auxdata<A, T, const N: usize>(
         &self,
         compiled_circuit: &CompiledCircuitArtifact<Mersenne31Field>,
@@ -214,13 +183,13 @@ impl Prover {
         let _ = &now;
         let proof = prove_configured_for_unrolled_circuits::<N, A, T>(
             compiled_circuit,
-            &vec![],
+            &[],
             self.external_challenges(),
             full_trace,
             aux_boundary_data,
-            &setup,
-            &twiddles,
-            &lde_precomputations,
+            setup,
+            twiddles,
+            lde_precomputations,
             None,
             LDE_FACTOR,
             TREE_CAP_SIZE,
@@ -234,13 +203,12 @@ impl Prover {
 }
 
 pub(crate) fn prepare_execution(snapshot: VMSnapshot, worker: &Worker) -> PreparedExecution {
-    let _total_snapshots = snapshot.snapshotter().snapshots.len();
-
-    let exact_cycles_passed = (snapshot.state().timestamp - INITIAL_TIMESTAMP) / TIMESTAMP_STEP;
-
     #[cfg(feature = "prover-messages")]
-    println!("Passed exactly {} cycles", exact_cycles_passed);
+    {
+        let exact_cycles_passed = (snapshot.state().timestamp - INITIAL_TIMESTAMP) / TIMESTAMP_STEP;
 
+        println!("Passed exactly {} cycles", exact_cycles_passed);
+    }
     let counters = snapshot
         .snapshotter()
         .snapshots
@@ -356,18 +324,7 @@ pub fn prove_vm_result(snapshot: VMSnapshot) {
     // Machine state permutation ended
     validate_sets(&read_sets, &write_sets);
 
-    prover.prove_init_and_teardowns(
-        &mut accumulators,
-        snapshot.snapshotter(),
-        &prepared.counters,
-        snapshot.tape(),
-        snapshot.cycles_bound(),
-        prepared.expected_final_state,
-        &mut read_sets,
-        &mut write_sets,
-        &prepared.preprocessing_data,
-        &prepared.inits_and_teardowns,
-    );
+    prover.prove_init_and_teardowns(&mut accumulators, &prepared.inits_and_teardowns);
     // now prove delegation circuits
     prover.prove_blake_delegation(
         &mut accumulators,

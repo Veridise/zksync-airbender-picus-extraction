@@ -10,7 +10,7 @@ use crate::prover::seeds::StoredProofInputs;
 #[derive(Clone, Debug)]
 pub enum ExecutionOutcome {
     DiscardedProverCrash,
-    Interesting(BugReport),
+    Interesting(Box<BugReport>),
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
@@ -19,6 +19,15 @@ pub enum BugType {
     ProofGenerationBug,
     // Soundness
     ValidationBug,
+}
+
+impl std::fmt::Display for BugType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BugType::ProofGenerationBug => write!(f, "Completeness bug (validation failed)"),
+            BugType::ValidationBug => write!(f, "Soundness bug (validation passed)"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]

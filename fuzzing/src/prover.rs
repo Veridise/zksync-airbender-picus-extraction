@@ -1,7 +1,6 @@
-use std::cell::RefCell;
+use std::borrow::Cow;
 use std::fs;
 use std::io;
-use std::ops::ControlFlow;
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -24,7 +23,6 @@ use state::FuzzerState;
 
 use crate::prover::crashes::BugType;
 use crate::prover::mutations::MutatedInput;
-use crate::prover::mutations::Mutator;
 use crate::prover::mutations::MutatorRegistry;
 use crate::prover::seeds::SeedCase;
 
@@ -38,14 +36,11 @@ pub struct Cli {
     #[arg(short = 'o', long)]
     pub output_dir: PathBuf,
     /// Number of fuzz-loop iterations to execute.
-    #[arg(long, default_value_t = 100)]
-    pub iterations: usize,
-    /// Reserved sampling parameter for future loop heuristics.
-    #[arg(long, default_value_t = 1)]
-    pub samples: usize,
+    #[arg(long)]
+    pub iterations: Option<usize>,
     /// RNG seed used to make scaffold behavior reproducible.
-    #[arg(long, default_value_t = 1)]
-    pub seed: u64,
+    #[arg(long)]
+    pub seed: Option<u64>,
     #[arg(long, default_value_t = false)]
     pub skip_validation: bool,
 }
@@ -62,9 +57,7 @@ pub struct FuzzerConfig {
     /// Crash directory nested under [`FuzzerConfig::output_dir`].
     pub crash_dir: PathBuf,
     /// Number of fuzz-loop iterations to execute.
-    pub iterations: usize,
-    /// Reserved sampling parameter for future loop heuristics.
-    pub samples: usize,
+    pub iterations: Option<usize>,
     /// RNG seed used by the fuzzer.
     pub seed: u64,
 }
@@ -105,6 +98,15 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn current_timestamp() -> u64 {
+    use std::time::SystemTime;
+
+    match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(n) => n.as_secs(),
+        Err(_) => panic!("SystemTime before UNIX EPOCH!"),
+    }
+}
+
 impl From<Cli> for FuzzerConfig {
     /// Expands CLI arguments into the runtime configuration shape used by the fuzzer.
     fn from(cli: Cli) -> Self {
@@ -114,8 +116,7 @@ impl From<Cli> for FuzzerConfig {
             input_dir: cli.input_dir,
             output_dir: cli.output_dir,
             iterations: cli.iterations,
-            samples: cli.samples,
-            seed: cli.seed,
+            seed: cli.seed.unwrap_or_else(current_timestamp),
         }
     }
 }
@@ -133,6 +134,7 @@ impl Fuzzer {
 
     /// Prepares directories, loads seed programs, and materializes the in-memory seed database.
     fn initialize(&mut self) -> io::Result<()> {
+        log::info!("Seed: {}", self.config.seed);
         prepare_output_dirs(&self.config)?;
         self.state = FuzzerState::new(&self.config, &self.registry)?;
 
@@ -142,16 +144,39 @@ impl Fuzzer {
     /// Executes the main fuzz loop for the configured number of iterations.
     fn run_loop(&mut self) -> io::Result<()> {
         let m = MutatorRegistry::new();
+        {
+            let seed_cases = self.state.seed_cases();
+            log::info!(
+                "Loaded {} seed{}",
+                seed_cases.len(),
+                if seed_cases.len() == 1 { "" } else { "s" }
+            );
+        }
 
-        log::info!("Fuzzing for {} iterations", self.config.iterations);
-        for n in 0..self.config.iterations {
+        let (range, iterations_str) = match self.config.iterations {
+            Some(iterations) => {
+                log::info!(
+                    "Fuzzing for {iterations} iteration{}",
+                    if iterations == 1 { "" } else { "s" }
+                );
+                (1..=iterations, Cow::<str>::Owned(format!("{iterations}")))
+            }
+            // To keep the ranges the same type the iterator is not actually infinite but until the
+            // maximum possible usize.
+            None => (1..=usize::MAX, Cow::<str>::Borrowed("?")),
+        };
+
+        for n in range {
             let seed_case = self.state.seed_cases().choose(&mut self.rng).unwrap();
-            log::info!("[{}/{}] Picked {seed_case}", n + 1, self.config.iterations);
-            let mutated = m.choose(&mut self.rng).mutate(&seed_case, &mut self.rng);
+            log::info!("[{}/{iterations_str}] Picked {seed_case}", n);
+            let Some(mutated) = mutate_until_different(seed_case, &m, &mut self.rng) else {
+                log::warn!("[{}/{iterations_str}] Ignoring {seed_case} because we could not mutate it into a different input", n);
+                continue;
+            };
             let outcome = self.run_one_iteration(mutated);
             if let ExecutionOutcome::Interesting(report) = outcome {
-                log::info!("[{}/{}] Found crash!", n + 1, self.config.iterations);
-                self.state.save_bug(report, &self.config.crash_dir)?;
+                log::info!("[{}/{iterations_str}] Found crash!", n);
+                self.state.save_bug(*report, &self.config.crash_dir)?;
             }
         }
         Ok(())
@@ -162,9 +187,13 @@ impl Fuzzer {
         let m = MutatorRegistry::empty();
         let mut failed = false;
         let seed_cases = self.state.seed_cases();
-        log::info!("Validating {} seeds", seed_cases.len());
+        log::info!(
+            "Validating {} seed{}",
+            seed_cases.len(),
+            if seed_cases.len() == 1 { "" } else { "s" }
+        );
         for (n, seed) in seed_cases.iter().enumerate() {
-            let mutated = m.choose(&mut self.rng).mutate(&seed, &mut self.rng);
+            let mutated = m.choose(&mut self.rng).mutate(seed, &mut self.rng);
             let outcome = self.run_one_iteration(mutated);
             match outcome {
                 // Prover failed to generate proof from seed.
@@ -207,13 +236,44 @@ impl Fuzzer {
     /// Runs one fuzz iteration: choose a seed, mutate it, attempt proving, and classify the result.
     fn run_one_iteration(&self, mutated: MutatedInput) -> ExecutionOutcome {
         match self.registry.prove(&mutated.mutated_input) {
-            ProverAttempt::Crash => ExecutionOutcome::DiscardedProverCrash,
+            ProverAttempt::Crash => {
+                log::info!("Prover crashed (that's good)");
+                ExecutionOutcome::DiscardedProverCrash
+            }
             ProverAttempt::Success(proof) => {
+                log::info!("Prover generated a proof from the mutated input!");
                 let bug_type = self.registry.validate(&mutated.mutated_input, &proof);
-                ExecutionOutcome::Interesting(BugReport::new(mutated, bug_type))
+                log::info!("Proof validation outcome: {bug_type}");
+                ExecutionOutcome::Interesting(Box::new(BugReport::new(mutated, bug_type)))
             }
         }
     }
+}
+
+/// Mutates the input seed, trying again if the mutated input is equal to
+/// the original seed.
+///
+/// Gives up after a 1000 mutations attemps.
+fn mutate_until_different(
+    seed_case: &SeedCase,
+    m: &MutatorRegistry,
+    rng: &mut StdRng,
+) -> Option<MutatedInput> {
+    const MAX_ATTEMPS: usize = 1000;
+    let mut attemps = 0;
+
+    let mut mutated_input;
+    loop {
+        if attemps >= MAX_ATTEMPS {
+            return None;
+        }
+        attemps += 1;
+        mutated_input = m.apply_mutations(seed_case, rng);
+        if mutated_input != seed_case {
+            break;
+        }
+    }
+    Some(mutated_input)
 }
 
 /// Ensures the fuzzer output root and its required subdirectories exist.

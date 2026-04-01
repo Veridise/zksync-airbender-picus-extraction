@@ -1,3 +1,0 @@
-- Cache entries should be kept in memory during the fuzzing loop.
-- Make the iterations cli parameter optional, and if it's not present 
-  run the fuzzer in an infinite loop.

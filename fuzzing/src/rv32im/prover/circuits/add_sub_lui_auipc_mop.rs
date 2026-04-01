@@ -1,8 +1,4 @@
-use std::mem::MaybeUninit;
-
 use add_sub_lui_auipc_mop_verifier::verify_with_configuration;
-use add_sub_lui_auipc_mop_verifier::ProofPublicInputs;
-use prover::common_constants;
 use prover::common_constants::ADD_SUB_LUI_AUIPC_MOP_CIRCUIT_FAMILY_IDX;
 use prover::cs::machine::ops::unrolled::add_sub_lui_auipc_mop::*;
 use prover::cs::machine::ops::unrolled::compile_unrolled_circuit_state_transition;
@@ -11,7 +7,6 @@ use prover::cs::tables::TableDriver;
 use prover::field::Field as _;
 use prover::field::Mersenne31Field;
 use prover::field::Mersenne31Quartic;
-use prover::nd_source_std;
 use prover::nd_source_std::set_iterator;
 use prover::nd_source_std::ThreadLocalBasedSource;
 use prover::prover_stages::unrolled_prover::UnrolledModeProof;
@@ -19,15 +14,12 @@ use prover::risc_v_simulator::machine_mode_only_unrolled::NonMemoryOpcodeTracing
 use prover::tests::unrolled::add_sub_lui_auipc_mod;
 use prover::unrolled::NonMemoryCircuitOracle;
 use prover::SimpleWitnessProxy;
-use riscv_transpiler::vm::DelegationsAndFamiliesCounters;
-use riscv_transpiler::vm::SimpleSnapshotter;
-use riscv_transpiler::vm::SimpleTape;
-use riscv_transpiler::vm::State;
 use verifier_common::proof_flattener::flatten_query;
 use verifier_common::proof_flattener::flatten_unrolled_circuits_proof_for_skeleton;
 use verifier_common::DefaultLeafInclusionVerifier;
 
 use crate::rv32im::prover::accumulators::Accumulators;
+use crate::rv32im::prover::circuits::helpers::validator_outputs;
 use crate::rv32im::prover::circuits::CircuitProver;
 use crate::rv32im::prover::circuits::NonMemoryCircuitProver;
 use crate::rv32im::prover::circuits::ProofInputs;
@@ -56,12 +48,11 @@ impl AddSubLuiAuipcMop {
         .stack_size(1 << 27)
         .spawn(move || {
             set_iterator(oracle_data.into_iter());
-
-            #[allow(invalid_value)]
+            let (mut proof_state_dst, mut proof_input_dst) = validator_outputs();
             unsafe {
                 verify_with_configuration::<ThreadLocalBasedSource, DefaultLeafInclusionVerifier>(
-                    &mut MaybeUninit::uninit().assume_init(),
-                    &mut ProofPublicInputs::uninit(),
+                    &mut proof_state_dst,
+                    &mut proof_input_dst,
                 )
             };
         })

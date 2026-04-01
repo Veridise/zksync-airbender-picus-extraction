@@ -12,15 +12,6 @@ use crate::prover::seeds::SeedCase;
 use crate::prover::seeds::SeedProgram;
 use crate::prover::FuzzerConfig;
 
-#[derive(Debug, Default)]
-enum FuzzingStep {
-    #[default]
-    Idle,
-    SeedCheck,
-    ProofGeneration,
-    ProofValidation,
-}
-
 #[derive(Default, Debug)]
 struct CrashId {
     id: RefCell<u64>,
@@ -49,7 +40,6 @@ pub struct FuzzerState {
     seed_cases: Vec<SeedCase>,
     /// Next crash id to allocate when persisting a bug report.
     next_crash_id: CrashId,
-    step: FuzzingStep,
 }
 
 impl FuzzerState {
@@ -65,7 +55,6 @@ impl FuzzerState {
         Ok(Self {
             seed_cases,
             next_crash_id,
-            step: FuzzingStep::Idle,
         })
     }
 
@@ -82,14 +71,6 @@ impl FuzzerState {
 
     pub fn seed_cases(&self) -> &[SeedCase] {
         &self.seed_cases
-    }
-
-    pub fn step(&self) -> &FuzzingStep {
-        &self.step
-    }
-
-    pub fn set_step(&mut self, step: FuzzingStep) {
-        self.step = step;
     }
 }
 

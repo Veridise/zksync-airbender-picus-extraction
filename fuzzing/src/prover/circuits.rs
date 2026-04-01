@@ -48,7 +48,7 @@ pub struct CircuitRegistry {
 #[derive(Clone, Debug)]
 pub enum ProverAttempt {
     Crash,
-    Success(UnrolledModeProof),
+    Success(Box<UnrolledModeProof>),
 }
 
 impl CircuitKind {
@@ -107,7 +107,7 @@ impl CircuitKind {
 
 impl CircuitRegistry {
     pub fn new() -> Self {
-        let circuits = CircuitKind::all().iter().copied().collect();
+        let circuits = CircuitKind::all().to_vec();
 
         Self { circuits }
     }
@@ -178,11 +178,11 @@ impl CircuitRegistry {
             StoredProofInputs::MulDiv(inputs) => {
                 ProverAttempt::Success(self.prove_impl(MulDivCircuit, inputs))
             }
-            StoredProofInputs::LoadStore(inputs, bytecode) => ProverAttempt::Success(
-                self.prove_impl(LoadStoreWordCircuit::new(&bytecode), inputs),
-            ),
+            StoredProofInputs::LoadStore(inputs, bytecode) => {
+                ProverAttempt::Success(self.prove_impl(LoadStoreWordCircuit::new(bytecode), inputs))
+            }
             StoredProofInputs::SubwordLoadStore(inputs, bytecode) => ProverAttempt::Success(
-                self.prove_impl(LoadStoreSubwordCircuit::new(&bytecode), inputs),
+                self.prove_impl(LoadStoreSubwordCircuit::new(bytecode), inputs),
             ),
             StoredProofInputs::InitsAndTeardowns(_) => todo!(),
             StoredProofInputs::BlakeDelegation(_) => todo!(),
@@ -199,12 +199,12 @@ impl CircuitRegistry {
         &self,
         cprover: C,
         inputs: &ProofInputs<C::BufferElt>,
-    ) -> UnrolledModeProof
+    ) -> Box<UnrolledModeProof>
     where
         ProofInputs<C::BufferElt>: Clone,
     {
         let prover = Prover::new();
-        cprover.prove_from_inputs(inputs.clone(), &prover, prover.worker())
+        Box::new(cprover.prove_from_inputs(inputs.clone(), &prover, prover.worker()))
     }
 
     pub fn validate(&self, input: &StoredProofInputs, proof: &UnrolledModeProof) -> BugType {

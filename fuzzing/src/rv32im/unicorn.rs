@@ -27,7 +27,7 @@ fn configure_vm<'vm>(
 ) -> Result<Unicorn<'vm, ()>, uc_error> {
     let text_sect_len = text_sect_len.map(|l| {
         dbg!(l);
-        dbg!(((l / ALIGN) + if l % ALIGN == 0 { 1 } else { 1 }) * ALIGN)
+        dbg!(((l / ALIGN) + if l % ALIGN == 0 { 0 } else { 1 }) * ALIGN)
     });
     if let Some(tcl) = text_sect_len {
         assert_eq!(tcl % ALIGN, 0, "{tcl} is not aligned to 4kb");

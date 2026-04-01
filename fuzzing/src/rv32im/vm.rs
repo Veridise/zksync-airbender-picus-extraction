@@ -2,12 +2,10 @@ use prover::common_constants;
 use prover::risc_v_simulator::abstractions::non_determinism::QuasiUARTSource;
 use riscv_transpiler::vm;
 use riscv_transpiler::vm::RamWithRomRegion;
-use riscv_transpiler::vm::SimpleSnapshotter;
 use riscv_transpiler::vm::SimpleTape;
 use riscv_transpiler::vm::State;
 
 use super::types::CountersT;
-use super::types::DecoderConfig;
 use crate::rv32im::binary::Binary;
 use crate::rv32im::common::constants::TOTAL_MEM_SIZE;
 use crate::rv32im::types::Snapshotter;
@@ -125,7 +123,7 @@ impl VM {
         &self.state
     }
 
-    pub fn snapshot(&self) -> VMSnapshot {
+    pub fn snapshot(&self) -> VMSnapshot<'_> {
         VMSnapshot {
             ram: &self.ram,
             state: self.state,

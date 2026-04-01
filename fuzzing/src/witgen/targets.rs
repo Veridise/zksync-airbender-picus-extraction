@@ -26,7 +26,4 @@ pub(crate) trait FuzzTarget<F: PrimeField>: RefUnwindSafe {
     fn synthesize(&self, cs: &mut BasicAssembly<F>);
 
     fn random_decoder_data(&self, rng: &mut SmallRng) -> ExecutorFamilyDecoderData;
-
-    fn bytecode_size(&self) -> usize;
-    fn trace_len_log2(&self) -> usize;
 }

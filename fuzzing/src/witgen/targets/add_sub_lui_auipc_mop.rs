@@ -1,5 +1,3 @@
-use add_sub_lui_auipc_mop::ROM_ADDRESS_SPACE_SECOND_WORD_BITS;
-use add_sub_lui_auipc_mop::TRACE_LEN_LOG2;
 use prover::cs::cs::cs_reference::BasicAssembly;
 use prover::cs::cs::oracle::ExecutorFamilyDecoderData;
 use prover::cs::machine::ops::unrolled::add_sub_lui_auipc_mop::add_sub_lui_auipc_mop_circuit_with_preprocessed_bytecode;
@@ -42,13 +40,5 @@ impl<F: PrimeField> FuzzTarget<F> for Target {
             funct7,
             opcode_family_bits,
         }
-    }
-
-    fn bytecode_size(&self) -> usize {
-        (1 << (16 + ROM_ADDRESS_SPACE_SECOND_WORD_BITS)) / 4
-    }
-
-    fn trace_len_log2(&self) -> usize {
-        TRACE_LEN_LOG2 as usize
     }
 }

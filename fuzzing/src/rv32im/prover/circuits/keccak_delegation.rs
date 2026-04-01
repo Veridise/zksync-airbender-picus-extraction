@@ -38,6 +38,7 @@ use crate::rv32im::prover::TREE_CAP_SIZE;
 use crate::rv32im::types::CountersT;
 
 impl Prover {
+    #[allow(clippy::too_many_arguments)]
     pub fn prove_keccak_delegation(
         &self,
         accumulators: &mut Accumulators,
@@ -85,7 +86,7 @@ impl Prover {
             ram_log: &mut ram_log_buffers,
         };
         let mut buffer = vec![DelegationWitness::empty(); num_calls];
-        let mut buffers = vec![&mut buffer[..]];
+        let mut buffers = [&mut buffer[..]];
         let mut tracer = KeccakDelegationDestinationHolder {
             buffers: &mut buffers[..],
         };

@@ -1,5 +1,4 @@
 use std::alloc::Global;
-use std::mem::MaybeUninit;
 
 use load_store_word_only_verifier::verify_with_configuration;
 use prover::common_constants;
@@ -30,9 +29,9 @@ use riscv_transpiler::witness::MemDestinationHolder;
 use verifier_common::proof_flattener::flatten_query;
 use verifier_common::proof_flattener::flatten_unrolled_circuits_proof_for_skeleton;
 use verifier_common::DefaultLeafInclusionVerifier;
-use verifier_common::ProofPublicInputs;
 
 use crate::rv32im::prover::accumulators::Accumulators;
+use crate::rv32im::prover::circuits::helpers::validator_outputs;
 use crate::rv32im::prover::circuits::traces::FullAndMemTraces;
 use crate::rv32im::prover::circuits::CircuitProver;
 use crate::rv32im::prover::circuits::ProofInputs;
@@ -94,11 +93,11 @@ impl LoadStoreWordCircuit {
         .spawn(move || {
             set_iterator(oracle_data.into_iter());
 
-            #[allow(invalid_value)]
+            let (mut proof_state_dst, mut proof_input_dst) = validator_outputs();
             unsafe {
                 verify_with_configuration::<ThreadLocalBasedSource, DefaultLeafInclusionVerifier>(
-                    &mut MaybeUninit::uninit().assume_init(),
-                    &mut ProofPublicInputs::uninit(),
+                    &mut proof_state_dst,
+                    &mut proof_input_dst,
                 )
             };
         })

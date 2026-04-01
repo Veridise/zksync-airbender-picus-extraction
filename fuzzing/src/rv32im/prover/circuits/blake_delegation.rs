@@ -2,13 +2,9 @@ use std::alloc::Global;
 
 use prover::check_satisfied;
 use prover::common_constants;
-use prover::common_constants::ADD_SUB_LUI_AUIPC_MOP_CIRCUIT_FAMILY_IDX;
 use prover::common_constants::BLAKE2S_DELEGATION_CSR_REGISTER;
 use prover::cs::cs::circuit::Circuit as _;
-use prover::cs::machine::ops::unrolled::compile_unrolled_circuit_state_transition;
-use prover::cs::machine::ops::unrolled::materialize_flattened_decoder_table;
 use prover::cs::one_row_compiler::OneRowCompiler;
-use prover::cs::tables::TableDriver;
 use prover::definitions::ExternalValues;
 use prover::evaluate_delegation_memory_witness;
 use prover::evaluate_witness;
@@ -16,24 +12,14 @@ use prover::fft::LdePrecomputations;
 use prover::fft::Twiddles;
 use prover::field::Field as _;
 use prover::field::Mersenne31Field;
-use prover::field::Mersenne31Quartic;
 use prover::prover_stages::prove;
 use prover::prover_stages::SetupPrecomputations;
-use prover::risc_v_simulator::machine_mode_only_unrolled::NonMemoryOpcodeTracingDataWithTimestamp;
 use prover::tests::blake2s_delegation_with_transpiler;
-use prover::tests::unrolled::add_sub_lui_auipc_mod;
-use prover::tests::unrolled::ensure_memory_trace_consistency;
 use prover::tests::unrolled::parse_delegation_ram_accesses_from_full_trace;
-use prover::tests::unrolled::parse_shuffle_ram_accesses_from_full_trace;
-use prover::tests::unrolled::parse_state_permutation_elements_from_full_trace;
 use prover::tracers::oracles::transpiler_oracles::delegation::Blake2sDelegationOracle;
-use prover::unrolled::evaluate_memory_witness_for_executor_family;
-use prover::unrolled::evaluate_witness_for_executor_family;
-use prover::unrolled::NonMemoryCircuitOracle;
 use prover::DEFAULT_TRACE_PADDING_MULTIPLE;
 use riscv_transpiler::replayer::ReplayerRam;
 use riscv_transpiler::replayer::ReplayerVM;
-use riscv_transpiler::vm::Counters as _;
 use riscv_transpiler::vm::DelegationsAndFamiliesCounters;
 use riscv_transpiler::vm::ReplayBuffer as _;
 use riscv_transpiler::vm::SimpleSnapshotter;
@@ -41,22 +27,18 @@ use riscv_transpiler::vm::SimpleTape;
 use riscv_transpiler::vm::State;
 use riscv_transpiler::witness::BlakeDelegationDestinationHolder;
 use riscv_transpiler::witness::DelegationWitness;
-use riscv_transpiler::witness::NonMemDestinationHolder;
 
 use crate::rv32im::prover::accumulators::Accumulators;
-use crate::rv32im::prover::factories::PreprocessingData;
 use crate::rv32im::prover::sets::ReadSets;
 use crate::rv32im::prover::sets::WriteSets;
 use crate::rv32im::prover::Prover;
 use crate::rv32im::prover::LDE_FACTOR;
-use crate::rv32im::prover::NUM_CYCLES_PER_CHUNK;
 use crate::rv32im::prover::NUM_DELEGATION_CYCLES;
-use crate::rv32im::prover::TRACE_LEN;
-use crate::rv32im::prover::TRACE_LEN_LOG2;
 use crate::rv32im::prover::TREE_CAP_SIZE;
 use crate::rv32im::types::CountersT;
 
 impl Prover {
+    #[allow(clippy::too_many_arguments)]
     pub fn prove_blake_delegation(
         &self,
         accumulators: &mut Accumulators,
@@ -105,7 +87,7 @@ impl Prover {
         };
 
         let mut buffer = vec![DelegationWitness::empty(); num_calls];
-        let mut buffers = vec![&mut buffer[..]];
+        let mut buffers = [&mut buffer[..]];
         let mut tracer = BlakeDelegationDestinationHolder {
             buffers: &mut buffers[..],
         };

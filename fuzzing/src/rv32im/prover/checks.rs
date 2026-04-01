@@ -11,7 +11,6 @@ use prover::field::Mersenne31Quartic;
 use riscv_transpiler::vm::Counters as _;
 use riscv_transpiler::vm::DelegationsAndFamiliesCounters;
 
-use crate::rv32im::prover::accumulators;
 use crate::rv32im::prover::accumulators::Accumulators;
 use crate::rv32im::prover::sets::ReadSets;
 use crate::rv32im::prover::sets::WriteSets;
@@ -45,13 +44,13 @@ pub fn validate_counters(counters: &DelegationsAndFamiliesCounters) {
 
 pub fn validate_sets(r: &ReadSets, w: &WriteSets) {
     for (pc, ts) in w.write_set().iter().copied() {
-        if r.read_set().contains(&(pc, ts)) == false {
+        if !r.read_set().contains(&(pc, ts)) {
             panic!("read set doesn't contain a pair {:?}", (pc, ts));
         }
     }
 
     for (pc, ts) in r.read_set().iter().copied() {
-        if w.write_set().contains(&(pc, ts)) == false {
+        if !w.write_set().contains(&(pc, ts)) {
             panic!("write set doesn't contain a pair {:?}", (pc, ts));
         }
     }
@@ -76,16 +75,14 @@ pub fn validate_inits_and_teardowns(
     // assert_eq!(expected_init_set.len(), flattened_inits_and_teardowns.len());
 
     if flattened_inits_and_teardowns.len() != expected_init_set.len() {
-        for (idx, (address, (teardown_ts, teardown_value))) in
-            flattened_inits_and_teardowns.iter().enumerate()
-        {
+        for (address, (teardown_ts, teardown_value)) in flattened_inits_and_teardowns.iter() {
             let mut init_set_el = None;
-            for (i, (is_reg, addr, ts, init_value)) in expected_init_set.iter().enumerate() {
+            for (is_reg, addr, ts, init_value) in expected_init_set.iter() {
                 if *addr == *address {
                     init_set_el = Some((*is_reg, *addr, *ts, *init_value));
                 }
             }
-            let Some(init_set_el) = init_set_el else {
+            let Some(_init_set_el) = init_set_el else {
                 panic!(
                     "No expected init set element for address {} of flattened inits or teardowns",
                     *address
@@ -93,8 +90,7 @@ pub fn validate_inits_and_teardowns(
             };
 
             let mut teardown_set_el = None;
-            for (i, (is_reg, addr, ts, teardown_value)) in expected_teardown_set.iter().enumerate()
-            {
+            for (is_reg, addr, ts, teardown_value) in expected_teardown_set.iter() {
                 if *addr == *address {
                     teardown_set_el = Some((*is_reg, *addr, *ts, *teardown_value));
                 }
@@ -118,11 +114,9 @@ pub fn validate_inits_and_teardowns(
 
     for (idx, (is_register, addr, ts, init_value)) in expected_init_set.iter().enumerate() {
         assert!(
-            *is_register == false,
+            !*is_register,
             "found an unexpected init for register {} with value {} at timestamp {}",
-            *addr,
-            *init_value,
-            *ts
+            *addr, *init_value, *ts
         );
         assert_eq!(
             *ts, 0,
@@ -142,11 +136,9 @@ pub fn validate_inits_and_teardowns(
     }
     for (idx, (is_register, addr, ts, value)) in expected_teardown_set.iter().enumerate() {
         assert!(
-            *is_register == false,
+            !*is_register,
             "found an unexpected teardown for register {} with value {} at timestamp {}",
-            *addr,
-            *value,
-            *ts
+            *addr, *value, *ts
         );
         assert!(
             *ts > INITIAL_TIMESTAMP,

@@ -42,7 +42,7 @@ where
     A: Allocator + Clone,
 {
     full_trace: FullTrace<A, N>,
-    memory_trace: MemoryOnlyWitnessEvaluationDataForExecutionFamily<N, A>,
+    _memory_trace: MemoryOnlyWitnessEvaluationDataForExecutionFamily<N, A>,
 }
 
 impl<O: Oracle<Mersenne31Field>>
@@ -90,20 +90,20 @@ impl<O: Oracle<Mersenne31Field>>
         ensure_memory_trace_consistency(&memory_trace, &full_trace);
 
         parse_state_permutation_elements_from_full_trace(
-            &circuit,
+            circuit,
             &full_trace,
             write_sets.write_set_mut(),
             read_sets.read_set_mut(),
         );
         parse_shuffle_ram_accesses_from_full_trace(
-            &circuit,
+            circuit,
             &full_trace,
             write_sets.memory_write_set_mut(),
             read_sets.memory_read_set_mut(),
         );
 
         let is_satisfied = check_satisfied(
-            &circuit,
+            circuit,
             &full_trace.exec_trace,
             full_trace.num_witness_columns,
         );
@@ -111,7 +111,7 @@ impl<O: Oracle<Mersenne31Field>>
 
         Self {
             full_trace,
-            memory_trace,
+            _memory_trace: memory_trace,
         }
     }
 

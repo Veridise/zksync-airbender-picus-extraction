@@ -122,7 +122,7 @@ pub fn make_preprocessing_data(text_section: &[u32]) -> PreprocessingData {
     };
 
     process_binary_into_separate_tables_ext::<Mersenne31Field, true, Global>(
-        &text_section,
+        text_section,
         &opcodes,
         1 << 20,
         &[

@@ -5,6 +5,7 @@
 mod afl;
 pub mod prover;
 pub mod rv32im;
+mod utils;
 pub mod witgen;
 
 pub fn setup_logging() {

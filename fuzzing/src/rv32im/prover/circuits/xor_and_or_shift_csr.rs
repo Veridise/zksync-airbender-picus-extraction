@@ -1,6 +1,3 @@
-use std::mem::MaybeUninit;
-
-use prover::common_constants;
 use prover::common_constants::BLAKE2S_DELEGATION_CSR_REGISTER;
 use prover::common_constants::KECCAK_SPECIAL5_CSR_REGISTER;
 use prover::common_constants::SHIFT_BINARY_CSR_CIRCUIT_FAMILY_IDX;
@@ -22,27 +19,21 @@ use prover::risc_v_simulator::machine_mode_only_unrolled::NonMemoryOpcodeTracing
 use prover::tests::unrolled::shift_binop_csrrw;
 use prover::unrolled::NonMemoryCircuitOracle;
 use prover::SimpleWitnessProxy;
-use riscv_transpiler::vm::DelegationsAndFamiliesCounters;
-use riscv_transpiler::vm::SimpleSnapshotter;
-use riscv_transpiler::vm::SimpleTape;
-use riscv_transpiler::vm::State;
 use shift_binary_csr_verifier::verify_with_configuration;
 use verifier_common::proof_flattener::flatten_query;
 use verifier_common::proof_flattener::flatten_unrolled_circuits_proof_for_skeleton;
 use verifier_common::DefaultLeafInclusionVerifier;
-use verifier_common::ProofPublicInputs;
 
 use crate::rv32im::prover::accumulators::Accumulators;
+use crate::rv32im::prover::circuits::helpers::validator_outputs;
 use crate::rv32im::prover::circuits::CircuitProver;
 use crate::rv32im::prover::circuits::NonMemoryCircuitProver;
 use crate::rv32im::prover::circuits::ProofInputs;
-use crate::rv32im::prover::factories::PreprocessingData;
 use crate::rv32im::prover::sets::ReadSets;
 use crate::rv32im::prover::sets::WriteSets;
 use crate::rv32im::prover::PreparedExecution;
 use crate::rv32im::prover::Prover;
 use crate::rv32im::prover::TRACE_LEN_LOG2;
-use crate::rv32im::types::CountersT;
 use crate::rv32im::vm::VMSnapshot;
 
 use prover::cs::machine::ops::unrolled::shift_binary_csr::*;
@@ -81,11 +72,11 @@ impl XorAndOrShiftCsrCircuit {
         .spawn(move || {
             set_iterator(oracle_data.into_iter());
 
-            #[allow(invalid_value)]
+            let (mut proof_state_dst, mut proof_input_dst) = validator_outputs();
             unsafe {
                 verify_with_configuration::<ThreadLocalBasedSource, DefaultLeafInclusionVerifier>(
-                    &mut MaybeUninit::uninit().assume_init(),
-                    &mut ProofPublicInputs::uninit(),
+                    &mut proof_state_dst,
+                    &mut proof_input_dst,
                 )
             };
         })

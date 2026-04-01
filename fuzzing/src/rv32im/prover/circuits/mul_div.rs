@@ -1,5 +1,3 @@
-use std::mem::MaybeUninit;
-
 use mul_div_unsigned_verifier::verify_with_configuration;
 use prover::common_constants::MUL_DIV_CIRCUIT_FAMILY_IDX;
 use prover::cs::machine::ops::unrolled::compile_unrolled_circuit_state_transition;
@@ -20,9 +18,9 @@ use prover::SimpleWitnessProxy;
 use verifier_common::proof_flattener::flatten_query;
 use verifier_common::proof_flattener::flatten_unrolled_circuits_proof_for_skeleton;
 use verifier_common::DefaultLeafInclusionVerifier;
-use verifier_common::ProofPublicInputs;
 
 use crate::rv32im::prover::accumulators::Accumulators;
+use crate::rv32im::prover::circuits::helpers::validator_outputs;
 use crate::rv32im::prover::circuits::CircuitProver as _;
 use crate::rv32im::prover::circuits::NonMemoryCircuitProver;
 use crate::rv32im::prover::circuits::ProofInputs;
@@ -53,11 +51,11 @@ impl MulDivCircuit {
         .spawn(move || {
             set_iterator(oracle_data.into_iter());
 
-            #[allow(invalid_value)]
+             let (mut proof_state_dst, mut proof_input_dst) = validator_outputs();
             unsafe {
                 verify_with_configuration::<ThreadLocalBasedSource, DefaultLeafInclusionVerifier>(
-                    &mut MaybeUninit::uninit().assume_init(),
-                    &mut ProofPublicInputs::uninit(),
+                    &mut proof_state_dst,
+                    &mut proof_input_dst,
                 )
             };
         })

@@ -51,7 +51,6 @@ pub fn preprocess_bytecode<F: PrimeField, A: GoodAllocator>(
 
     for (i, opcode) in binary.iter().copied().enumerate() {
         let pc = i * 4;
-        eprintln!("Preprocessing bytecode at PC = 0x{pc:08x}");
         let Ok(data) = family.define_decoder_subspace(opcode) else {
             continue;
         };

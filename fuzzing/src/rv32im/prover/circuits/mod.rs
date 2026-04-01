@@ -1,30 +1,18 @@
-use std::alloc::Allocator;
 use std::alloc::Global;
 
-use prover::check_satisfied;
 use prover::common_constants;
 use prover::cs::cs::oracle::ExecutorFamilyDecoderData;
 use prover::cs::cs::oracle::Oracle;
-use prover::cs::devices::aux_data;
 use prover::cs::machine::ops::unrolled::materialize_flattened_decoder_table;
-use prover::cs::machine::ops::unrolled::DecoderTableEntry;
 use prover::cs::one_row_compiler::CompiledCircuitArtifact;
 use prover::cs::tables::TableDriver;
 use prover::definitions::AuxArgumentsBoundaryValues;
 use prover::field::Mersenne31Field;
 use prover::merkle_trees::DefaultTreeConstructor;
 use prover::prover_stages::unrolled_prover::UnrolledModeProof;
-use prover::risc_v_simulator::machine_mode_only_unrolled::MemoryOpcodeTracingDataWithTimestamp;
 use prover::risc_v_simulator::machine_mode_only_unrolled::NonMemoryOpcodeTracingDataWithTimestamp;
-use prover::tests::unrolled::ensure_memory_trace_consistency;
-use prover::tests::unrolled::parse_shuffle_ram_accesses_from_full_trace;
-use prover::tests::unrolled::parse_state_permutation_elements_from_full_trace;
-use prover::unrolled::evaluate_memory_witness_for_executor_family;
-use prover::unrolled::evaluate_witness_for_executor_family;
-use prover::unrolled::MemoryCircuitOracle;
 use prover::unrolled::NonMemoryCircuitOracle;
 use prover::worker::Worker;
-use prover::MemoryOnlyWitnessEvaluationDataForExecutionFamily;
 use prover::SimpleWitnessProxy;
 use prover::WitnessEvaluationDataForExecutionFamily;
 use prover::DEFAULT_TRACE_PADDING_MULTIPLE;
@@ -34,7 +22,6 @@ use riscv_transpiler::vm::Counters as _;
 use riscv_transpiler::vm::ReplayBuffer as _;
 use riscv_transpiler::vm::SimpleTape;
 use riscv_transpiler::vm::State;
-use riscv_transpiler::witness::MemDestinationHolder;
 use riscv_transpiler::witness::NonMemDestinationHolder;
 use riscv_transpiler::witness::WitnessTracer;
 
@@ -47,13 +34,13 @@ use crate::rv32im::prover::sets::WriteSets;
 use crate::rv32im::prover::PreparedExecution;
 use crate::rv32im::prover::Prover;
 use crate::rv32im::prover::ProvingPayload;
-use crate::rv32im::prover::NUM_CYCLES_PER_CHUNK;
 use crate::rv32im::types::CountersT;
 use crate::rv32im::types::Snapshotter;
 use crate::rv32im::vm::VMSnapshot;
 
 pub mod add_sub_lui_auipc_mop;
 pub mod blake_delegation;
+mod helpers;
 pub mod inits_and_teardowns;
 pub mod jump_branch_slt;
 pub mod keccak_delegation;
@@ -121,6 +108,16 @@ impl<T> ProofInputs<T> {
     }
 }
 
+impl<T: PartialEq> PartialEq for ProofInputs<T> {
+    fn eq(&self, other: &Self) -> bool {
+        // We don't check equality of circuits because we don't (currently) mutate it.
+        self.family_idx == other.family_idx
+            && self.decoder_table_data == other.decoder_table_data
+            && self.witness_gen_data == other.witness_gen_data
+            && self.buffer == other.buffer
+    }
+}
+
 pub(crate) trait CircuitProver<const CIRCUIT_FAMILY_IDX: u8> {
     type BufferElt: serde::Serialize + for<'de> serde::Deserialize<'de>;
     type Tracer<'t>: WitnessTracer;
@@ -172,6 +169,7 @@ pub(crate) trait CircuitProver<const CIRCUIT_FAMILY_IDX: u8> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     /// Pass None to table_driver if the proof inputs come from deserialized data.
     fn generate_proof(
         &self,
@@ -210,6 +208,7 @@ pub(crate) trait CircuitProver<const CIRCUIT_FAMILY_IDX: u8> {
         proof
     }
 
+    #[allow(clippy::too_many_arguments)]
     /// Pass None to table_driver if the proof inputs come from deserialized data.
     fn check_proof(
         &self,
@@ -253,6 +252,7 @@ pub(crate) trait CircuitProver<const CIRCUIT_FAMILY_IDX: u8> {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn prove(
         &self,
         snapshot: VMSnapshot,

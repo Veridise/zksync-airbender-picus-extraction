@@ -9,8 +9,6 @@ use std::path::PathBuf;
 use prover::risc_v_simulator::machine_mode_only_unrolled::MemoryOpcodeTracingDataWithTimestamp;
 use prover::risc_v_simulator::machine_mode_only_unrolled::NonMemoryOpcodeTracingDataWithTimestamp;
 use prover::worker::Worker;
-use rand::prelude::IndexedRandom;
-use rand::rngs::StdRng;
 use sha2::Digest;
 use sha2::Sha256;
 
@@ -221,7 +219,7 @@ impl std::fmt::Display for SeedCase {
     }
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
 pub enum StoredProofInputs {
     AddSubLuiAuipcMop(ProofInputs<NonMemoryOpcodeTracingDataWithTimestamp>),
     JumpBranchSlt(ProofInputs<NonMemoryOpcodeTracingDataWithTimestamp>),

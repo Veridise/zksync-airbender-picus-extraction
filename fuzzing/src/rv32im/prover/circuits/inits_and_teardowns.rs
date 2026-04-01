@@ -1,48 +1,22 @@
 use std::alloc::Global;
 
 use prover::check_satisfied;
-use prover::common_constants;
-use prover::common_constants::ADD_SUB_LUI_AUIPC_MOP_CIRCUIT_FAMILY_IDX;
-use prover::cs::machine::ops::unrolled::compile_unrolled_circuit_state_transition;
-use prover::cs::machine::ops::unrolled::inits_and_teardowns;
-use prover::cs::machine::ops::unrolled::materialize_flattened_decoder_table;
 use prover::cs::one_row_compiler::OneRowCompiler;
 use prover::cs::tables::TableDriver;
 use prover::fft::LdePrecomputations;
 use prover::fft::Twiddles;
 use prover::field::Field as _;
 use prover::field::Mersenne31Field;
-use prover::field::Mersenne31Quartic;
 use prover::merkle_trees::DefaultTreeConstructor;
 use prover::prover_stages::SetupPrecomputations;
-use prover::risc_v_simulator::machine_mode_only_unrolled::NonMemoryOpcodeTracingDataWithTimestamp;
-use prover::tests::unrolled::add_sub_lui_auipc_mod;
-use prover::tests::unrolled::ensure_memory_trace_consistency;
-use prover::tests::unrolled::parse_shuffle_ram_accesses_from_full_trace;
-use prover::tests::unrolled::parse_state_permutation_elements_from_full_trace;
 use prover::unrolled::evaluate_init_and_teardown_memory_witness;
 use prover::unrolled::evaluate_init_and_teardown_witness;
-use prover::unrolled::evaluate_memory_witness_for_executor_family;
-use prover::unrolled::evaluate_witness_for_executor_family;
-use prover::unrolled::NonMemoryCircuitOracle;
 use prover::ExecutorFamilyWitnessEvaluationAuxData;
 use prover::ShuffleRamSetupAndTeardown;
 use prover::WitnessEvaluationData;
 use prover::WitnessEvaluationDataForExecutionFamily;
-use riscv_transpiler::replayer::ReplayerRam;
-use riscv_transpiler::replayer::ReplayerVM;
-use riscv_transpiler::vm::Counters as _;
-use riscv_transpiler::vm::DelegationsAndFamiliesCounters;
-use riscv_transpiler::vm::ReplayBuffer as _;
-use riscv_transpiler::vm::SimpleSnapshotter;
-use riscv_transpiler::vm::SimpleTape;
-use riscv_transpiler::vm::State;
-use riscv_transpiler::witness::NonMemDestinationHolder;
 
 use crate::rv32im::prover::accumulators::Accumulators;
-use crate::rv32im::prover::factories::PreprocessingData;
-use crate::rv32im::prover::sets::ReadSets;
-use crate::rv32im::prover::sets::WriteSets;
 use crate::rv32im::prover::Prover;
 use crate::rv32im::prover::LDE_FACTOR;
 use crate::rv32im::prover::NUM_CYCLES_PER_CHUNK;
@@ -50,20 +24,11 @@ use crate::rv32im::prover::NUM_INIT_AND_TEARDOWN_SETS;
 use crate::rv32im::prover::TRACE_LEN;
 use crate::rv32im::prover::TRACE_LEN_LOG2;
 use crate::rv32im::prover::TREE_CAP_SIZE;
-use crate::rv32im::types::CountersT;
 
 impl Prover {
     pub fn prove_init_and_teardowns(
         &self,
         accumulators: &mut Accumulators,
-        snapshotter: &SimpleSnapshotter<CountersT, { common_constants::ROM_SECOND_WORD_BITS }>,
-        counters: &DelegationsAndFamiliesCounters,
-        tape: &SimpleTape,
-        cycles_bound: usize,
-        expected_final_state: State<CountersT>,
-        read_sets: &mut ReadSets,
-        write_sets: &mut WriteSets,
-        preprocessing_data: &PreprocessingData,
         inits_and_teardowns: &[ShuffleRamSetupAndTeardown],
     ) {
         println!("Will try to prove memory inits and teardowns circuit");

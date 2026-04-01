@@ -1,5 +1,3 @@
-use std::cell::RefCell;
-use std::sync::Arc;
 use std::sync::RwLock;
 
 use prover::cs::cs::oracle::Oracle;

@@ -34,13 +34,8 @@ impl ReadSets {
 
         let mut memory_read_set = BTreeSet::new();
 
-        for i in 0..32 {
-            memory_read_set.insert((
-                true,
-                i as u32,
-                register_final_state[i].last_access_timestamp,
-                register_final_state[i].current_value,
-            ));
+        for (i, reg) in register_final_state.iter().enumerate() {
+            memory_read_set.insert((true, i as u32, reg.last_access_timestamp, reg.current_value));
         }
         Self {
             read_set,
