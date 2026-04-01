@@ -233,7 +233,7 @@ impl Fuzzer {
         Ok(())
     }
 
-    /// Runs one fuzz iteration: choose a seed, mutate it, attempt proving, and classify the result.
+    /// Runs one fuzz iteration: given a mutated seed, attempt proving, and classify the result.
     fn run_one_iteration(&self, mutated: MutatedInput) -> ExecutionOutcome {
         match self.registry.prove(&mutated.mutated_input) {
             ProverAttempt::Crash => {
