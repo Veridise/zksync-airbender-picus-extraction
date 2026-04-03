@@ -11,11 +11,6 @@ use crate::tables::TableDriver;
 use crate::types::Boolean;
 use crate::types::Num;
 use crate::types::Register;
-use crate::{
-    constraint::*,
-    tables::TableDriver,
-    types::{Boolean, Num},
-};
 use core::ops::{Add, Mul, Sub};
 use field::PrimeField;
 use std::collections::HashMap;
@@ -166,7 +161,7 @@ pub struct PicusExtractionMetadata<F: PrimeField> {
     pub parallel_constraints: Vec<PicusStructuredConstraint<F>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PicusExpr<F: PrimeField> {
     Variable(Variable),
     Constant(F),
@@ -248,7 +243,7 @@ impl<F: PrimeField> Mul for PicusExpr<F> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PicusStructuredConstraint<F: PrimeField> {
     Eq {
         lhs: PicusExpr<F>,

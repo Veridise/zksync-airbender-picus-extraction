@@ -91,6 +91,7 @@
                 "llzk_backend"
               ];
               preBuild = createFileCheckSymlink;
+              LLZK_SYS_10_PREFIX = "${pkgs.llzk}";
             }
             // pkgs.llzkSharedEnvironment.env
             // pkgs.llzkSharedEnvironment.pkgSettings
@@ -107,6 +108,7 @@
                 ## Bail out of pipes where any command fails
                 set -uo pipefail
                 ${createFileCheckSymlink}
+                export LLZK_SYS_10_PREFIX="${pkgs.llzk}"
                 echo "Welcome to the airbender-to-llzk devshell!"
 
                 # set up pre-commit
