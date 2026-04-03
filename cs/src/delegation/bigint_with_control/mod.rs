@@ -39,9 +39,47 @@ pub fn materialize_tables_into_cs<F: PrimeField, CS: Circuit<F>>(cs: &mut CS) {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct BigintDelegationPicusMetadata {
+    pub a_words: Vec<[Variable; 2]>,
+    pub b_words: Vec<[Variable; 2]>,
+    pub control_mask: [Variable; REGISTER_SIZE],
+    pub output_state: Vec<[Variable; 2]>,
+    pub x12_write_vars: [Variable; REGISTER_SIZE],
+}
+
+pub fn define_u256_ops_extended_control_delegation_circuit_with_metadata<
+    F: PrimeField,
+    CS: Circuit<F>,
+>(
+    cs: &mut CS,
+) -> (
+    Vec<[Variable; 2]>,
+    [Variable; REGISTER_SIZE],
+    BigintDelegationPicusMetadata,
+) {
+    let (output_state, x12_write_vars, metadata) =
+        define_u256_ops_extended_control_delegation_circuit_inner(cs);
+    (output_state, x12_write_vars, metadata)
+}
+
 pub fn define_u256_ops_extended_control_delegation_circuit<F: PrimeField, CS: Circuit<F>>(
     cs: &mut CS,
 ) -> (Vec<[Variable; 2]>, [Variable; REGISTER_SIZE]) {
+    let (output_state, x12_write_vars, _) = define_u256_ops_extended_control_delegation_circuit_inner(cs);
+    (output_state, x12_write_vars)
+}
+
+fn define_u256_ops_extended_control_delegation_circuit_inner<
+    F: PrimeField,
+    CS: Circuit<F>,
+>(
+    cs: &mut CS,
+) -> (
+    Vec<[Variable; 2]>,
+    [Variable; REGISTER_SIZE],
+    BigintDelegationPicusMetadata,
+) {
     // add tables
     materialize_tables_into_cs(cs);
 
@@ -132,6 +170,10 @@ pub fn define_u256_ops_extended_control_delegation_circuit<F: PrimeField, CS: Ci
 
         read_value
     };
+
+    let a_words_for_metadata = a_words.clone();
+    let b_words_for_metadata = b_words.clone();
+    let control_mask_for_metadata = control_mask;
 
     assert_eq!(a_words.len(), 8);
     assert_eq!(b_words.len(), 8);
@@ -829,16 +871,45 @@ pub fn define_u256_ops_extended_control_delegation_circuit<F: PrimeField, CS: Ci
         }
     }
 
-    (output_placeholder_state, x12_write_vars)
+    let metadata = BigintDelegationPicusMetadata {
+        a_words: a_words_for_metadata,
+        b_words: b_words_for_metadata,
+        control_mask: control_mask_for_metadata,
+        output_state: output_placeholder_state.clone(),
+        x12_write_vars,
+    };
+
+    (output_placeholder_state, x12_write_vars, metadata)
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
     use crate::cs::cs_reference::BasicAssembly;
-    use crate::one_row_compiler::OneRowCompiler;
+    use crate::one_row_compiler::{CompiledCircuitArtifact, OneRowCompiler, ProtectedConstraintSnapshot};
     use crate::utils::serialize_to_file;
     use field::Mersenne31Field;
+
+    fn assert_all_protected_constraints_are_present(
+        artifact: &CompiledCircuitArtifact<Mersenne31Field>,
+        protected: &ProtectedConstraintSnapshot<Mersenne31Field>,
+    ) {
+        for constraint in protected.degree_1_constraints.iter() {
+            assert!(
+                artifact.degree_1_constraints.contains(constraint),
+                "missing protected degree-1 constraint: {:?}",
+                constraint
+            );
+        }
+
+        for constraint in protected.degree_2_constraints.iter() {
+            assert!(
+                artifact.degree_2_constraints.contains(constraint),
+                "missing protected degree-2 constraint: {:?}",
+                constraint
+            );
+        }
+    }
 
     #[test]
     fn compile_u256_ops_extended_control() {
@@ -849,6 +920,18 @@ mod test {
         let compiled = compiler.compile_to_evaluate_delegations(circuit_output, 20);
 
         serialize_to_file(&compiled, "bigint_delegation_layout.json");
+    }
+
+    #[test]
+    fn bigint_delegation_keeps_all_protected_constraints() {
+        let mut cs: BasicAssembly<Mersenne31Field> = BasicAssembly::<Mersenne31Field>::new();
+        define_u256_ops_extended_control_delegation_circuit(&mut cs);
+        let (circuit_output, _) = cs.finalize();
+
+        let (compiled, protected) = OneRowCompiler::default()
+            .compile_to_evaluate_delegations_and_protected_constraints(circuit_output, 20);
+
+        assert_all_protected_constraints_are_present(&compiled, &protected);
     }
 
     #[test]
