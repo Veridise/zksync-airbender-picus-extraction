@@ -32,7 +32,7 @@ mod accumulators;
 mod checks;
 pub(crate) mod circuits;
 mod factories;
-mod sets;
+pub(crate) mod sets;
 
 use accumulators::Accumulators;
 use checks::validate_counters;

@@ -13,12 +13,22 @@ pub enum ExecutionOutcome {
     Interesting(Box<BugReport>),
 }
 
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BugType {
     // Completeness
     ProofGenerationBug,
     // Soundness
     ValidationBug,
+}
+
+impl BugType {
+    #[inline]
+    pub fn classify(r: Result<(), ()>) -> Self {
+        match r {
+            Ok(()) => BugType::ValidationBug,
+            Err(()) => BugType::ProofGenerationBug,
+        }
+    }
 }
 
 impl std::fmt::Display for BugType {
@@ -106,9 +116,23 @@ impl CrashArtifact {
         })?;
         fs::write(path, payload)
     }
+
+    /// Reads and deserializes a persisted crash artifact.
+    pub fn read(path: &Path) -> io::Result<Self> {
+        let payload = fs::read(path)?;
+        serde_json::from_slice(&payload).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "failed to deserialize crash artifact `{}`: {err}",
+                    path.display()
+                ),
+            )
+        })
+    }
 }
 
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CrashStep {
     Prover,
     Validator,

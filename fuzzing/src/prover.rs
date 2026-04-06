@@ -1,9 +1,12 @@
+use anyhow::Context;
 use std::borrow::Cow;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
 
+use clap::Args;
 use clap::Parser;
+use clap::Subcommand;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 
@@ -12,6 +15,7 @@ mod crashes;
 mod mutations;
 mod seeds;
 mod state;
+mod triage;
 
 use circuits::CircuitKind;
 use circuits::CircuitRegistry;
@@ -25,16 +29,31 @@ use crate::prover::crashes::BugType;
 use crate::prover::mutations::MutatedInput;
 use crate::prover::mutations::MutatorRegistry;
 use crate::prover::seeds::SeedCase;
+pub use crate::prover::triage::TriageCli;
 
-/// Command-line arguments for the prover fuzzer scaffold.
+/// Command-line arguments for the prover fuzzer scaffold and crash triage.
 #[derive(Debug, Parser)]
 pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<Command>,
+    #[command(flatten)]
+    pub fuzz: FuzzCli,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    Triage(TriageCli),
+}
+
+/// Command-line arguments for the prover fuzzing loop.
+#[derive(Debug, Clone, Args, Default)]
+pub struct FuzzCli {
     /// Directory containing `.bin`/`.text` seed program pairs.
     #[arg(short = 'i', long)]
-    pub input_dir: PathBuf,
+    pub input_dir: Option<PathBuf>,
     /// Directory used to store fuzzer state such as cache entries and crashes.
     #[arg(short = 'o', long)]
-    pub output_dir: PathBuf,
+    pub output_dir: Option<PathBuf>,
     /// Number of fuzz-loop iterations to execute.
     #[arg(long)]
     pub iterations: Option<usize>,
@@ -85,8 +104,12 @@ pub struct SeedCaseRef {
 
 /// Runs the prover fuzzer scaffold from parsed CLI arguments.
 pub fn run(cli: Cli) -> anyhow::Result<()> {
-    let skip_validation = cli.skip_validation;
-    let config = cli.into();
+    if let Some(Command::Triage(triage)) = cli.command {
+        return triage::run(triage);
+    }
+
+    let skip_validation = cli.fuzz.skip_validation;
+    let config = cli.fuzz.try_into()?;
     let mut fuzzer = Fuzzer::new(config);
 
     fuzzer.initialize()?;
@@ -107,17 +130,26 @@ fn current_timestamp() -> u64 {
     }
 }
 
-impl From<Cli> for FuzzerConfig {
+impl TryFrom<FuzzCli> for FuzzerConfig {
+    type Error = anyhow::Error;
+
     /// Expands CLI arguments into the runtime configuration shape used by the fuzzer.
-    fn from(cli: Cli) -> Self {
-        FuzzerConfig {
-            cache_dir: cli.output_dir.join("cache"),
-            crash_dir: cli.output_dir.join("crashes"),
-            input_dir: cli.input_dir,
-            output_dir: cli.output_dir,
+    fn try_from(cli: FuzzCli) -> Result<Self, Self::Error> {
+        let input_dir = cli
+            .input_dir
+            .context("`--input-dir` is required unless running `triage`")?;
+        let output_dir = cli
+            .output_dir
+            .context("`--output-dir` is required unless running `triage`")?;
+
+        Ok(FuzzerConfig {
+            cache_dir: output_dir.join("cache"),
+            crash_dir: output_dir.join("crashes"),
+            input_dir,
+            output_dir,
             iterations: cli.iterations,
             seed: cli.seed.unwrap_or_else(current_timestamp),
-        }
+        })
     }
 }
 
@@ -259,17 +291,35 @@ fn mutate_until_different(
     m: &MutatorRegistry,
     rng: &mut StdRng,
 ) -> Option<MutatedInput> {
+    use similar::ChangeTag;
+    use similar::TextDiff;
     const MAX_ATTEMPS: usize = 1000;
     let mut attemps = 0;
 
     let mut mutated_input;
     loop {
+        log::debug!("[mutate_until_different] attempt #{attemps}");
         if attemps >= MAX_ATTEMPS {
             return None;
         }
         attemps += 1;
         mutated_input = m.apply_mutations(seed_case, rng);
         if mutated_input != seed_case {
+            log::debug!("[mutate_until_different]    produced a different input");
+
+            let old = format!("{:#?}", seed_case.base_input);
+            let new = format!("{:#?}", mutated_input.mutated_input);
+            let diff = TextDiff::from_lines(&old, &new);
+
+            for change in diff.iter_all_changes() {
+                let sign = match change.tag() {
+                    ChangeTag::Delete => "-",
+                    ChangeTag::Insert => "+",
+                    ChangeTag::Equal => continue,
+                };
+                log::debug!("{}{}", sign, change);
+            }
+
             break;
         }
     }

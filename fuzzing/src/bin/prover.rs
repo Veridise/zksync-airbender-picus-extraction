@@ -10,7 +10,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(cli) {
         Ok(_) => {
-            println!("Fuzzing finished!");
+            println!("Command finished!");
             ExitCode::SUCCESS
         }
         Err(err) => {

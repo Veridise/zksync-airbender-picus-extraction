@@ -9,7 +9,10 @@ use prover::cs::tables::TableDriver;
 use prover::definitions::AuxArgumentsBoundaryValues;
 use prover::field::Mersenne31Field;
 use prover::merkle_trees::DefaultTreeConstructor;
+use prover::merkle_trees::MerkleTreeCapVarLength;
+use prover::merkle_trees::MerkleTreeConstructor;
 use prover::prover_stages::unrolled_prover::UnrolledModeProof;
+use prover::prover_stages::ProverData;
 use prover::risc_v_simulator::machine_mode_only_unrolled::NonMemoryOpcodeTracingDataWithTimestamp;
 use prover::unrolled::NonMemoryCircuitOracle;
 use prover::worker::Worker;
@@ -171,7 +174,7 @@ pub(crate) trait CircuitProver<const CIRCUIT_FAMILY_IDX: u8> {
 
     #[allow(clippy::too_many_arguments)]
     /// Pass None to table_driver if the proof inputs come from deserialized data.
-    fn generate_proof(
+    fn generate_proof_with_data(
         &self,
         inputs: &ProofInputs<Self::BufferElt>,
         prover: &Prover,
@@ -180,7 +183,10 @@ pub(crate) trait CircuitProver<const CIRCUIT_FAMILY_IDX: u8> {
         read_sets: &mut ReadSets,
         write_sets: &mut WriteSets,
         table_driver: Option<&TableDriver<Mersenne31Field>>,
-    ) -> UnrolledModeProof {
+    ) -> (
+        ProverData<DEFAULT_TRACE_PADDING_MULTIPLE, Global, DefaultTreeConstructor>,
+        UnrolledModeProof,
+    ) {
         let mut local_table_driver = TableDriver::new();
         let table_driver = match table_driver {
             Some(table_driver) => table_driver,
@@ -197,14 +203,37 @@ pub(crate) trait CircuitProver<const CIRCUIT_FAMILY_IDX: u8> {
         );
         let aux_data = self.create_aux_data(&traces);
 
-        let (_, proof) = prover.run_prover2(ProvingPayload::<_, DefaultTreeConstructor, _>::new(
+        prover.run_prover2(ProvingPayload::<_, DefaultTreeConstructor, _>::new(
             &inputs.circuit,
             traces.take_full_trace(),
             table_driver,
             &inputs.decoder_table_data,
             &aux_data,
             worker,
-        ));
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    /// Pass None to table_driver if the proof inputs come from deserialized data.
+    fn generate_proof(
+        &self,
+        inputs: &ProofInputs<Self::BufferElt>,
+        prover: &Prover,
+        worker: &Worker,
+        oracle: &Self::Oracle<'_>,
+        read_sets: &mut ReadSets,
+        write_sets: &mut WriteSets,
+        table_driver: Option<&TableDriver<Mersenne31Field>>,
+    ) -> UnrolledModeProof {
+        let (_, proof) = self.generate_proof_with_data(
+            inputs,
+            prover,
+            worker,
+            oracle,
+            read_sets,
+            write_sets,
+            table_driver,
+        );
         proof
     }
 

@@ -28,6 +28,7 @@ log = "0.4"
 serde = { workspace = true, features = ["derive"] }
 serde_json = "*"
 anyhow = "1"
+similar = "2"
 
 # witgen dependencies
 prover = { workspace = true, features = ["prover"] }

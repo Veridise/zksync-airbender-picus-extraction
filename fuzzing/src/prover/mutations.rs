@@ -52,6 +52,12 @@ pub struct MutationRecord {
     summary: String,
 }
 
+impl MutationRecord {
+    pub fn summary(&self) -> &str {
+        &self.summary
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MutatedInput {
     pub original: SeedCaseRef,

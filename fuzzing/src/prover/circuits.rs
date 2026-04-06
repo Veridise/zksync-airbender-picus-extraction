@@ -165,7 +165,7 @@ impl CircuitRegistry {
     }
 
     pub fn prove(&self, input: &StoredProofInputs) -> ProverAttempt {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match input {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match input {
             StoredProofInputs::AddSubLuiAuipcMop(inputs) => {
                 ProverAttempt::Success(self.prove_impl(AddSubLuiAuipcMop, inputs))
             }
@@ -187,12 +187,8 @@ impl CircuitRegistry {
             StoredProofInputs::InitsAndTeardowns(_) => todo!(),
             StoredProofInputs::BlakeDelegation(_) => todo!(),
             StoredProofInputs::KeccakDelegation(_) => todo!(),
-        }));
-
-        match result {
-            Ok(attempt) => attempt,
-            Err(_) => ProverAttempt::Crash,
-        }
+        }))
+        .unwrap_or(ProverAttempt::Crash)
     }
 
     fn prove_impl<const N: u8, C: CircuitProver<N>>(
@@ -208,37 +204,27 @@ impl CircuitRegistry {
     }
 
     pub fn validate(&self, input: &StoredProofInputs, proof: &UnrolledModeProof) -> BugType {
-        match input {
+        BugType::classify(match input {
             StoredProofInputs::AddSubLuiAuipcMop(inputs) => {
-                classify(AddSubLuiAuipcMop::validate_proof(inputs, proof))
+                AddSubLuiAuipcMop::validate_proof(inputs, proof)
             }
             StoredProofInputs::XorAndOrShiftCsr(inputs) => {
-                classify(XorAndOrShiftCsrCircuit::validate_proof(inputs, proof))
+                XorAndOrShiftCsrCircuit::validate_proof(inputs, proof)
             }
-            StoredProofInputs::MulDiv(inputs) => {
-                classify(MulDivCircuit::validate_proof(inputs, proof))
-            }
+            StoredProofInputs::MulDiv(inputs) => MulDivCircuit::validate_proof(inputs, proof),
             StoredProofInputs::JumpBranchSlt(inputs) => {
-                classify(JumpBranchSltCircuit::validate_proof(inputs, proof))
+                JumpBranchSltCircuit::validate_proof(inputs, proof)
             }
             StoredProofInputs::LoadStore(inputs, _) => {
-                classify(LoadStoreWordCircuit::validate_proof(inputs, proof))
+                LoadStoreWordCircuit::validate_proof(inputs, proof)
             }
             StoredProofInputs::SubwordLoadStore(inputs, _) => {
-                classify(LoadStoreSubwordCircuit::validate_proof(inputs, proof))
+                LoadStoreSubwordCircuit::validate_proof(inputs, proof)
             }
             StoredProofInputs::InitsAndTeardowns(_) => todo!(),
             StoredProofInputs::BlakeDelegation(_) => todo!(),
             StoredProofInputs::KeccakDelegation(_) => todo!(),
-        }
-    }
-}
-
-#[inline]
-fn classify(r: Result<(), ()>) -> BugType {
-    match r {
-        Ok(()) => BugType::ValidationBug,
-        Err(()) => BugType::ProofGenerationBug,
+        })
     }
 }
 

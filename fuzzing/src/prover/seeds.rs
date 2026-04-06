@@ -164,7 +164,7 @@ impl CacheEntry {
         })
     }
 
-    fn load(path: &Path) -> io::Result<Self> {
+    pub(crate) fn load(path: &Path) -> io::Result<Self> {
         let contents = fs::read(path)?;
         serde_json::from_slice(&contents).map_err(|err| {
             io::Error::new(
@@ -249,6 +249,44 @@ impl StoredProofInputs {
             Self::KeccakDelegation(_) => CircuitKind::KeccakDelegation,
         }
     }
+}
+
+pub(crate) fn load_seed_case_from_cache(
+    cache_dir: &Path,
+    seed_program: &str,
+    circuit: CircuitKind,
+) -> io::Result<SeedCase> {
+    for entry in fs::read_dir(cache_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+
+        let cache_entry = CacheEntry::load(&entry.path())?;
+        if cache_entry.seed != seed_program {
+            continue;
+        }
+
+        if let Some(base_input) = cache_entry
+            .inputs
+            .into_iter()
+            .find(|input| input.circuit() == circuit)
+        {
+            return Ok(SeedCase {
+                seed_program: seed_program.to_owned(),
+                circuit,
+                base_input,
+            });
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!(
+            "no cached seed case found for seed `{seed_program}` and circuit `{}`",
+            circuit.slug()
+        ),
+    ))
 }
 
 pub fn expand_seed_cases(entries: impl IntoIterator<Item = CacheEntry>) -> Vec<SeedCase> {
