@@ -133,7 +133,7 @@ impl CircuitRegistry {
             CircuitKind::AddSubLuiAuipcMop => StoredProofInputs::AddSubLuiAuipcMop(
                 AddSubLuiAuipcMop.create_proof_input(snapshot, prepared, &mut table_driver),
             ),
-            CircuitKind::JumpBranchSlt => StoredProofInputs::MulDiv(
+            CircuitKind::JumpBranchSlt => StoredProofInputs::JumpBranchSlt(
                 JumpBranchSltCircuit.create_proof_input(snapshot, prepared, &mut table_driver),
             ),
             CircuitKind::XorAndOrShiftCsr => StoredProofInputs::XorAndOrShiftCsr(
