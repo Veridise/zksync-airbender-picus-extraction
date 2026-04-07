@@ -38,6 +38,7 @@ pub struct TriageCli {
 
 /// Runs offline crash triage against a persisted crash artifact and the cached base seed corpus.
 pub fn run(cli: TriageCli) -> anyhow::Result<()> {
+    log::info!("Triaging crash {}", cli.crash.display());
     // Triage is intentionally offline: load the recorded crash and recover the original
     // cached seed input so we can compare "base vs mutated" under the same replay path.
     let crash = CrashArtifact::read(&cli.crash)
@@ -54,9 +55,11 @@ pub fn run(cli: TriageCli) -> anyhow::Result<()> {
             crash.circuit.slug()
         )
     })?;
+    log::info!("Found crash seed: {} / {}", base.seed_program, base.circuit);
 
     let registry = CircuitRegistry::new();
     let stability_runs = cli.stability_runs.max(1);
+    log::info!("Number of runs per side: {stability_runs}");
     let report = triage_crash(&registry, &crash, &base, stability_runs);
 
     if cli.json {
@@ -77,16 +80,18 @@ fn triage_crash(
 ) -> TriageReport {
     // Replay both sides multiple times first. If either side is unstable under replay we do not
     // trust any later diff and classify the crash as inconclusive instead.
-    let base_trace = match stable_trace_for_input(registry, &base.base_input, stability_runs) {
-        Ok(trace) => trace,
-        Err(instability) => return TriageReport::inconclusive(base, crash, instability),
-    };
-    let mutated_trace = match stable_trace_for_input(registry, &crash.mutated_input, stability_runs)
-    {
-        Ok(trace) => trace,
-        Err(instability) => return TriageReport::inconclusive(base, crash, instability),
-    };
+    let base_trace =
+        match stable_trace_for_input(registry, &base.base_input, stability_runs, "seed") {
+            Ok(trace) => trace,
+            Err(instability) => return TriageReport::inconclusive(base, crash, instability),
+        };
+    let mutated_trace =
+        match stable_trace_for_input(registry, &crash.mutated_input, stability_runs, "mutated") {
+            Ok(trace) => trace,
+            Err(instability) => return TriageReport::inconclusive(base, crash, instability),
+        };
 
+    log::info!("Runs completed!");
     let first_diff = base_trace.diff(&mutated_trace);
     TriageReport::new(
         classify_verdict(crash.step, &first_diff),
@@ -103,12 +108,15 @@ fn stable_trace_for_input(
     registry: &CircuitRegistry,
     input: &StoredProofInputs,
     runs: usize,
+    descr: &str,
 ) -> Result<AnalysisTrace, CheckpointDiff> {
+    log::info!("Run 1 for {descr}...");
     // The triage comparison is only useful if replay is deterministic for a fixed input.
     // We therefore require every run of the same input to produce the exact same compact trace.
     let first = analyze_once(registry, input)
         .map_err(|err| CheckpointDiff::proof(format!("analysis replay failed: {err}")))?;
-    for _ in 1..runs {
+    for run in 1..runs {
+        log::info!("Run {run} for {descr}...");
         let next = analyze_once(registry, input)
             .map_err(|err| CheckpointDiff::proof(format!("analysis replay failed: {err}")))?;
         if next != first {

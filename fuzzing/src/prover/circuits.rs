@@ -40,6 +40,12 @@ pub enum CircuitKind {
     KeccakDelegation = SHIFT_BINARY_CSR_CIRCUIT_FAMILY_IDX | KECCAK_DELEGATION_KIND_MASK,
 }
 
+impl std::fmt::Display for CircuitKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.slug())
+    }
+}
+
 #[derive(Debug)]
 pub struct CircuitRegistry {
     circuits: Vec<CircuitKind>,

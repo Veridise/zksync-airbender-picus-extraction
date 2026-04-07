@@ -290,8 +290,10 @@ impl CircuitRegistry {
         F: Fn(&ProofInputs<C::BufferElt>, &UnrolledModeProof) -> Result<(), ()>,
     {
         let prover = Prover::new();
+        log::info!("Generating proof...");
         let semantics =
             cprover.prove_from_inputs_with_semantics(inputs.clone(), &prover, prover.worker());
+        log::info!("Validating proof...");
         let validator_outcome = BugType::classify(validate(inputs, semantics.proof()));
         AnalysisAttempt::Success {
             semantics,
