@@ -4,7 +4,11 @@ use crate::cs::utils::collapse_max_quadratic_constraint_into;
 use crate::cs::utils::mask_by_boolean_into_accumulator_constraint;
 use crate::cs::witness_placer::WitnessComputationalInteger;
 use crate::cs::witness_placer::WitnessPlacer;
-use crate::delegation::blake2_single_round::g_function;
+use crate::delegation::blake2_single_round::{
+    add_constraint_allow_explicit_linear_prevent_optimizations_with_picus_equality,
+    add_constraint_allow_explicit_linear_with_picus_equality, add_constraint_with_picus_equality,
+    add_variable_from_constraint_with_picus_equality, g_function, GFunctionIntermediateValues,
+};
 use crate::one_row_compiler::LookupInput;
 use crate::one_row_compiler::Variable;
 use crate::types::Boolean;
@@ -58,6 +62,145 @@ pub struct Blake2WithExtendedControlDelegationPicusMetadata {
     pub x12_write_vars: [Variable; 2],
 }
 
+fn blake2_chunked_word_to_picus_expr<F: PrimeField>(chunks: &[(usize, Variable)]) -> PicusExpr<F> {
+    let mut expr = PicusExpr::Constant(F::ZERO);
+    let mut shift = 0usize;
+    for (width, variable) in chunks.iter() {
+        expr = expr
+            + PicusExpr::Constant(F::from_u64_unchecked(1u64 << shift))
+                * PicusExpr::Variable(*variable);
+        shift += *width;
+    }
+
+    expr
+}
+
+fn begin_blake2_g_region<F: PrimeField, CS: Circuit<F>>(
+    cs: &mut CS,
+    name: impl Into<String>,
+    a: &[Constraint<F>; 2],
+    b: &[Vec<(usize, Variable)>; 2],
+    c: &[Constraint<F>; 2],
+    d: &[Vec<(usize, Variable)>; 2],
+    message: [[Variable; 2]; 2],
+) -> Option<PicusRegionHandle> {
+    let [x, y] = message;
+    let inputs = vec![
+        picus_expr_from_constraint(&a[0]),
+        picus_expr_from_constraint(&a[1]),
+        blake2_chunked_word_to_picus_expr(&b[0]),
+        blake2_chunked_word_to_picus_expr(&b[1]),
+        picus_expr_from_constraint(&c[0]),
+        picus_expr_from_constraint(&c[1]),
+        blake2_chunked_word_to_picus_expr(&d[0]),
+        blake2_chunked_word_to_picus_expr(&d[1]),
+        PicusExpr::Variable(x[0]),
+        PicusExpr::Variable(x[1]),
+        PicusExpr::Variable(y[0]),
+        PicusExpr::Variable(y[1]),
+    ];
+
+    cs.begin_picus_region(PicusRegionSpec::new(name).with_inputs(inputs))
+}
+
+fn blake2_g_region_outputs<F: PrimeField>(
+    output: &GFunctionIntermediateValues<F>,
+    b: &[Vec<(usize, Variable)>; 2],
+    d: &[Vec<(usize, Variable)>; 2],
+) -> Vec<Variable> {
+    let mut outputs = Vec::with_capacity(12);
+    for (chunks, _) in output.a_var_chunks_and_constraint.iter() {
+        outputs.extend(chunks.iter().map(|(_, variable)| *variable));
+    }
+    for limb in b.iter() {
+        outputs.extend(limb.iter().map(|(_, variable)| *variable));
+    }
+    for (chunks, _) in output.c_var_chunks_and_constraint.iter() {
+        outputs.extend(chunks.iter().map(|(_, variable)| *variable));
+    }
+    for limb in d.iter() {
+        outputs.extend(limb.iter().map(|(_, variable)| *variable));
+    }
+
+    outputs
+}
+
+fn blake2_word_pair_inputs<F: PrimeField>(words: &[[Variable; 2]]) -> Vec<PicusExpr<F>> {
+    words
+        .iter()
+        .flat_map(|word| word.iter().map(|variable| PicusExpr::Variable(*variable)))
+        .collect()
+}
+
+fn blake2_boolean_inputs<F: PrimeField>(bits: &[Boolean]) -> Vec<PicusExpr<F>> {
+    bits.iter()
+        .copied()
+        .map(picus_expr_from_boolean_circuit)
+        .collect()
+}
+
+fn blake2_chunk_variables_as_inputs<F: PrimeField>(
+    chunked_words: &[[Vec<(usize, Variable)>; 2]],
+) -> Vec<PicusExpr<F>> {
+    chunked_words
+        .iter()
+        .flat_map(|word| {
+            word.iter().flat_map(|chunks| {
+                chunks
+                    .iter()
+                    .map(|(_, variable)| PicusExpr::Variable(*variable))
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect()
+}
+
+fn blake2_g_decomposition_inputs<F: PrimeField>(
+    decompositions: &[[([(i32, Variable); 1], Constraint<F>); 2]],
+) -> Vec<PicusExpr<F>> {
+    decompositions
+        .iter()
+        .flat_map(|word| {
+            word.iter().flat_map(|(chunks, constraint)| {
+                let mut inputs = Vec::with_capacity(chunks.len() + 1);
+                inputs.extend(
+                    chunks
+                        .iter()
+                        .map(|(_, variable)| PicusExpr::Variable(*variable)),
+                );
+                inputs.push(picus_expr_from_constraint(constraint));
+                inputs
+            })
+        })
+        .collect()
+}
+
+fn blake2_region_output_vars(words: &[[Variable; 2]]) -> Vec<Variable> {
+    words
+        .iter()
+        .flat_map(|word| word.iter().copied())
+        .collect::<Vec<_>>()
+}
+
+fn annotated_blake2_g_function<F: PrimeField, CS: Circuit<F>>(
+    cs: &mut CS,
+    name: impl Into<String>,
+    a: &mut [Constraint<F>; 2],
+    b: &mut [Vec<(usize, Variable)>; 2],
+    c: &mut [Constraint<F>; 2],
+    d: &mut [Vec<(usize, Variable)>; 2],
+    message: [[Variable; 2]; 2],
+) -> GFunctionIntermediateValues<F> {
+    let region = begin_blake2_g_region(cs, name, a, b, c, d, message);
+    let output = g_function(cs, a, b, c, d, message);
+    if let Some(region) = region {
+        cs.set_picus_region_outputs(region, blake2_g_region_outputs(&output, b, d));
+        cs.end_picus_region(region);
+    }
+
+    output
+}
+
 pub fn define_blake2_with_extended_control_delegation_circuit_with_metadata<
     F: PrimeField,
     CS: Circuit<F>,
@@ -81,10 +224,7 @@ pub fn define_blake2_with_extended_control_delegation_circuit<F: PrimeField, CS:
     (output_state, output_extended_state)
 }
 
-fn define_blake2_with_extended_control_delegation_circuit_inner<
-    F: PrimeField,
-    CS: Circuit<F>,
->(
+fn define_blake2_with_extended_control_delegation_circuit_inner<F: PrimeField, CS: Circuit<F>>(
     cs: &mut CS,
 ) -> (
     Vec<[Variable; 2]>,
@@ -308,8 +448,19 @@ fn define_blake2_with_extended_control_delegation_circuit_inner<
     // even though we can select first 8 words of the extended state using single quadratic constraint,
     // we will also select separately between constant IV and first 8 elements to use this later on in final XORing
 
+    let mut extended_state_init_inputs = vec![
+        picus_expr_from_boolean_circuit(first_round),
+        picus_expr_from_boolean_circuit(compression_mode),
+        picus_expr_from_boolean_circuit(first_round_in_normal_mode),
+    ];
+    extended_state_init_inputs.extend(blake2_word_pair_inputs(&input_state));
+    extended_state_init_inputs.extend(blake2_word_pair_inputs(&input_extended_state));
     let mut state_for_final_xoring = vec![];
-
+    let extended_state_init_region = cs.begin_picus_region(
+        PicusRegionSpec::new("blake2_extended_state_init")
+            .with_inputs(extended_state_init_inputs)
+            .opaque_for_picus(),
+    );
     for word_idx in 0..8 {
         let existing = &mut input_extended_state[word_idx];
         let state_word = input_state[word_idx];
@@ -341,14 +492,12 @@ fn define_blake2_with_extended_control_delegation_circuit_inner<
         let initialization_word = EXNTENDED_CONFIGURED_IV[word_idx];
         for i in 0..2 {
             let mut constraint = Constraint::empty();
-            // if it's not the first round - keep existing
             constraint = constraint
                 + (Term::from(1u64) - Term::from(first_round_var)) * Term::from(existing[i]);
-            // otherwise - from constants
             constraint = constraint
                 + Term::from(first_round_var)
                     * Term::from((initialization_word >> (16 * i)) as u64 & 0xffff);
-            let selected = cs.add_variable_from_constraint(constraint);
+            let selected = add_variable_from_constraint_with_picus_equality(cs, constraint);
             existing[i] = selected;
         }
     }
@@ -358,21 +507,27 @@ fn define_blake2_with_extended_control_delegation_circuit_inner<
         let initialization_word = COMPRESSION_MODE_EXTENDED_CONFIGURED_IV[word_idx];
         for i in 0..2 {
             let mut constraint = Constraint::empty();
-            // if it's not the first round - keep existing
             constraint = constraint
                 + (Term::from(1u64) - Term::from(first_round_var)) * Term::from(existing[i]);
-            // if not - two options
-            // if it's a normal mode - then we take from existing extended(!) state
             constraint =
                 constraint + Term::from(first_round_in_normal_mode_var) * Term::from(existing[i]);
-            // otherwise - from constants
             constraint = constraint
                 + Term::from(first_round_var)
                     * Term::from(compression_mode_var)
                     * Term::from((initialization_word >> (16 * i)) as u64 & 0xffff);
-            let selected = cs.add_variable_from_constraint(constraint);
+            let selected = add_variable_from_constraint_with_picus_equality(cs, constraint);
             existing[i] = selected;
         }
+    }
+    if let Some(region) = extended_state_init_region {
+        cs.set_picus_region_outputs(
+            region,
+            blake2_region_output_vars(&input_extended_state)
+                .into_iter()
+                .chain(blake2_region_output_vars(&state_for_final_xoring))
+                .collect(),
+        );
+        cs.end_picus_region(region);
     }
 
     {
@@ -413,6 +568,18 @@ fn define_blake2_with_extended_control_delegation_circuit_inner<
     let input_state = input_state;
     // path element is always first 8 elements
     let input_as_witness_for_compression = input_words[..8].to_vec();
+    let mut absorb_input_select_inputs = vec![
+        picus_expr_from_boolean_circuit(compression_mode),
+        picus_expr_from_boolean_circuit(compression_mode_existing_is_right),
+        picus_expr_from_boolean_circuit(compression_mode_existing_is_left),
+    ];
+    absorb_input_select_inputs.extend(blake2_word_pair_inputs(&input_state));
+    absorb_input_select_inputs.extend(blake2_word_pair_inputs(&input_words));
+    let absorb_input_select_region = cs.begin_picus_region(
+        PicusRegionSpec::new("blake2_absorb_input_select")
+            .with_inputs(absorb_input_select_inputs)
+            .opaque_for_picus(),
+    );
 
     for word_idx in 0..8 {
         let path_data = input_as_witness_for_compression[word_idx];
@@ -422,15 +589,13 @@ fn define_blake2_with_extended_control_delegation_circuit_inner<
 
         for i in 0..2 {
             let mut constraint = Constraint::empty();
-            // if it's not the first round - keep existing
             constraint = constraint
                 + (Term::from(1u64) - Term::from(compression_mode)) * Term::from(existing[i]);
-            // if not - take from either existing or state part
             constraint = constraint
                 + Term::from(compression_mode_existing_is_right) * Term::from(path_data[i]);
             constraint = constraint
                 + Term::from(compression_mode_existing_is_left) * Term::from(state_word[i]);
-            let selected = cs.add_variable_from_constraint(constraint);
+            let selected = add_variable_from_constraint_with_picus_equality(cs, constraint);
             existing[i] = selected;
         }
     }
@@ -442,17 +607,19 @@ fn define_blake2_with_extended_control_delegation_circuit_inner<
         let existing = &mut input_words[word_idx];
         for i in 0..2 {
             let mut constraint = Constraint::empty();
-            // if it's not the first round - keep existing
             constraint = constraint
                 + (Term::from(1u64) - Term::from(compression_mode)) * Term::from(existing[i]);
-            // if not - take from either existing or state part
             constraint = constraint
                 + Term::from(compression_mode_existing_is_right) * Term::from(state_word[i]);
             constraint = constraint
                 + Term::from(compression_mode_existing_is_left) * Term::from(path_data[i]);
-            let selected = cs.add_variable_from_constraint(constraint);
+            let selected = add_variable_from_constraint_with_picus_equality(cs, constraint);
             existing[i] = selected;
         }
+    }
+    if let Some(region) = absorb_input_select_region {
+        cs.set_picus_region_outputs(region, blake2_region_output_vars(&input_words));
+        cs.end_picus_region(region);
     }
 
     {
@@ -469,9 +636,15 @@ fn define_blake2_with_extended_control_delegation_circuit_inner<
 
     // now we should select a fixed permutation of the message words depending on the round
 
+    let mut permutation_inputs = blake2_boolean_inputs(&round_bitmask);
+    permutation_inputs.extend(blake2_word_pair_inputs(&input_words));
+    let permutation_region = cs.begin_picus_region(
+        PicusRegionSpec::new("blake2_message_permutation")
+            .with_inputs(permutation_inputs)
+            .opaque_for_picus(),
+    );
     let mut selected_permutation = vec![];
     for message_word in 0..BLAKE2S_BLOCK_SIZE_U32_WORDS {
-        // our permutation is fixed, so we just need to make a constraint
         let mut constraint_0 = Constraint::empty();
         let mut constraint_1 = Constraint::empty();
         for round_index in 0..BLAKE2S_MAX_ROUNDS {
@@ -488,10 +661,14 @@ fn define_blake2_with_extended_control_delegation_circuit_inner<
                 constraint_1,
             );
         }
-        let low = cs.add_variable_from_constraint(constraint_0);
-        let high = cs.add_variable_from_constraint(constraint_1);
+        let low = add_variable_from_constraint_with_picus_equality(cs, constraint_0);
+        let high = add_variable_from_constraint_with_picus_equality(cs, constraint_1);
 
         selected_permutation.push([low, high]);
+    }
+    if let Some(region) = permutation_region {
+        cs.set_picus_region_outputs(region, blake2_region_output_vars(&selected_permutation));
+        cs.end_picus_region(region);
     }
 
     assert_eq!(selected_permutation.len(), 16);
@@ -535,8 +712,9 @@ fn define_blake2_with_extended_control_delegation_circuit_inner<
 
     // perform actual mixing
 
-    g_function(
+    annotated_blake2_g_function(
         cs,
+        "blake2_g_column_0",
         &mut a_row[0],
         &mut b_row[0],
         &mut c_row[0],
@@ -544,8 +722,9 @@ fn define_blake2_with_extended_control_delegation_circuit_inner<
         [selected_permutation[0], selected_permutation[1]],
     );
 
-    g_function(
+    annotated_blake2_g_function(
         cs,
+        "blake2_g_column_1",
         &mut a_row[1],
         &mut b_row[1],
         &mut c_row[1],
@@ -553,8 +732,9 @@ fn define_blake2_with_extended_control_delegation_circuit_inner<
         [selected_permutation[2], selected_permutation[3]],
     );
 
-    g_function(
+    annotated_blake2_g_function(
         cs,
+        "blake2_g_column_2",
         &mut a_row[2],
         &mut b_row[2],
         &mut c_row[2],
@@ -562,8 +742,9 @@ fn define_blake2_with_extended_control_delegation_circuit_inner<
         [selected_permutation[4], selected_permutation[5]],
     );
 
-    g_function(
+    annotated_blake2_g_function(
         cs,
+        "blake2_g_column_3",
         &mut a_row[3],
         &mut b_row[3],
         &mut c_row[3],
@@ -573,8 +754,9 @@ fn define_blake2_with_extended_control_delegation_circuit_inner<
 
     // shift
 
-    let output_decompositions_0 = g_function(
+    let output_decompositions_0 = annotated_blake2_g_function(
         cs,
+        "blake2_g_diagonal_0",
         &mut a_row[0],
         &mut b_row[1],
         &mut c_row[2],
@@ -582,8 +764,9 @@ fn define_blake2_with_extended_control_delegation_circuit_inner<
         [selected_permutation[8], selected_permutation[9]],
     );
 
-    let output_decompositions_1 = g_function(
+    let output_decompositions_1 = annotated_blake2_g_function(
         cs,
+        "blake2_g_diagonal_1",
         &mut a_row[1],
         &mut b_row[2],
         &mut c_row[3],
@@ -591,8 +774,9 @@ fn define_blake2_with_extended_control_delegation_circuit_inner<
         [selected_permutation[10], selected_permutation[11]],
     );
 
-    let output_decompositions_2 = g_function(
+    let output_decompositions_2 = annotated_blake2_g_function(
         cs,
+        "blake2_g_diagonal_2",
         &mut a_row[2],
         &mut b_row[3],
         &mut c_row[0],
@@ -600,8 +784,9 @@ fn define_blake2_with_extended_control_delegation_circuit_inner<
         [selected_permutation[12], selected_permutation[13]],
     );
 
-    let output_decompositions_3 = g_function(
+    let output_decompositions_3 = annotated_blake2_g_function(
         cs,
+        "blake2_g_diagonal_3",
         &mut a_row[3],
         &mut b_row[0],
         &mut c_row[1],
@@ -625,7 +810,7 @@ fn define_blake2_with_extended_control_delegation_circuit_inner<
     };
     cs.set_values(value_fn);
     let constraint = Constraint::<F>::empty() + Term::from(x12_write_vars[0]);
-    cs.add_constraint_allow_explicit_linear_prevent_optimizations(constraint);
+    add_constraint_allow_explicit_linear_prevent_optimizations_with_picus_equality(cs, constraint);
 
     // now set updated value for high bits and constraint it
     let mut constraint = Constraint::<F>::empty();
@@ -643,7 +828,7 @@ fn define_blake2_with_extended_control_delegation_circuit_inner<
 
     collapse_max_quadratic_constraint_into(cs, constraint.clone(), x12_write_vars[1]);
     constraint -= Term::from(x12_write_vars[1]);
-    cs.add_constraint_allow_explicit_linear(constraint);
+    add_constraint_allow_explicit_linear_with_picus_equality(cs, constraint);
 
     // we unconditionally set values for extended state
     let mut it = output_placeholder_extended_state.iter_mut();
@@ -656,7 +841,7 @@ fn define_blake2_with_extended_control_delegation_circuit_inner<
             collapse_max_quadratic_constraint_into(cs, constraint.clone(), *dst);
             // add constraint
             constraint -= Term::from(*dst);
-            cs.add_constraint_allow_explicit_linear(constraint);
+            add_constraint_allow_explicit_linear_with_picus_equality(cs, constraint);
         }
     }
 
@@ -673,7 +858,7 @@ fn define_blake2_with_extended_control_delegation_circuit_inner<
             collapse_max_quadratic_constraint_into(cs, constraint.clone(), *dst);
             // add constraint
             constraint -= Term::from(*dst);
-            cs.add_constraint_allow_explicit_linear(constraint);
+            add_constraint_allow_explicit_linear_with_picus_equality(cs, constraint);
         }
     }
 
@@ -685,7 +870,7 @@ fn define_blake2_with_extended_control_delegation_circuit_inner<
             collapse_max_quadratic_constraint_into(cs, constraint.clone(), *dst);
             // add constraint
             constraint -= Term::from(*dst);
-            cs.add_constraint_allow_explicit_linear(constraint);
+            add_constraint_allow_explicit_linear_with_picus_equality(cs, constraint);
         }
     }
 
@@ -702,7 +887,7 @@ fn define_blake2_with_extended_control_delegation_circuit_inner<
             collapse_max_quadratic_constraint_into(cs, constraint.clone(), *dst);
             // add constraint
             constraint -= Term::from(*dst);
-            cs.add_constraint_allow_explicit_linear(constraint);
+            add_constraint_allow_explicit_linear_with_picus_equality(cs, constraint);
         }
     }
 
@@ -748,163 +933,183 @@ fn define_blake2_with_extended_control_delegation_circuit_inner<
         output_decompositions_1.c_var_chunks_and_constraint.clone(),
     ];
 
-    for ((((a_initial, c_final), a_final), output), read_values) in state_for_final_xoring[..4]
-        .iter()
-        .zip(c_final)
-        .zip(a_final)
-        .zip(output_placeholder_state[..4].iter())
-        .zip(input_state[..4].iter())
-    {
-        for i in 0..2 {
-            let a = &a_initial[i];
-            let ([(c_low_width, c_low)], c_high_constraint) = &c_final[i];
-            assert_eq!(*c_low_width, 7);
+    let mut final_xor_a_c_inputs = vec![picus_expr_from_boolean_circuit(perform_final_xor)];
+    final_xor_a_c_inputs.extend(blake2_word_pair_inputs(&state_for_final_xoring[..4]));
+    final_xor_a_c_inputs.extend(blake2_word_pair_inputs(&input_state[..4]));
+    final_xor_a_c_inputs.extend(blake2_g_decomposition_inputs(&c_final));
+    final_xor_a_c_inputs.extend(blake2_g_decomposition_inputs(&a_final));
+    cs.with_picus_region(
+        PicusRegionSpec::new("blake2_final_xor_a_c")
+            .with_inputs(final_xor_a_c_inputs)
+            .opaque_for_picus()
+            .with_outputs(blake2_region_output_vars(&output_placeholder_state[..4])),
+        |cs| {
+            for ((((a_initial, c_final), a_final), output), read_values) in state_for_final_xoring
+                [..4]
+                .iter()
+                .zip(c_final)
+                .zip(a_final)
+                .zip(output_placeholder_state[..4].iter())
+                .zip(input_state[..4].iter())
+            {
+                for i in 0..2 {
+                    let a = &a_initial[i];
+                    let ([(c_low_width, c_low)], c_high_constraint) = &c_final[i];
+                    assert_eq!(*c_low_width, 7);
 
-            let (a_low_chunk, a_high_constraint) = chunk_16_bit_input::<F, CS, 7>(cs, *a);
+                    let (a_low_chunk, a_high_constraint) = chunk_16_bit_input::<F, CS, 7>(cs, *a);
 
-            let [xor_result_low] = cs.get_variables_from_lookup_constrained::<2, 1>(
-                &[
-                    LookupInput::Variable(a_low_chunk),
-                    LookupInput::Variable(*c_low),
-                ],
-                TableType::Xor7,
-            );
+                    let [xor_result_low] = cs.get_variables_from_lookup_constrained::<2, 1>(
+                        &[
+                            LookupInput::Variable(a_low_chunk),
+                            LookupInput::Variable(*c_low),
+                        ],
+                        TableType::Xor7,
+                    );
 
-            let [xor_result_high] = cs.get_variables_from_lookup_constrained::<2, 1>(
-                &[
-                    LookupInput::from(a_high_constraint),
-                    LookupInput::from(c_high_constraint.clone()),
-                ],
-                TableType::Xor9,
-            );
+                    let [xor_result_high] = cs.get_variables_from_lookup_constrained::<2, 1>(
+                        &[
+                            LookupInput::from(a_high_constraint),
+                            LookupInput::from(c_high_constraint.clone()),
+                        ],
+                        TableType::Xor9,
+                    );
 
-            // now xor with a_final, but for that we need to re-chunk. For that we will split 1 bit from one of the xor results above,
-            // and glue it to other side
-            let ([(a_low_width, a_low)], a_high_constraint) = &a_final[i];
-            assert_eq!(*a_low_width, 8);
+                    let ([(a_low_width, a_low)], a_high_constraint) = &a_final[i];
+                    assert_eq!(*a_low_width, 8);
 
-            let (a_low, extra_bit) = split_top_bit::<F, CS, 7>(cs, *a_low);
+                    let (a_low, extra_bit) = split_top_bit::<F, CS, 7>(cs, *a_low);
 
-            let [xor_result_low] = cs.get_variables_from_lookup_constrained::<2, 1>(
-                &[
-                    LookupInput::Variable(xor_result_low),
-                    LookupInput::Variable(a_low),
-                ],
-                TableType::Xor7,
-            );
+                    let [xor_result_low] = cs.get_variables_from_lookup_constrained::<2, 1>(
+                        &[
+                            LookupInput::Variable(xor_result_low),
+                            LookupInput::Variable(a_low),
+                        ],
+                        TableType::Xor7,
+                    );
 
-            let mut a_high_constraint = a_high_constraint.clone();
-            a_high_constraint.scale(F::TWO);
-            a_high_constraint += extra_bit.get_terms();
+                    let mut a_high_constraint = a_high_constraint.clone();
+                    a_high_constraint.scale(F::TWO);
+                    a_high_constraint += extra_bit.get_terms();
 
-            let [xor_result_high] = cs.get_variables_from_lookup_constrained::<2, 1>(
-                &[
-                    LookupInput::Variable(xor_result_high),
-                    LookupInput::from(a_high_constraint),
-                ],
-                TableType::Xor9,
-            );
+                    let [xor_result_high] = cs.get_variables_from_lookup_constrained::<2, 1>(
+                        &[
+                            LookupInput::Variable(xor_result_high),
+                            LookupInput::from(a_high_constraint),
+                        ],
+                        TableType::Xor9,
+                    );
 
-            // and if we do request final XOR-ing, then we use those value to construct and output, otherwise - use initial values
+                    let dst = output[i];
+                    let mut constraint = Constraint::empty();
+                    constraint += Term::from(xor_result_low);
+                    constraint += Term::from((F::from_u64_unchecked(1u64 << 7), xor_result_high));
+                    constraint = constraint * Term::from(perform_final_xor.get_variable().unwrap());
+                    constraint = constraint
+                        + (Term::from(1u64)
+                            - Term::from(perform_final_xor.get_variable().unwrap()))
+                            * Term::from(read_values[i]);
+                    collapse_max_quadratic_constraint_into(cs, constraint.clone(), dst);
+                    constraint -= Term::from(dst);
+                    add_constraint_with_picus_equality(cs, constraint);
+                }
+            }
+        },
+    );
 
-            let dst = output[i];
-            let mut constraint = Constraint::empty();
-            constraint += Term::from(xor_result_low);
-            constraint += Term::from((F::from_u64_unchecked(1u64 << 7), xor_result_high));
-            constraint = constraint * Term::from(perform_final_xor.get_variable().unwrap());
-            constraint = constraint
-                + (Term::from(1u64) - Term::from(perform_final_xor.get_variable().unwrap()))
-                    * Term::from(read_values[i]);
-            // set value
-            collapse_max_quadratic_constraint_into(cs, constraint.clone(), dst);
-            // add constraint
-            constraint -= Term::from(dst);
-            cs.add_constraint(constraint);
-        }
-    }
+    let mut final_xor_b_d_inputs = vec![picus_expr_from_boolean_circuit(perform_final_xor)];
+    final_xor_b_d_inputs.extend(blake2_word_pair_inputs(&state_for_final_xoring[4..8]));
+    final_xor_b_d_inputs.extend(blake2_word_pair_inputs(&input_state[4..8]));
+    final_xor_b_d_inputs.extend(blake2_chunk_variables_as_inputs(&b_row));
+    final_xor_b_d_inputs.extend(blake2_chunk_variables_as_inputs(&d_row));
+    cs.with_picus_region(
+        PicusRegionSpec::new("blake2_final_xor_b_d")
+            .with_inputs(final_xor_b_d_inputs)
+            .opaque_for_picus()
+            .with_outputs(blake2_region_output_vars(&output_placeholder_state[4..8])),
+        |cs| {
+            for ((((b_initial, d_final), b_final), output), read_values) in state_for_final_xoring
+                [4..8]
+                .iter()
+                .zip(d_row.iter())
+                .zip(b_row.iter())
+                .zip(output_placeholder_state[4..8].iter())
+                .zip(input_state[4..8].iter())
+            {
+                for i in 0..2 {
+                    let b = &b_initial[i];
+                    let b_final = &b_final[i];
+                    let d_final = &d_final[i];
 
-    for ((((b_initial, d_final), b_final), output), read_values) in state_for_final_xoring[4..8]
-        .iter()
-        .zip(d_row.iter())
-        .zip(b_row.iter())
-        .zip(output_placeholder_state[4..8].iter())
-        .zip(input_state[4..8].iter())
-    {
-        for i in 0..2 {
-            let b = &b_initial[i];
-            let b_final = &b_final[i];
-            let d_final = &d_final[i];
+                    assert_eq!(b_final.len(), 2);
+                    assert_eq!(d_final.len(), 2);
 
-            assert_eq!(b_final.len(), 2);
-            assert_eq!(d_final.len(), 2);
+                    let (b_low_width, b_low_var) = b_final[0];
+                    assert_eq!(b_low_width, 9);
+                    let (b_high_width, b_high_var) = b_final[1];
+                    assert_eq!(b_high_width, 7);
 
-            let (b_low_width, b_low_var) = b_final[0];
-            assert_eq!(b_low_width, 9);
-            let (b_high_width, b_high_var) = b_final[1];
-            assert_eq!(b_high_width, 7);
+                    let (d_low_width, d_low_var) = d_final[0];
+                    assert_eq!(d_low_width, 8);
+                    let (d_high_width, d_high_var) = d_final[1];
+                    assert_eq!(d_high_width, 8);
 
-            let (d_low_width, d_low_var) = d_final[0];
-            assert_eq!(d_low_width, 8);
-            let (d_high_width, d_high_var) = d_final[1];
-            assert_eq!(d_high_width, 8);
+                    let (b_initial_low_chunk, b_initial_high_constraint) =
+                        chunk_16_bit_input::<F, CS, 9>(cs, *b);
 
-            let (b_initial_low_chunk, b_initial_high_constraint) =
-                chunk_16_bit_input::<F, CS, 9>(cs, *b);
+                    let [xor_result_low] = cs.get_variables_from_lookup_constrained::<2, 1>(
+                        &[
+                            LookupInput::Variable(b_low_var),
+                            LookupInput::Variable(b_initial_low_chunk),
+                        ],
+                        TableType::Xor9,
+                    );
+                    let [xor_result_high] = cs.get_variables_from_lookup_constrained::<2, 1>(
+                        &[
+                            LookupInput::Variable(b_high_var),
+                            LookupInput::from(b_initial_high_constraint),
+                        ],
+                        TableType::Xor7,
+                    );
 
-            let [xor_result_low] = cs.get_variables_from_lookup_constrained::<2, 1>(
-                &[
-                    LookupInput::Variable(b_low_var),
-                    LookupInput::Variable(b_initial_low_chunk),
-                ],
-                TableType::Xor9,
-            );
-            let [xor_result_high] = cs.get_variables_from_lookup_constrained::<2, 1>(
-                &[
-                    LookupInput::Variable(b_high_var),
-                    LookupInput::from(b_initial_high_constraint),
-                ],
-                TableType::Xor7,
-            );
+                    let (xor_result_low, extra_bit) = split_top_bit::<F, CS, 8>(cs, xor_result_low);
 
-            // rechunk and finish
+                    let [xor_result_low] = cs.get_variables_from_lookup_constrained::<2, 1>(
+                        &[
+                            LookupInput::Variable(d_low_var),
+                            LookupInput::Variable(xor_result_low),
+                        ],
+                        TableType::Xor,
+                    );
 
-            let (xor_result_low, extra_bit) = split_top_bit::<F, CS, 8>(cs, xor_result_low);
+                    let mut constraint = Constraint::empty();
+                    constraint += extra_bit.get_terms();
+                    constraint += Term::from((F::TWO, xor_result_high));
 
-            let [xor_result_low] = cs.get_variables_from_lookup_constrained::<2, 1>(
-                &[
-                    LookupInput::Variable(d_low_var),
-                    LookupInput::Variable(xor_result_low),
-                ],
-                TableType::Xor,
-            );
+                    let [xor_result_high] = cs.get_variables_from_lookup_constrained::<2, 1>(
+                        &[
+                            LookupInput::Variable(d_high_var),
+                            LookupInput::from(constraint),
+                        ],
+                        TableType::Xor,
+                    );
 
-            let mut constraint = Constraint::empty();
-            constraint += extra_bit.get_terms();
-            constraint += Term::from((F::TWO, xor_result_high));
-
-            let [xor_result_high] = cs.get_variables_from_lookup_constrained::<2, 1>(
-                &[
-                    LookupInput::Variable(d_high_var),
-                    LookupInput::from(constraint),
-                ],
-                TableType::Xor,
-            );
-
-            let dst = output[i];
-            let mut constraint = Constraint::empty();
-            constraint += Term::from(xor_result_low);
-            constraint += Term::from((F::from_u64_unchecked(1u64 << 8), xor_result_high));
-            constraint = constraint * Term::from(perform_final_xor.get_variable().unwrap());
-            constraint = constraint
-                + (Term::from(1u64) - Term::from(perform_final_xor.get_variable().unwrap()))
-                    * Term::from(read_values[i]);
-            // set value
-            collapse_max_quadratic_constraint_into(cs, constraint.clone(), dst);
-            // add constraint
-            constraint -= Term::from(dst);
-            cs.add_constraint(constraint);
-        }
-    }
+                    let dst = output[i];
+                    let mut constraint = Constraint::empty();
+                    constraint += Term::from(xor_result_low);
+                    constraint += Term::from((F::from_u64_unchecked(1u64 << 8), xor_result_high));
+                    constraint = constraint * Term::from(perform_final_xor.get_variable().unwrap());
+                    constraint = constraint
+                        + (Term::from(1u64)
+                            - Term::from(perform_final_xor.get_variable().unwrap()))
+                            * Term::from(read_values[i]);
+                    collapse_max_quadratic_constraint_into(cs, constraint.clone(), dst);
+                    constraint -= Term::from(dst);
+                    add_constraint_with_picus_equality(cs, constraint);
+                }
+            }
+        },
+    );
 
     {
         for (i, input) in output_placeholder_state.iter().enumerate() {
@@ -925,7 +1130,11 @@ fn define_blake2_with_extended_control_delegation_circuit_inner<
         x12_write_vars,
     };
 
-    (output_placeholder_state, output_placeholder_extended_state, metadata)
+    (
+        output_placeholder_state,
+        output_placeholder_extended_state,
+        metadata,
+    )
 }
 
 pub(crate) fn chunk_16_bit_input<F: PrimeField, CS: Circuit<F>, const LOW_CHUNK_BITS: usize>(
@@ -983,7 +1192,7 @@ pub(crate) fn split_top_bit<F: PrimeField, CS: Circuit<F>, const LOW_CHUNK_BITS:
         F::from_u64_unchecked(1 << LOW_CHUNK_BITS),
         bit.get_variable().unwrap(),
     ));
-    cs.add_constraint_allow_explicit_linear(constraint);
+    add_constraint_allow_explicit_linear_with_picus_equality(cs, constraint);
 
     (low_chunk, bit)
 }
@@ -992,7 +1201,9 @@ pub(crate) fn split_top_bit<F: PrimeField, CS: Circuit<F>, const LOW_CHUNK_BITS:
 mod test {
     use super::*;
     use crate::cs::cs_reference::BasicAssembly;
-    use crate::one_row_compiler::{CompiledCircuitArtifact, OneRowCompiler, ProtectedConstraintSnapshot};
+    use crate::one_row_compiler::{
+        CompiledCircuitArtifact, OneRowCompiler, ProtectedConstraintSnapshot,
+    };
     use crate::utils::serialize_to_file;
     use field::Mersenne31Field;
 
@@ -1046,5 +1257,18 @@ mod test {
             define_blake2_with_extended_control_delegation_circuit,
         );
         serialize_to_file(&ssa_forms, "blake_delegation_ssa.json");
+    }
+
+    #[test]
+    fn blake2_delegation_emits_parallel_picus_constraints_when_enabled() {
+        let mut cs = BasicAssembly::<Mersenne31Field>::new();
+        cs.set_picus_parallel_constraints_enabled(true);
+        define_blake2_with_extended_control_delegation_circuit(&mut cs);
+        let (circuit_output, _) = cs.finalize();
+
+        assert!(!circuit_output
+            .picus_extraction_metadata
+            .parallel_constraints
+            .is_empty());
     }
 }

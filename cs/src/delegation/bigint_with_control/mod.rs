@@ -66,14 +66,12 @@ pub fn define_u256_ops_extended_control_delegation_circuit_with_metadata<
 pub fn define_u256_ops_extended_control_delegation_circuit<F: PrimeField, CS: Circuit<F>>(
     cs: &mut CS,
 ) -> (Vec<[Variable; 2]>, [Variable; REGISTER_SIZE]) {
-    let (output_state, x12_write_vars, _) = define_u256_ops_extended_control_delegation_circuit_inner(cs);
+    let (output_state, x12_write_vars, _) =
+        define_u256_ops_extended_control_delegation_circuit_inner(cs);
     (output_state, x12_write_vars)
 }
 
-fn define_u256_ops_extended_control_delegation_circuit_inner<
-    F: PrimeField,
-    CS: Circuit<F>,
->(
+fn define_u256_ops_extended_control_delegation_circuit_inner<F: PrimeField, CS: Circuit<F>>(
     cs: &mut CS,
 ) -> (
     Vec<[Variable; 2]>,
@@ -886,7 +884,9 @@ fn define_u256_ops_extended_control_delegation_circuit_inner<
 mod test {
     use super::*;
     use crate::cs::cs_reference::BasicAssembly;
-    use crate::one_row_compiler::{CompiledCircuitArtifact, OneRowCompiler, ProtectedConstraintSnapshot};
+    use crate::one_row_compiler::{
+        CompiledCircuitArtifact, OneRowCompiler, ProtectedConstraintSnapshot,
+    };
     use crate::utils::serialize_to_file;
     use field::Mersenne31Field;
 

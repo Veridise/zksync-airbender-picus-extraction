@@ -601,6 +601,116 @@ fn add_aligned_rom_read_lookup_constraints<F: PrimeField>(
     // embedding the concrete ROM table contents.
 }
 
+/// Translation for `RomRead` lookup.
+///
+/// Table intent: map a ROM byte address (aligned in the concrete circuit) to the
+/// low/high 16-bit instruction limbs stored at that address.
+///
+/// Extraction strategy: bound the address/output ranges and enforce determinism
+/// `det(address) => (det(low) && det(high))`.
+fn add_rom_read_lookup_constraints<F: PrimeField>(
+    module: &mut PicusModule,
+    query: &LookupQuery<F>,
+    row_multiplier: Option<&PicusExpr>,
+) {
+    let address = lookup_input_to_picus_expr_with_multiplier(&query.row[0], row_multiplier);
+    let low = lookup_input_to_picus_expr_with_multiplier(&query.row[1], row_multiplier);
+    let high = lookup_input_to_picus_expr_with_multiplier(&query.row[2], row_multiplier);
+
+    let max_address = 1u64 << (16 + common_constants::ROM_SECOND_WORD_BITS);
+    module
+        .constraints
+        .push(PicusConstraint::new_lt(address.clone(), max_address.into()));
+    module
+        .constraints
+        .push(PicusConstraint::new_lt(low.clone(), U16_BOUND.into()));
+    module
+        .constraints
+        .push(PicusConstraint::new_lt(high.clone(), U16_BOUND.into()));
+
+    let det_address = PicusConstraint::new_det(address);
+    let det_low = PicusConstraint::new_det(low);
+    let det_high = PicusConstraint::new_det(high);
+    module.constraints.push(PicusConstraint::Implies(
+        Box::new(det_address),
+        Box::new(PicusConstraint::And(Box::new(det_low), Box::new(det_high))),
+    ));
+}
+
+/// Translation for `MemoryOffsetGetBits` lookup.
+///
+/// Table intent: extract the two lowest address bits from a 16-bit limb.
+///
+/// Extraction strategy: keep the exact decomposition
+/// `input = 4 * q + second_bit * 2 + lowest_bit`.
+fn add_memory_offset_get_bits_lookup_constraints<F: PrimeField>(
+    module: &mut PicusModule,
+    query: &LookupQuery<F>,
+    next_fresh_var_id: &mut usize,
+    row_multiplier: Option<&PicusExpr>,
+) {
+    let input = lookup_input_to_picus_expr_with_multiplier(&query.row[0], row_multiplier);
+    let lowest_bit = lookup_input_to_picus_expr_with_multiplier(&query.row[1], row_multiplier);
+    let second_bit = lookup_input_to_picus_expr_with_multiplier(&query.row[2], row_multiplier);
+    let quotient = fresh_picus_var_expr(next_fresh_var_id);
+
+    module
+        .constraints
+        .push(PicusConstraint::new_lt(input.clone(), U16_BOUND.into()));
+    module
+        .constraints
+        .push(PicusConstraint::new_bit(lowest_bit.clone()));
+    module
+        .constraints
+        .push(PicusConstraint::new_bit(second_bit.clone()));
+    module.constraints.push(PicusConstraint::new_lt(
+        quotient.clone(),
+        PicusExpr::Const(1u64 << 14),
+    ));
+    module.constraints.push(PicusConstraint::new_equality(
+        input,
+        PicusExpr::Const(4) * quotient + PicusExpr::Const(2) * second_bit + lowest_bit,
+    ));
+}
+
+/// Translation for `SRASignFiller` lookup.
+///
+/// Table intent: compute the sign-extension filler mask for arithmetic right shifts.
+///
+/// Extraction strategy: bound packed input/result limbs and enforce
+/// `det(input) => (det(out_low) && det(out_high))`.
+fn add_sra_sign_filler_lookup_constraints<F: PrimeField>(
+    module: &mut PicusModule,
+    query: &LookupQuery<F>,
+    row_multiplier: Option<&PicusExpr>,
+) {
+    let input = lookup_input_to_picus_expr_with_multiplier(&query.row[0], row_multiplier);
+    let out_low = lookup_input_to_picus_expr_with_multiplier(&query.row[1], row_multiplier);
+    let out_high = lookup_input_to_picus_expr_with_multiplier(&query.row[2], row_multiplier);
+
+    module.constraints.push(PicusConstraint::new_lt(
+        input.clone(),
+        PicusExpr::Const(1u64 << 7),
+    ));
+    module
+        .constraints
+        .push(PicusConstraint::new_lt(out_low.clone(), U16_BOUND.into()));
+    module
+        .constraints
+        .push(PicusConstraint::new_lt(out_high.clone(), U16_BOUND.into()));
+
+    let det_input = PicusConstraint::new_det(input);
+    let det_out_low = PicusConstraint::new_det(out_low);
+    let det_out_high = PicusConstraint::new_det(out_high);
+    module.constraints.push(PicusConstraint::Implies(
+        Box::new(det_input),
+        Box::new(PicusConstraint::And(
+            Box::new(det_out_low),
+            Box::new(det_out_high),
+        )),
+    ));
+}
+
 /// Translation for `TruncateShiftAmount` lookup.
 ///
 /// Table intent: truncate a 16-bit value to a 5-bit shift amount.
@@ -662,11 +772,11 @@ fn add_truncate_shift_amount_lookup_constraints<F: PrimeField>(
 ///
 /// Extraction strategy: bound packed input/result limbs and enforce
 /// `det(input) => (det(out_low) && det(out_high))`.
-fn add_shift_16bit_lookup_constraints<F: PrimeField>(
+fn add_shift_lookup_summary<F: PrimeField>(
     module: &mut PicusModule,
     query: &LookupQuery<F>,
-    next_fresh_var_id: &mut usize,
     row_multiplier: Option<&PicusExpr>,
+    input_bound: u64,
 ) {
     let input = lookup_input_to_picus_expr_with_multiplier(&query.row[0], row_multiplier);
     let out_low = lookup_input_to_picus_expr_with_multiplier(&query.row[1], row_multiplier);
@@ -674,7 +784,7 @@ fn add_shift_16bit_lookup_constraints<F: PrimeField>(
 
     module.constraints.push(PicusConstraint::new_lt(
         input.clone(),
-        PicusExpr::Const(1u64 << (16 + 5)),
+        PicusExpr::Const(input_bound),
     ));
     module
         .constraints
@@ -683,19 +793,49 @@ fn add_shift_16bit_lookup_constraints<F: PrimeField>(
         .constraints
         .push(PicusConstraint::new_lt(out_high.clone(), U16_BOUND.into()));
 
+    let det_input = PicusConstraint::new_det(input);
+    let det_out_low = PicusConstraint::new_det(out_low);
+    let det_out_high = PicusConstraint::new_det(out_high);
+    module.constraints.push(PicusConstraint::Implies(
+        Box::new(det_input),
+        Box::new(PicusConstraint::And(
+            Box::new(det_out_low),
+            Box::new(det_out_high),
+        )),
+    ));
+}
+
+/// Translation for `ShiftImplementation` lookup.
+///
+/// Table intent: map packed `(word16, shift5, is_right)` input into the
+/// `(in_place, overflow)` contribution limbs used by the legacy shift opcode path.
+///
+/// Extraction strategy: summarize with bounds and determinism. The packed input
+/// includes the extra `is_right` bit, so the input bound is `2^(16 + 5 + 1)`.
+fn add_shift_implementation_lookup_constraints<F: PrimeField>(
+    module: &mut PicusModule,
+    query: &LookupQuery<F>,
+    _next_fresh_var_id: &mut usize,
+    row_multiplier: Option<&PicusExpr>,
+) {
+    add_shift_lookup_summary(module, query, row_multiplier, 1u64 << (16 + 5 + 1));
+}
+
+fn add_shift_16bit_lookup_constraints<F: PrimeField>(
+    module: &mut PicusModule,
+    query: &LookupQuery<F>,
+    next_fresh_var_id: &mut usize,
+    row_multiplier: Option<&PicusExpr>,
+) {
+    add_shift_lookup_summary(module, query, row_multiplier, 1u64 << (16 + 5));
+
     if row_multiplier.is_some() {
-        let det_input = PicusConstraint::new_det(input);
-        let det_out_low = PicusConstraint::new_det(out_low);
-        let det_out_high = PicusConstraint::new_det(out_high);
-        module.constraints.push(PicusConstraint::Implies(
-            Box::new(det_input),
-            Box::new(PicusConstraint::And(
-                Box::new(det_out_low),
-                Box::new(det_out_high),
-            )),
-        ));
         return;
     }
+
+    let input = lookup_input_to_picus_expr_with_multiplier(&query.row[0], row_multiplier);
+    let out_low = lookup_input_to_picus_expr_with_multiplier(&query.row[1], row_multiplier);
+    let out_high = lookup_input_to_picus_expr_with_multiplier(&query.row[2], row_multiplier);
 
     let word = fresh_picus_var_expr(next_fresh_var_id);
     let shift = fresh_picus_var_expr(next_fresh_var_id);
@@ -1028,6 +1168,14 @@ fn add_lookup_constraints_for_table<F: PrimeField>(
     row_multiplier: Option<&PicusExpr>,
 ) {
     match table {
+        TableType::ZeroEntry => {
+            for element in &query.row {
+                let value = lookup_input_to_picus_expr_with_multiplier(element, row_multiplier);
+                module
+                    .constraints
+                    .push(PicusConstraint::new_equality(value, PicusExpr::Const(0)));
+            }
+        }
         TableType::ConditionalJmpBranchSlt => {
             add_conditional_jmp_branch_slt_lookup_constraints(
                 module,
@@ -1064,6 +1212,14 @@ fn add_lookup_constraints_for_table<F: PrimeField>(
         }
         TableType::JumpCleanupOffset => {
             add_jump_cleanup_lookup_constraints(module, query, next_fresh_var_id, row_multiplier);
+        }
+        TableType::MemoryOffsetGetBits => {
+            add_memory_offset_get_bits_lookup_constraints(
+                module,
+                query,
+                next_fresh_var_id,
+                row_multiplier,
+            );
         }
         TableType::MemoryGetOffsetAndMaskWithTrap => {
             add_memory_get_offset_and_mask_with_trap_lookup_constraints(
@@ -1113,8 +1269,15 @@ fn add_lookup_constraints_for_table<F: PrimeField>(
                 row_multiplier,
             );
         }
-        TableType::ShiftImplementation
-        | TableType::SllWith16BitInputLow
+        TableType::ShiftImplementation => {
+            add_shift_implementation_lookup_constraints(
+                module,
+                query,
+                next_fresh_var_id,
+                row_multiplier,
+            );
+        }
+        TableType::SllWith16BitInputLow
         | TableType::SllWith16BitInputHigh
         | TableType::SrlWith16BitInputLow
         | TableType::SrlWith16BitInputHigh
@@ -1182,7 +1345,85 @@ fn add_lookup_constraints_for_table<F: PrimeField>(
         TableType::AlignedRomRead => {
             add_aligned_rom_read_lookup_constraints(module, query, row_multiplier);
         }
+        TableType::RomRead => {
+            add_rom_read_lookup_constraints(module, query, row_multiplier);
+        }
+        TableType::SRASignFiller => {
+            add_sra_sign_filler_lookup_constraints(module, query, row_multiplier);
+        }
         _ => {}
+    }
+}
+
+fn variable_lookup_supported_tables() -> &'static [TableType] {
+    &[
+        TableType::ZeroEntry,
+        TableType::ConditionalJmpBranchSlt,
+        TableType::ConditionalOpAllConditionsResolver,
+        TableType::ConditionalOpUnsignedConditionsResolver,
+        TableType::U16GetSignAndHighByte,
+        TableType::JumpCleanupOffset,
+        TableType::MemoryOffsetGetBits,
+        TableType::MemoryGetOffsetAndMaskWithTrap,
+        TableType::RomAddressSpaceSeparator,
+        TableType::RomRead,
+        TableType::MemoryLoadHalfwordOrByte,
+        TableType::MemStoreClearOriginalRamValueLimb,
+        TableType::MemStoreClearWrittenValueLimb,
+        TableType::TruncateShiftAmount,
+        TableType::SRASignFiller,
+        TableType::ShiftImplementation,
+        TableType::SllWith16BitInputLow,
+        TableType::SllWith16BitInputHigh,
+        TableType::SrlWith16BitInputLow,
+        TableType::SrlWith16BitInputHigh,
+        TableType::Sra16BitInputSignFill,
+        TableType::Xor,
+        TableType::Xor3,
+        TableType::Xor4,
+        TableType::Xor7,
+        TableType::Xor9,
+        TableType::And,
+        TableType::Or,
+        TableType::RangeCheck16WithZeroPads,
+        TableType::QuickDecodeDecompositionCheck4x4x4,
+        TableType::QuickDecodeDecompositionCheck7x3x6,
+        TableType::OpTypeBitmask,
+        TableType::SpecialCSRProperties,
+        TableType::AlignedRomRead,
+    ]
+}
+
+fn add_variable_table_lookup_constraints<F: PrimeField>(
+    module: &mut PicusModule,
+    query: &LookupQuery<F>,
+    table_var: Variable,
+    next_fresh_var_id: &mut usize,
+) {
+    for table in variable_lookup_supported_tables() {
+        let mut guarded_module = PicusModule::new(format!("guarded_lookup_{table:?}"));
+        add_lookup_constraints_for_table(
+            &mut guarded_module,
+            query,
+            *table,
+            next_fresh_var_id,
+            None,
+        );
+
+        if guarded_module.constraints.is_empty() {
+            continue;
+        }
+
+        let guard = PicusConstraint::new_equality(
+            variable_to_picus_expr(table_var),
+            PicusExpr::Const(table.to_table_id() as u64),
+        );
+        for constraint in guarded_module.constraints {
+            module.constraints.push(PicusConstraint::Implies(
+                Box::new(guard.clone()),
+                Box::new(constraint),
+            ));
+        }
     }
 }
 
@@ -1193,11 +1434,14 @@ pub(super) fn add_lookup_constraints<F: PrimeField>(
     next_fresh_var_id: &mut usize,
 ) {
     for query in lookups {
-        let LookupQueryTableType::Constant(table) = query.table else {
-            continue;
-        };
-
-        add_lookup_constraints_for_table(module, query, table, next_fresh_var_id, None);
+        match query.table {
+            LookupQueryTableType::Constant(table) => {
+                add_lookup_constraints_for_table(module, query, table, next_fresh_var_id, None);
+            }
+            LookupQueryTableType::Variable(table_var) => {
+                add_variable_table_lookup_constraints(module, query, table_var, next_fresh_var_id);
+            }
+        }
     }
 }
 
@@ -1405,6 +1649,10 @@ mod tests {
                 }
                 env
             }
+            TableType::MemoryOffsetGetBits => {
+                let quotient = input >> 2;
+                BTreeMap::from([(3usize, quotient)])
+            }
             _ => return None,
         };
 
@@ -1536,6 +1784,8 @@ mod tests {
             TableType::QuickDecodeDecompositionCheck7x3x6,
             TableType::OpTypeBitmask,
             TableType::SpecialCSRProperties,
+            TableType::ShiftImplementation,
+            TableType::SRASignFiller,
             TableType::MemoryGetOffsetAndMaskWithTrap,
             TableType::MemoryLoadHalfwordOrByte,
             TableType::MemStoreClearOriginalRamValueLimb,
@@ -1549,6 +1799,7 @@ mod tests {
     fn emitted_constraints_accept_all_rows_with_basic_witness_reconstruction() {
         for table in [
             TableType::JumpCleanupOffset,
+            TableType::MemoryOffsetGetBits,
             TableType::U16GetSignAndHighByte,
             TableType::TruncateShiftAmount,
             TableType::ConditionalJmpBranchSlt,

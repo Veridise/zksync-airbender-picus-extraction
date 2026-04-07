@@ -331,7 +331,8 @@ impl OptimizedDecoder {
                     * PicusExpr::from_const(0b1111)
                     + (picus_expr_from_boolean_circuit(u_insn)
                         + picus_expr_from_boolean_circuit(j_insn))
-                        * (picus_expr_from_boolean_circuit(rs1_low) * PicusExpr::from_const(1 << 3)
+                        * (picus_expr_from_boolean_circuit(rs1_low)
+                            * PicusExpr::from_const(1 << 3)
                             + picus_expr_from_num_circuit(funct3)))
                     * PicusExpr::from_const(1 << 12)
                 - picus_expr_from_num_circuit(imm_low),

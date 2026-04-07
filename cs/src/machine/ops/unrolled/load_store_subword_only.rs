@@ -572,7 +572,8 @@ pub fn subword_only_load_store_circuit_with_preprocessed_bytecode_with_decoded_b
     [Variable; SUBWORD_ONLY_MEMORY_FAMILY_NUM_FLAGS],
 ) {
     let input = cs.allocate_execution_circuit_state::<true>();
-    let selectors = apply_subword_only_load_store::<F, CS, ROM_ADDRESS_SPACE_SECOND_WORD_BITS>(cs, input);
+    let selectors =
+        apply_subword_only_load_store::<F, CS, ROM_ADDRESS_SPACE_SECOND_WORD_BITS>(cs, input);
     (input, selectors)
 }
 

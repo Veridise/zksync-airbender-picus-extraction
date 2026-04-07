@@ -1873,10 +1873,10 @@ impl<F: PrimeField, CS: Circuit<F>> OptimizationContext<F, CS> {
             let constraint =
                 Term::from(high) * Term::from(1 << 8) + Term::from(low) - Term::from(x);
             cs.add_constraint_allow_explicit_linear(constraint);
-            let parallel_cnstr =
-                Self::picus_from_term(Term::from(high)) * PicusExpr::Constant(F::from_u64_unchecked(1 << 8))
-                    + Self::picus_from_term(Term::from(low))
-                    - Self::picus_from_term(Term::from(x));
+            let parallel_cnstr = Self::picus_from_term(Term::from(high))
+                * PicusExpr::Constant(F::from_u64_unchecked(1 << 8))
+                + Self::picus_from_term(Term::from(low))
+                - Self::picus_from_term(Term::from(x));
             cs.add_picus_parallel_constraint(PicusStructuredConstraint::Eq {
                 lhs: parallel_cnstr,
                 rhs: PicusExpr::Constant(F::ZERO),

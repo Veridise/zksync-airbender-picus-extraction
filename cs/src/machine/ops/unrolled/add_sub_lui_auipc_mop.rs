@@ -196,15 +196,13 @@ pub fn apply_add_sub_lui_auipc_mop<F: PrimeField, CS: Circuit<F>>(
     {
         opt_ctx.restore_indexers(indexers);
         let cons = Constraint::from(is_addmod)
-                * ((Constraint::from(out_low) + shift * Term::from(out_high))
-                    - (Constraint::from(rs1_reg_low)
-                        + shift * Term::from(rs1_reg_high)
-                        + Term::from(rs2_reg_low)
-                        + shift * Term::from(rs2_reg_high)));
+            * ((Constraint::from(out_low) + shift * Term::from(out_high))
+                - (Constraint::from(rs1_reg_low)
+                    + shift * Term::from(rs1_reg_high)
+                    + Term::from(rs2_reg_low)
+                    + shift * Term::from(rs2_reg_high)));
         println!("ADD MOD CONS: {cons:?}");
-        cs.add_constraint(
-            cons
-        );
+        cs.add_constraint(cons);
         // of + out - modulus = tmp, and OF must be true
         let relation = AddSubRelation {
             exec_flag: is_addmod,
@@ -461,7 +459,7 @@ pub fn apply_add_sub_lui_auipc_mop<F: PrimeField, CS: Circuit<F>>(
         Register(inputs.cycle_start_state.pc.map(|x| Num::Var(x))),
         Register(inputs.cycle_end_state.pc.map(|x| Num::Var(x))),
     );
-    
+
     opt_ctx.enforce_all(cs);
     decoded_mask_bits
 }
@@ -471,7 +469,10 @@ pub fn add_sub_lui_auipc_mop_circuit_with_preprocessed_bytecode_and_decoded_bits
     CS: Circuit<F>,
 >(
     cs: &mut CS,
-) -> (OpcodeFamilyCircuitState<F>, [Variable; crate::definitions::ADD_SUB_LUI_AUIPC_MOP_FAMILY_NUM_FLAGS]) {
+) -> (
+    OpcodeFamilyCircuitState<F>,
+    [Variable; crate::definitions::ADD_SUB_LUI_AUIPC_MOP_FAMILY_NUM_FLAGS],
+) {
     let input: OpcodeFamilyCircuitState<F> = cs.allocate_execution_circuit_state::<true>();
     (input, apply_add_sub_lui_auipc_mop(cs, input.clone()))
 }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::cs::circuit::{picus_expr_from_constraint, PicusExpr, PicusStructuredConstraint};
 use crate::cs::utils::collapse_max_quadratic_constraint_into;
 use crate::cs::utils::mask_by_boolean_into_accumulator_constraint;
 use crate::cs::witness_placer::*;
@@ -40,6 +41,57 @@ pub fn materialize_tables_into_cs<F: PrimeField, CS: Circuit<F>>(cs: &mut CS) {
     for el in all_table_types() {
         cs.materialize_table(el);
     }
+}
+
+pub(crate) fn add_variable_from_constraint_with_picus_equality<F: PrimeField, CS: Circuit<F>>(
+    cs: &mut CS,
+    constraint: Constraint<F>,
+) -> Variable {
+    let variable = cs.add_variable_from_constraint(constraint.clone());
+    cs.add_picus_parallel_constraint(PicusStructuredConstraint::Eq {
+        lhs: picus_expr_from_constraint(&constraint),
+        rhs: PicusExpr::Variable(variable),
+    });
+    variable
+}
+
+pub(crate) fn add_constraint_with_picus_equality<F: PrimeField, CS: Circuit<F>>(
+    cs: &mut CS,
+    constraint: Constraint<F>,
+) {
+    cs.add_constraint(constraint.clone());
+    cs.add_picus_parallel_constraint(PicusStructuredConstraint::Eq {
+        lhs: picus_expr_from_constraint(&constraint),
+        rhs: PicusExpr::Constant(F::ZERO),
+    });
+}
+
+pub(crate) fn add_constraint_allow_explicit_linear_with_picus_equality<
+    F: PrimeField,
+    CS: Circuit<F>,
+>(
+    cs: &mut CS,
+    constraint: Constraint<F>,
+) {
+    cs.add_constraint_allow_explicit_linear(constraint.clone());
+    cs.add_picus_parallel_constraint(PicusStructuredConstraint::Eq {
+        lhs: picus_expr_from_constraint(&constraint),
+        rhs: PicusExpr::Constant(F::ZERO),
+    });
+}
+
+pub(crate) fn add_constraint_allow_explicit_linear_prevent_optimizations_with_picus_equality<
+    F: PrimeField,
+    CS: Circuit<F>,
+>(
+    cs: &mut CS,
+    constraint: Constraint<F>,
+) {
+    cs.add_constraint_allow_explicit_linear_prevent_optimizations(constraint.clone());
+    cs.add_picus_parallel_constraint(PicusStructuredConstraint::Eq {
+        lhs: picus_expr_from_constraint(&constraint),
+        rhs: PicusExpr::Constant(F::ZERO),
+    });
 }
 
 pub fn define_blake2_single_round_delegation_circuit<F: PrimeField, CS: Circuit<F>>(
@@ -177,8 +229,8 @@ pub fn define_blake2_single_round_delegation_circuit<F: PrimeField, CS: Circuit<
                 constraint_1,
             );
         }
-        let low = cs.add_variable_from_constraint(constraint_0);
-        let high = cs.add_variable_from_constraint(constraint_1);
+        let low = add_variable_from_constraint_with_picus_equality(cs, constraint_0);
+        let high = add_variable_from_constraint_with_picus_equality(cs, constraint_1);
 
         selected_permutation.push([low, high]);
     }
@@ -311,7 +363,7 @@ pub fn define_blake2_single_round_delegation_circuit<F: PrimeField, CS: Circuit<
             collapse_max_quadratic_constraint_into(cs, constraint.clone(), *dst);
             // add constraint
             constraint -= Term::from(*dst);
-            cs.add_constraint_allow_explicit_linear(constraint);
+            add_constraint_allow_explicit_linear_with_picus_equality(cs, constraint);
         }
     }
 
@@ -328,7 +380,7 @@ pub fn define_blake2_single_round_delegation_circuit<F: PrimeField, CS: Circuit<
             collapse_max_quadratic_constraint_into(cs, constraint.clone(), *dst);
             // add constraint
             constraint -= Term::from(*dst);
-            cs.add_constraint_allow_explicit_linear(constraint);
+            add_constraint_allow_explicit_linear_with_picus_equality(cs, constraint);
         }
     }
 
@@ -340,7 +392,7 @@ pub fn define_blake2_single_round_delegation_circuit<F: PrimeField, CS: Circuit<
             collapse_max_quadratic_constraint_into(cs, constraint.clone(), *dst);
             // add constraint
             constraint -= Term::from(*dst);
-            cs.add_constraint_allow_explicit_linear(constraint);
+            add_constraint_allow_explicit_linear_with_picus_equality(cs, constraint);
         }
     }
 
@@ -357,7 +409,7 @@ pub fn define_blake2_single_round_delegation_circuit<F: PrimeField, CS: Circuit<
             collapse_max_quadratic_constraint_into(cs, constraint.clone(), *dst);
             // add constraint
             constraint -= Term::from(*dst);
-            cs.add_constraint_allow_explicit_linear(constraint);
+            add_constraint_allow_explicit_linear_with_picus_equality(cs, constraint);
         }
     }
 
@@ -1365,5 +1417,4 @@ mod test {
         dbg!(circuit.witness_layout.total_width);
         dbg!(circuit.stage_2_layout.total_width);
     }
-
 }

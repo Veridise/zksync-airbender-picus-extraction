@@ -510,7 +510,9 @@ mod tests {
     use crate::cs::cs_reference::BasicAssembly;
     use crate::machine::machine_configurations::full_isa_with_delegation_no_exceptions::FullIsaMachineWithDelegationNoExceptionHandling;
     use crate::machine::machine_configurations::minimal_no_exceptions_with_delegation::MinimalMachineNoExceptionHandlingWithDelegation;
-    use crate::one_row_compiler::{CompiledCircuitArtifact, OneRowCompiler, ProtectedConstraintSnapshot};
+    use crate::one_row_compiler::{
+        CompiledCircuitArtifact, OneRowCompiler, ProtectedConstraintSnapshot,
+    };
     use crate::tables::{LookupWrapper, TableType};
 
     const SECOND_WORD_BITS: usize = 4;
@@ -537,10 +539,9 @@ mod tests {
             &[],
             TableType::RomRead.to_table_id(),
         );
-        output.table_driver.add_table_with_content(
-            TableType::RomRead,
-            LookupWrapper::Dimensional3(rom_table),
-        );
+        output
+            .table_driver
+            .add_table_with_content(TableType::RomRead, LookupWrapper::Dimensional3(rom_table));
         let csr_table = create_csr_table_for_delegation(
             true,
             &[1991],
@@ -606,18 +607,16 @@ mod tests {
 
     #[test]
     fn machine_compile_keeps_all_protected_constraints() {
-        let (full_artifact, full_protected) =
-            compile_machine_with_protected_constraints::<
-                FullIsaMachineWithDelegationNoExceptionHandling,
-                SECOND_WORD_BITS,
-            >();
+        let (full_artifact, full_protected) = compile_machine_with_protected_constraints::<
+            FullIsaMachineWithDelegationNoExceptionHandling,
+            SECOND_WORD_BITS,
+        >();
         assert_all_protected_constraints_are_present(&full_artifact, &full_protected);
 
-        let (minimal_artifact, minimal_protected) =
-            compile_machine_with_protected_constraints::<
-                MinimalMachineNoExceptionHandlingWithDelegation,
-                SECOND_WORD_BITS,
-            >();
+        let (minimal_artifact, minimal_protected) = compile_machine_with_protected_constraints::<
+            MinimalMachineNoExceptionHandlingWithDelegation,
+            SECOND_WORD_BITS,
+        >();
         assert_all_protected_constraints_are_present(&minimal_artifact, &minimal_protected);
     }
 }

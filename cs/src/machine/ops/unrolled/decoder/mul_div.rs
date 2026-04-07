@@ -1,6 +1,6 @@
 use super::*;
-use crate::cs::witness_placer::{WitnessMask, WitnessPlacer, WitnessTypeSet};
 use crate::constraint::Constraint;
+use crate::cs::witness_placer::{WitnessMask, WitnessPlacer, WitnessTypeSet};
 use crate::types::Boolean;
 
 const IS_DIVISION_BIT: usize = 0;

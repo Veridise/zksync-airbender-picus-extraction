@@ -87,7 +87,8 @@ pub fn calculate_pc_next_no_overflows<F: PrimeField, CS: Circuit<F>>(
         * PicusExpr::Constant(F::from_u64_unchecked(1 << 16).inverse().unwrap());
     circuit.add_picus_parallel_constraint(PicusStructuredConstraint::Eq {
         lhs: PicusExpr::Variable(pc_next_low)
-            + PicusExpr::Constant(F::from_u64_unchecked(1 << 16)) * parallel_carry_constraint.clone(),
+            + PicusExpr::Constant(F::from_u64_unchecked(1 << 16))
+                * parallel_carry_constraint.clone(),
         rhs: picus_expr_from_num(pc.0[0]) + PicusExpr::from_const(PC_INC_STEP),
     });
     circuit.add_picus_parallel_constraint(PicusStructuredConstraint::Eq {

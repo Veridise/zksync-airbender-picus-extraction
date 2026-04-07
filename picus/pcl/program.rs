@@ -1,5 +1,5 @@
 use crate::pcl::{
-    expr::{PicusConstraint, PicusExpr},
+    expr::{PicusConstraint, PicusExpr, current_modulus},
     partial_evaluate, partial_evaluate_calls,
 };
 use std::{
@@ -153,12 +153,227 @@ impl PicusModule {
         let postconditions = partial_evaluate(&self.postconditions, env);
         PicusModule {
             name,
-            inputs: self.inputs.clone(),
-            outputs: self.outputs.clone(),
+            inputs: self
+                .inputs
+                .iter()
+                .filter(|expr| !matches!(expr, PicusExpr::Var(var_id) if env.contains_key(var_id)))
+                .cloned()
+                .collect(),
+            outputs: self
+                .outputs
+                .iter()
+                .filter(|expr| !matches!(expr, PicusExpr::Var(var_id) if env.contains_key(var_id)))
+                .cloned()
+                .collect(),
             constraints,
             postconditions,
             assume_deterministic: self.assume_deterministic.clone(),
             calls,
+        }
+    }
+
+    #[must_use]
+    /// Simplify a module by inferring constant equalities from asserted constraints and
+    /// partially evaluating the module with those inferred constants.
+    ///
+    /// This is intentionally driven only by `constraints`, not `postconditions`, so we do not
+    /// accidentally strengthen the module by treating a postcondition as an assumption.
+    pub fn simplify_with_inferred_equalities(&self) -> Self {
+        let inferred = infer_constant_env_from_constraints(&self.constraints);
+        if inferred.is_empty() {
+            return self.clone();
+        }
+
+        PicusModule {
+            name: self.name.clone(),
+            inputs: self.inputs.clone(),
+            outputs: self.outputs.clone(),
+            constraints: partial_evaluate(&self.constraints, &inferred),
+            postconditions: partial_evaluate(&self.postconditions, &inferred),
+            assume_deterministic: self.assume_deterministic.clone(),
+            calls: partial_evaluate_calls(&self.calls, &inferred),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct AffineExpr {
+    constant: u64,
+    var: Option<(usize, u64)>,
+}
+
+fn field_modulus() -> u64 {
+    current_modulus().expect("Picus field modulus should be initialized")
+}
+
+fn add_mod(a: u64, b: u64) -> u64 {
+    let p = field_modulus();
+    let sum = a + b;
+    if sum >= p { sum - p } else { sum }
+}
+
+fn neg_mod(a: u64) -> u64 {
+    if a == 0 { 0 } else { field_modulus() - a }
+}
+
+fn sub_mod(a: u64, b: u64) -> u64 {
+    add_mod(a, neg_mod(b))
+}
+
+fn mul_mod(a: u64, b: u64) -> u64 {
+    ((a as u128 * b as u128) % field_modulus() as u128) as u64
+}
+
+fn pow_mod(mut base: u64, mut exp: u64) -> u64 {
+    let p = field_modulus() as u128;
+    let mut acc = 1u64;
+    while exp > 0 {
+        if exp & 1 == 1 {
+            acc = ((acc as u128 * base as u128) % p) as u64;
+        }
+        base = ((base as u128 * base as u128) % p) as u64;
+        exp >>= 1;
+    }
+    acc
+}
+
+fn inv_mod(a: u64) -> Option<u64> {
+    if a == 0 {
+        None
+    } else {
+        Some(pow_mod(a, field_modulus() - 2))
+    }
+}
+
+fn add_affine_terms(
+    lhs: Option<(usize, u64)>,
+    rhs: Option<(usize, u64)>,
+) -> Option<Option<(usize, u64)>> {
+    match (lhs, rhs) {
+        (None, None) => Some(None),
+        (Some(term), None) | (None, Some(term)) => Some(Some(term)),
+        (Some((lhs_var, lhs_coeff)), Some((rhs_var, rhs_coeff))) => {
+            if lhs_var != rhs_var {
+                None
+            } else {
+                let coeff = add_mod(lhs_coeff, rhs_coeff);
+                if coeff == 0 {
+                    Some(None)
+                } else {
+                    Some(Some((lhs_var, coeff)))
+                }
+            }
+        }
+    }
+}
+
+fn scale_affine(expr: AffineExpr, factor: u64) -> AffineExpr {
+    AffineExpr {
+        constant: mul_mod(expr.constant, factor),
+        var: expr
+            .var
+            .map(|(var_id, coeff)| (var_id, mul_mod(coeff, factor))),
+    }
+}
+
+fn affine_expr(expr: &PicusExpr) -> Option<AffineExpr> {
+    use PicusExpr::{Add, Const, Div, Mul, Neg, Pow, Sub, Var};
+
+    match expr {
+        Const(c) => Some(AffineExpr {
+            constant: *c % field_modulus(),
+            var: None,
+        }),
+        Var(var_id) => Some(AffineExpr {
+            constant: 0,
+            var: Some((*var_id, 1)),
+        }),
+        Add(lhs, rhs) => {
+            let lhs = affine_expr(lhs)?;
+            let rhs = affine_expr(rhs)?;
+            Some(AffineExpr {
+                constant: add_mod(lhs.constant, rhs.constant),
+                var: add_affine_terms(lhs.var, rhs.var)?,
+            })
+        }
+        Sub(lhs, rhs) => {
+            let lhs = affine_expr(lhs)?;
+            let rhs = affine_expr(rhs)?;
+            Some(AffineExpr {
+                constant: sub_mod(lhs.constant, rhs.constant),
+                var: add_affine_terms(
+                    lhs.var,
+                    rhs.var.map(|(var_id, coeff)| (var_id, neg_mod(coeff))),
+                )?,
+            })
+        }
+        Neg(inner) => {
+            let inner = affine_expr(inner)?;
+            Some(AffineExpr {
+                constant: neg_mod(inner.constant),
+                var: inner.var.map(|(var_id, coeff)| (var_id, neg_mod(coeff))),
+            })
+        }
+        Mul(lhs, rhs) => {
+            let lhs = affine_expr(lhs)?;
+            let rhs = affine_expr(rhs)?;
+            if lhs.var.is_none() {
+                Some(scale_affine(rhs, lhs.constant))
+            } else if rhs.var.is_none() {
+                Some(scale_affine(lhs, rhs.constant))
+            } else {
+                None
+            }
+        }
+        Div(lhs, rhs) => {
+            let lhs = affine_expr(lhs)?;
+            let rhs = affine_expr(rhs)?;
+            if rhs.var.is_none() {
+                Some(scale_affine(lhs, inv_mod(rhs.constant)?))
+            } else {
+                None
+            }
+        }
+        Pow(exp, inner) => match *exp {
+            0 => Some(AffineExpr {
+                constant: 1,
+                var: None,
+            }),
+            1 => affine_expr(inner),
+            _ => None,
+        },
+    }
+}
+
+fn infer_constant_from_constraint(constraint: &PicusConstraint) -> Option<(usize, u64)> {
+    let PicusConstraint::Eq(expr) = constraint else {
+        return None;
+    };
+    let affine = affine_expr(expr)?;
+    let (var_id, coeff) = affine.var?;
+    let value = mul_mod(neg_mod(affine.constant), inv_mod(coeff)?);
+    Some((var_id, value))
+}
+
+fn infer_constant_env_from_constraints(constraints: &[PicusConstraint]) -> BTreeMap<usize, u64> {
+    let mut inferred = BTreeMap::new();
+
+    loop {
+        let reduced = partial_evaluate(constraints, &inferred);
+        let mut changed = false;
+
+        for constraint in &reduced {
+            let Some((var_id, value)) = infer_constant_from_constraint(constraint) else {
+                continue;
+            };
+            if let std::collections::btree_map::Entry::Vacant(entry) = inferred.entry(var_id) {
+                entry.insert(value);
+                changed = true;
+            }
+        }
+
+        if !changed {
+            return inferred;
         }
     }
 }

@@ -1722,7 +1722,9 @@ fn enforce_copies<F: PrimeField, CS: Circuit<F>>(
 mod test {
     use super::*;
     use crate::cs::cs_reference::BasicAssembly;
-    use crate::one_row_compiler::{CompiledCircuitArtifact, OneRowCompiler, ProtectedConstraintSnapshot};
+    use crate::one_row_compiler::{
+        CompiledCircuitArtifact, OneRowCompiler, ProtectedConstraintSnapshot,
+    };
     use crate::utils::serialize_to_file;
     use field::Mersenne31Field;
 

@@ -114,7 +114,8 @@ fn describe_decoder_cycle_for_supplied_opcode<F: PrimeField, CS: Circuit<F>>(
     rs1_low_constraint.scale(F::from_u64_unchecked(1 << 15).inverse().unwrap());
     circuit
         .add_constraint(rs1_low_constraint.clone() * (rs1_low_constraint.clone() - Term::from(1)));
-    let rs1_low_var = circuit.add_variable_from_constraint_allow_explicit_linear(rs1_low_constraint.clone());
+    let rs1_low_var =
+        circuit.add_variable_from_constraint_allow_explicit_linear(rs1_low_constraint.clone());
     circuit.add_picus_parallel_constraint(PicusStructuredConstraint::Eq {
         lhs: picus_expr_from_num_circuit(opcode)
             + PicusExpr::from_const(1 << 7) * picus_expr_from_num_circuit(rd_from_decoder)
@@ -371,8 +372,7 @@ fn describe_decoder_cycle_for_supplied_opcode<F: PrimeField, CS: Circuit<F>>(
     circuit.add_picus_parallel_constraint(PicusStructuredConstraint::Eq {
         lhs: picus_expr_from_boolean_circuit(i_insn) * picus_expr_from_boolean_circuit(rs2_low)
             + picus_expr_from_boolean_circuit(s_insn) * picus_expr_from_boolean_circuit(imm11)
-            + ((picus_expr_from_boolean_circuit(i_insn)
-                + picus_expr_from_boolean_circuit(j_insn))
+            + ((picus_expr_from_boolean_circuit(i_insn) + picus_expr_from_boolean_circuit(j_insn))
                 * PicusExpr::Variable(rs2_high_var)
                 + (picus_expr_from_boolean_circuit(s_insn)
                     + picus_expr_from_boolean_circuit(b_insn))
@@ -381,8 +381,7 @@ fn describe_decoder_cycle_for_supplied_opcode<F: PrimeField, CS: Circuit<F>>(
             + ((PicusExpr::from_const(1) - picus_expr_from_boolean_circuit(u_insn))
                 * picus_expr_from_num_circuit(imm10_5))
                 * PicusExpr::from_const(1 << 5)
-            + ((picus_expr_from_boolean_circuit(i_insn)
-                + picus_expr_from_boolean_circuit(s_insn))
+            + ((picus_expr_from_boolean_circuit(i_insn) + picus_expr_from_boolean_circuit(s_insn))
                 * PicusExpr::Variable(sign_bit_var)
                 + picus_expr_from_boolean_circuit(b_insn) * picus_expr_from_boolean_circuit(imm11)
                 + picus_expr_from_boolean_circuit(j_insn)
@@ -416,7 +415,8 @@ fn describe_decoder_cycle_for_supplied_opcode<F: PrimeField, CS: Circuit<F>>(
         lhs: picus_expr_from_boolean_circuit(j_insn)
             * (PicusExpr::Variable(sign_bit_var) * PicusExpr::from_const(0xfff0)
                 + PicusExpr::Variable(rs1_high_var))
-            + picus_expr_from_boolean_circuit(u_insn) * picus_expr_from_num_circuit(next_opcode.0[1])
+            + picus_expr_from_boolean_circuit(u_insn)
+                * picus_expr_from_num_circuit(next_opcode.0[1])
             + (PicusExpr::from_const(1)
                 - picus_expr_from_boolean_circuit(j_insn)
                 - picus_expr_from_boolean_circuit(u_insn))
@@ -454,8 +454,7 @@ fn describe_decoder_cycle_for_supplied_opcode<F: PrimeField, CS: Circuit<F>>(
                 - Term::from(1),
         );
         circuit.add_picus_parallel_constraint(PicusStructuredConstraint::Eq {
-            lhs: picus_expr_from_num_circuit(rd_from_decoder)
-                * PicusExpr::Variable(zero_flag_var),
+            lhs: picus_expr_from_num_circuit(rd_from_decoder) * PicusExpr::Variable(zero_flag_var),
             rhs: PicusExpr::from_const(0),
         });
         circuit.add_picus_parallel_constraint(PicusStructuredConstraint::Eq {
@@ -512,12 +511,12 @@ fn opcode_lookup<F: PrimeField, CS: Circuit<F>>(
         + Term::from(opcode_family_bitmask_var) * Term::from(1 << NUM_DEFAULT_DECODER_BITS);
     let splitting_var =
         circuit.add_variable_from_constraint_allow_explicit_linear(splitting_constraint.clone());
-    let formats_expr = opcode_formats_except_r
-        .iter()
-        .enumerate()
-        .fold(picus_expr_from_boolean_circuit(is_invalid), |acc, (i, flag)| {
+    let formats_expr = opcode_formats_except_r.iter().enumerate().fold(
+        picus_expr_from_boolean_circuit(is_invalid),
+        |acc, (i, flag)| {
             acc + PicusExpr::from_const(1 << (1 + i)) * picus_expr_from_boolean_circuit(*flag)
-        });
+        },
+    );
     circuit.add_picus_parallel_constraint(PicusStructuredConstraint::Eq {
         lhs: formats_expr
             + PicusExpr::from_const(1 << NUM_DEFAULT_DECODER_BITS)

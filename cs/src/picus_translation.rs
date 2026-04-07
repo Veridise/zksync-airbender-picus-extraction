@@ -1,21 +1,24 @@
 use crate::constraint::{Constraint, Term};
 use crate::cs::circuit::{
     Circuit, CircuitOutput, LookupQuery, LookupQueryTableType, PicusExpr as CircuitPicusExpr,
+    PicusRegion as CircuitPicusRegion,
     PicusStructuredConstraint as CircuitPicusStructuredConstraint, ShuffleRamMemQuery,
 };
 use crate::cs::cs_reference::BasicAssembly;
+use crate::definitions::{
+    ColumnAddress, CompiledDegree1Constraint, CompiledDegree2Constraint, OpcodeFamilyCircuitState,
+    TableType, Variable, ADD_SUB_LUI_AUIPC_MOP_FAMILY_NUM_FLAGS, JUMP_SLT_BRANCH_FAMILY_NUM_BITS,
+    MEMORY_FAMILY_NUM_FLAGS, MUL_DIV_FAMILY_NUM_FLAGS, REDUCED_MACHINE_NUM_FLAGS,
+    SHIFT_BINARY_CSRRW_FAMILY_NUM_FLAGS, SUBWORD_ONLY_MEMORY_FAMILY_NUM_FLAGS,
+    WORD_ONLY_MEMORY_FAMILY_NUM_FLAGS,
+};
 use crate::delegation::bigint_with_control::{
-    define_u256_ops_extended_control_delegation_circuit_with_metadata, BigintDelegationPicusMetadata,
+    define_u256_ops_extended_control_delegation_circuit_with_metadata,
+    BigintDelegationPicusMetadata,
 };
 use crate::delegation::blake2_round_with_extended_control::{
     define_blake2_with_extended_control_delegation_circuit_with_metadata,
     Blake2WithExtendedControlDelegationPicusMetadata,
-};
-use crate::definitions::{
-    OpcodeFamilyCircuitState, TableType, Variable, ADD_SUB_LUI_AUIPC_MOP_FAMILY_NUM_FLAGS,
-    JUMP_SLT_BRANCH_FAMILY_NUM_BITS, MEMORY_FAMILY_NUM_FLAGS, MUL_DIV_FAMILY_NUM_FLAGS,
-    REDUCED_MACHINE_NUM_FLAGS, SHIFT_BINARY_CSRRW_FAMILY_NUM_FLAGS,
-    SUBWORD_ONLY_MEMORY_FAMILY_NUM_FLAGS,
 };
 use crate::devices::diffs::{CommonDiffs, NextPcValue};
 use crate::devices::optimization_context::OptimizationContext;
@@ -37,29 +40,39 @@ use crate::machine::ops::jump::{JumpOp, JAL_OP_KEY, JUMP_COMMON_OP_KEY};
 use crate::machine::ops::lui_auipc::{AuiPc, LuiOp, AUIPC_OP_KEY, LUI_OP_KEY};
 use crate::machine::ops::mop::{MopOp, ADDMOD_OP_KEY, MOP_OP_KEY, MULMOD_OP_KEY, SUBMOD_OP_KEY};
 use crate::machine::ops::mul_div::{
-    DivRemOp, MulOp, DIVREM_COMMON_OP_KEY, DIVU_OP_KEY, DIV_OP_KEY, MULHSU_OP_KEY,
-    MULH_OP_KEY, MUL_COMMON_OP_KEY, MUL_OP_KEY, REM_OP_KEY,
+    DivRemOp, MulOp, DIVREM_COMMON_OP_KEY, DIVU_OP_KEY, DIV_OP_KEY, MULHSU_OP_KEY, MULH_OP_KEY,
+    MUL_COMMON_OP_KEY, MUL_OP_KEY, REM_OP_KEY,
 };
 use crate::machine::ops::shift::{
     ShiftOp, SHIFT_COMMON_OP_KEY, SHIFT_RIGHT_ALGEBRAIC_KEY, SHIFT_RIGHT_KEY,
 };
 use crate::machine::ops::unrolled::jump_branch_slt::jump_branch_slt_table_addition_fn;
 use crate::machine::ops::unrolled::load_store::{
+    create_load_store_special_tables, load_store_circuit_with_preprocessed_bytecode,
     load_store_circuit_with_preprocessed_bytecode_with_decoded_bits, load_store_table_addition_fn,
 };
 use crate::machine::ops::unrolled::load_store_subword_only::{
+    subword_only_load_store_circuit_with_preprocessed_bytecode,
     subword_only_load_store_circuit_with_preprocessed_bytecode_with_decoded_bits,
     subword_only_load_store_table_addition_fn,
 };
+use crate::machine::ops::unrolled::load_store_word_only::{
+    create_word_only_load_store_special_tables,
+    word_only_load_store_circuit_with_preprocessed_bytecode,
+    word_only_load_store_circuit_with_preprocessed_bytecode_with_decoded_bits,
+    word_only_load_store_table_addition_fn,
+};
 use crate::machine::ops::unrolled::mul_div::{
+    mul_div_circuit_with_preprocessed_bytecode,
     mul_div_circuit_with_preprocessed_bytecode_with_decoded_bits, mul_div_table_addition_fn,
 };
 use crate::machine::ops::unrolled::reduced_machine_ops::{
-    create_reduced_machine_special_tables,
+    create_reduced_machine_special_tables, reduced_machine_circuit_with_preprocessed_bytecode,
     reduced_machine_circuit_with_preprocessed_bytecode_with_decoded_bits,
     reduced_machine_table_addition_fn,
 };
 use crate::machine::ops::unrolled::shift_binary_csr::{
+    shift_binop_csrrw_circuit_with_preprocessed_bytecode,
     shift_binop_csrrw_circuit_with_preprocessed_bytecode_with_decoded_bits,
     shift_binop_csrrw_table_addition_fn,
 };
@@ -67,25 +80,28 @@ use crate::machine::ops::unrolled::{
     add_sub_lui_auipc_mop::add_sub_lui_auipc_mop_circuit_with_preprocessed_bytecode,
     add_sub_lui_auipc_mop::add_sub_lui_auipc_mop_circuit_with_preprocessed_bytecode_and_decoded_bits,
     add_sub_lui_auipc_mop::add_sub_lui_auipc_mop_table_addition_fn,
+    compile_unified_circuit_state_transition, compile_unrolled_circuit_state_transition,
     decoder::{
         describe_decoder_cycle_from_opcode_with_metadata, OpcodeFamilyDecoder,
         ReducedMachineDecoder, UnrolledDecoderPicusMetadata,
     },
+    jump_branch_slt::jump_branch_slt_circuit_with_preprocessed_bytecode,
     jump_branch_slt::jump_branch_slt_circuit_with_preprocessed_bytecode_with_decoded_bits,
 };
 use crate::machine::ops::{RS1_LOAD_LOCAL_TIMESTAMP, RS2_LOAD_LOCAL_TIMESTAMP};
 use crate::machine::IndexableBooleanSet;
-use crate::machine::{Machine, MachineOp};
+use crate::machine::{Machine, MachineOp, UNIMP_OPCODE};
 use crate::tables::LookupWrapper;
 use crate::types::{Boolean, Num, Register};
 use field::{Mersenne31Field, PrimeField};
-use picus::{PicusConstraint, PicusExpr, PicusModule, PicusProgram};
+use picus::{PicusCall, PicusConstraint, PicusExpr, PicusModule, PicusProgram};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod lookups;
 use lookups::{add_disjunctive_lookup_constraints, add_lookup_constraints};
 
 const U16_BOUND: u64 = 1 << 16;
+const DUMMY_UNROLLED_BYTECODE: &[u32] = &[UNIMP_OPCODE];
 
 #[derive(Clone, Debug)]
 pub struct DecoderSpecialization {
@@ -120,6 +136,17 @@ fn specialization_for_flat_one_hot(decoded_bits: &[usize]) -> DecoderSpecializat
     }
 
     DecoderSpecialization::from_assignments(assignments)
+}
+
+fn specialization_for_flat_one_hot_with_mask(
+    decoded_bits: &[usize],
+    mask_var_id: usize,
+) -> DecoderSpecialization {
+    let mut specialization = specialization_for_flat_one_hot(decoded_bits);
+    for (active_bit, env) in specialization.assignments.iter_mut().enumerate() {
+        env.insert(mask_var_id, 1u64 << active_bit);
+    }
+    specialization
 }
 
 fn specialization_for_mul_div_signed(decoded_bits: &[usize]) -> DecoderSpecialization {
@@ -215,6 +242,35 @@ fn specialization_for_shift_binop_csrrw(
     DecoderSpecialization::from_assignments(assignments)
 }
 
+fn specialization_for_jump_branch_slt(
+    decoded_bits: &[usize],
+    mask_var_id: usize,
+) -> DecoderSpecialization {
+    let [is_branches, is_slti, is_slt, is_jal, is_jalr] = decoded_bits else {
+        panic!("jump/branch/slt specialization expects exactly five decoded bits");
+    };
+    let bit_ids = [*is_branches, *is_slti, *is_slt, *is_jal, *is_jalr];
+
+    let cases = [
+        ([1, 0, 0, 0, 0], 1u64 << 4), // BRANCH
+        ([0, 1, 0, 0, 0], 1u64 << 3), // SLTI / SLTIU
+        ([0, 0, 1, 0, 0], 1u64 << 2), // SLT / SLTU
+        ([0, 0, 0, 1, 0], 1u64 << 0), // JAL
+        ([0, 0, 0, 0, 1], 1u64 << 1), // JALR
+    ];
+
+    DecoderSpecialization::from_assignments(
+        cases
+            .into_iter()
+            .map(|(values, mask)| {
+                let mut env: BTreeMap<usize, u64> = bit_ids.into_iter().zip(values).collect();
+                env.insert(mask_var_id, mask);
+                env
+            })
+            .collect(),
+    )
+}
+
 fn specialization_from_valid_bitmasks(
     decoded_bits: &[usize],
     valid_masks: impl IntoIterator<Item = u32>,
@@ -249,6 +305,20 @@ fn specialization_with_fixed_assignment(
             env.insert(var_id, value);
             env
         })
+        .collect();
+
+    DecoderSpecialization::from_assignments(assignments)
+}
+
+fn specialization_filtered_by_assignment(
+    specialization: DecoderSpecialization,
+    var_id: usize,
+    value: u64,
+) -> DecoderSpecialization {
+    let assignments = specialization
+        .assignments
+        .into_iter()
+        .filter(|env| env.get(&var_id) == Some(&value))
         .collect();
 
     DecoderSpecialization::from_assignments(assignments)
@@ -383,10 +453,158 @@ enum DivRemVariant {
     UnsignedOnly,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum DivRemOpcode {
+    Div,
+    Divu,
+    Rem,
+    Remu,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DivRemScenario {
+    name: &'static str,
+    numerator: u32,
+    denominator: u32,
+}
+
+const fn signed_word(value: i32) -> u32 {
+    value as u32
+}
+
+const SIGNED_DIVREM_SCENARIOS: [DivRemScenario; 10] = [
+    DivRemScenario {
+        name: "zero_over_one",
+        numerator: 0,
+        denominator: 1,
+    },
+    DivRemScenario {
+        name: "one_over_one",
+        numerator: 1,
+        denominator: 1,
+    },
+    DivRemScenario {
+        name: "num_gt_den",
+        numerator: 7,
+        denominator: 3,
+    },
+    DivRemScenario {
+        name: "den_gt_num",
+        numerator: 3,
+        denominator: 7,
+    },
+    DivRemScenario {
+        name: "equal_operands",
+        numerator: 9,
+        denominator: 9,
+    },
+    DivRemScenario {
+        name: "neg_num",
+        numerator: signed_word(-7),
+        denominator: 3,
+    },
+    DivRemScenario {
+        name: "neg_den",
+        numerator: 7,
+        denominator: signed_word(-3),
+    },
+    DivRemScenario {
+        name: "both_negative",
+        numerator: signed_word(-7),
+        denominator: signed_word(-3),
+    },
+    DivRemScenario {
+        name: "div_by_zero",
+        numerator: 123_456_789,
+        denominator: 0,
+    },
+    DivRemScenario {
+        name: "min_over_minus_one",
+        numerator: signed_word(i32::MIN),
+        denominator: signed_word(-1),
+    },
+];
+
+const UNSIGNED_DIVREM_SCENARIOS: [DivRemScenario; 10] = [
+    DivRemScenario {
+        name: "zero_over_one",
+        numerator: 0,
+        denominator: 1,
+    },
+    DivRemScenario {
+        name: "one_over_one",
+        numerator: 1,
+        denominator: 1,
+    },
+    DivRemScenario {
+        name: "num_gt_den",
+        numerator: 7,
+        denominator: 3,
+    },
+    DivRemScenario {
+        name: "den_gt_num",
+        numerator: 3,
+        denominator: 7,
+    },
+    DivRemScenario {
+        name: "equal_operands",
+        numerator: 9,
+        denominator: 9,
+    },
+    DivRemScenario {
+        name: "max_over_two",
+        numerator: u32::MAX,
+        denominator: 2,
+    },
+    DivRemScenario {
+        name: "max_over_max",
+        numerator: u32::MAX,
+        denominator: u32::MAX,
+    },
+    DivRemScenario {
+        name: "highbit_over_three",
+        numerator: 0x8000_0000,
+        denominator: 3,
+    },
+    DivRemScenario {
+        name: "three_over_highbit",
+        numerator: 3,
+        denominator: 0x8000_0000,
+    },
+    DivRemScenario {
+        name: "div_by_zero",
+        numerator: 0x1234_5678,
+        denominator: 0,
+    },
+];
+
 struct StandaloneHarness {
     circuit_output: CircuitOutput<Mersenne31Field>,
     extra_inputs: Vec<PicusExpr>,
     extra_outputs: Vec<PicusExpr>,
+}
+
+impl DivRemOpcode {
+    fn op_name(self) -> &'static str {
+        match self {
+            DivRemOpcode::Div => "div",
+            DivRemOpcode::Divu => "divu",
+            DivRemOpcode::Rem => "rem",
+            DivRemOpcode::Remu => "remu",
+        }
+    }
+
+    fn mode_for_variant(self, variant: DivRemVariant) -> u64 {
+        match (variant, self) {
+            (DivRemVariant::Signed, DivRemOpcode::Div) => 0,
+            (DivRemVariant::Signed, DivRemOpcode::Divu) => 1,
+            (DivRemVariant::Signed, DivRemOpcode::Rem) => 2,
+            (DivRemVariant::Signed, DivRemOpcode::Remu) => 3,
+            (DivRemVariant::UnsignedOnly, DivRemOpcode::Divu) => 0,
+            (DivRemVariant::UnsignedOnly, DivRemOpcode::Remu) => 1,
+            _ => panic!("unsupported div/rem opcode for harness variant"),
+        }
+    }
 }
 
 fn fixed_boolean<CS: Circuit<Mersenne31Field>>(cs: &mut CS, value: bool) -> Boolean {
@@ -444,7 +662,8 @@ fn register_as_inputs(reg: Register<Mersenne31Field>) -> Vec<PicusExpr> {
 }
 
 fn word_pairs_to_picus_exprs(words: &[[Variable; 2]]) -> Vec<PicusExpr> {
-    words.iter()
+    words
+        .iter()
         .flat_map(|word| word.iter().copied().map(variable_to_picus_expr))
         .collect()
 }
@@ -537,21 +756,92 @@ fn materialize_trap_outputs<CS: Circuit<Mersenne31Field>>(
     }
 }
 
-fn build_standalone_program(harness_name: &str, harness: StandaloneHarness) -> PicusProgram {
-    let module = build_picus_module_from_circuit_output(
+fn build_standalone_root_module(harness_name: &str, harness: &StandaloneHarness) -> PicusModule {
+    build_picus_module_from_circuit_output(
         harness_name,
         &harness.circuit_output,
         None,
         &harness.extra_inputs,
         &harness.extra_outputs,
         &[],
+    )
+}
+
+fn build_standalone_program(harness_name: &str, harness: StandaloneHarness) -> PicusProgram {
+    let module = build_standalone_root_module(harness_name, &harness);
+    build_program_from_root_module(module, &harness.circuit_output)
+}
+
+fn append_divrem_case_constraints(
+    module: &mut PicusModule,
+    semantic_inputs: &[PicusExpr],
+    numerator: u32,
+    denominator: u32,
+    mode: u64,
+) {
+    assert_eq!(
+        semantic_inputs.len(),
+        5,
+        "div/rem harness must expose rs1, rs2, and mode inputs",
     );
 
-    let mut modules = BTreeMap::new();
-    modules.insert(module.name.clone(), module);
-    let mut program = PicusProgram::new(Mersenne31Field::CHARACTERISTICS);
-    program.add_modules(&mut modules);
-    program
+    let assignments = [
+        ((numerator & 0xffff) as u64, semantic_inputs[0].clone()),
+        ((numerator >> 16) as u64, semantic_inputs[1].clone()),
+        ((denominator & 0xffff) as u64, semantic_inputs[2].clone()),
+        ((denominator >> 16) as u64, semantic_inputs[3].clone()),
+        (mode, semantic_inputs[4].clone()),
+    ];
+
+    for (value, input_expr) in assignments {
+        module.constraints.push(PicusConstraint::new_equality(
+            input_expr,
+            PicusExpr::Const(value),
+        ));
+    }
+}
+
+fn build_divrem_case_root_modules(
+    harness_name: &str,
+    harness: &StandaloneHarness,
+    variant: DivRemVariant,
+) -> Vec<PicusModule> {
+    let base_module = build_standalone_root_module(harness_name, harness);
+    let mut modules = Vec::new();
+
+    if matches!(variant, DivRemVariant::Signed) {
+        for opcode in [DivRemOpcode::Div, DivRemOpcode::Rem] {
+            for scenario in SIGNED_DIVREM_SCENARIOS {
+                let mut module = base_module.clone();
+                module.name = format!("{harness_name}__{}__{}", opcode.op_name(), scenario.name);
+                append_divrem_case_constraints(
+                    &mut module,
+                    &harness.extra_inputs,
+                    scenario.numerator,
+                    scenario.denominator,
+                    opcode.mode_for_variant(variant),
+                );
+                modules.push(module);
+            }
+        }
+    }
+
+    for opcode in [DivRemOpcode::Divu, DivRemOpcode::Remu] {
+        for scenario in UNSIGNED_DIVREM_SCENARIOS {
+            let mut module = base_module.clone();
+            module.name = format!("{harness_name}__{}__{}", opcode.op_name(), scenario.name);
+            append_divrem_case_constraints(
+                &mut module,
+                &harness.extra_inputs,
+                scenario.numerator,
+                scenario.denominator,
+                opcode.mode_for_variant(variant),
+            );
+            modules.push(module);
+        }
+    }
+
+    modules
 }
 
 fn build_binary_like_decoder_output<CS: Circuit<Mersenne31Field>>(
@@ -912,7 +1202,8 @@ fn build_conditional_harness() -> StandaloneHarness {
         funct12: Constraint::from(0u64),
     };
     let initial_state = MinimalStateRegistersInMemory { pc };
-    let flags = ExplicitFlagSource::new(false_flag).with_major(CONDITIONAL_COMMON_OP_KEY, true_flag);
+    let flags =
+        ExplicitFlagSource::new(false_flag).with_major(CONDITIONAL_COMMON_OP_KEY, true_flag);
     let mut opt_ctx = OptimizationContext::<Mersenne31Field, _>::new();
     let diffs = ConditionalOp::<true>::apply::<_, true, false>(
         &mut cs,
@@ -1211,40 +1502,47 @@ fn neg_expr(expr: PicusExpr) -> PicusExpr {
     PicusExpr::Sub(Box::new(PicusExpr::Const(0)), Box::new(expr))
 }
 
+fn field_constant_to_picus_expr<F: PrimeField>(constant: F) -> PicusExpr {
+    let coeff = constant.as_u64_reduced();
+    let coeff_opp = F::CHARACTERISTICS - coeff;
+    if coeff < coeff_opp {
+        PicusExpr::Const(coeff)
+    } else {
+        neg_expr(PicusExpr::Const(coeff_opp))
+    }
+}
+
+fn scaled_picus_expr<F: PrimeField>(coeff: F, expr: PicusExpr) -> PicusExpr {
+    let coeff = coeff.as_u64_reduced();
+    let coeff_opp = F::CHARACTERISTICS - coeff;
+
+    if coeff < coeff_opp {
+        if coeff == 1 {
+            expr
+        } else {
+            PicusExpr::Const(coeff) * expr
+        }
+    } else if coeff_opp == 1 {
+        neg_expr(expr)
+    } else {
+        neg_expr(PicusExpr::Const(coeff_opp) * expr)
+    }
+}
+
 fn term_to_picus_expr<F: PrimeField>(term: &Term<F>) -> PicusExpr {
     match term {
-        Term::Constant(c) => {
-            let coeff = c.as_u64_reduced();
-            let coeff_opp = F::CHARACTERISTICS - coeff;
-            if coeff < coeff_opp {
-                PicusExpr::Const(coeff)
-            } else {
-                neg_expr(PicusExpr::Const(coeff_opp))
-            }
-        }
+        Term::Constant(c) => field_constant_to_picus_expr(*c),
         Term::Expression {
             coeff,
             inner,
             degree,
         } => {
-            let coeff = coeff.as_u64_reduced();
-            let coeff_opp = F::CHARACTERISTICS - coeff;
             let mut monomial = PicusExpr::Const(1);
             for var in inner.iter().take(*degree) {
                 monomial = monomial * variable_to_picus_expr(*var);
             }
 
-            if coeff < coeff_opp {
-                if coeff == 1 {
-                    monomial
-                } else {
-                    PicusExpr::Const(coeff) * monomial
-                }
-            } else if coeff_opp == 1 {
-                neg_expr(monomial)
-            } else {
-                neg_expr(PicusExpr::Const(coeff_opp) * monomial)
-            }
+            scaled_picus_expr(*coeff, monomial)
         }
     }
 }
@@ -1348,61 +1646,35 @@ fn build_picus_module_from_circuit_output<F: PrimeField>(
     let module_name = module_name.into();
     let mut module = PicusModule::new(module_name.clone());
     add_circuit_input_and_outputs::<F>(&mut module, &circuit_output.shuffle_ram_queries);
-    if circuit_output
-        .picus_extraction_metadata
-        .parallel_constraints_enabled
-    {
-        let parallel_constraints: Vec<PicusConstraint> = circuit_output
-            .picus_extraction_metadata
-            .parallel_constraints
-            .iter()
-            .map(circuit_picus_constraint_to_pcl_constraint::<F>)
-            .collect();
-        module.constraints.extend_from_slice(&parallel_constraints);
-    } else {
-        let parsed_constraints: Vec<PicusConstraint> = circuit_output
-            .constraints
-            .iter()
-            .map(|(constraint, _prevent_optimization)| constraint_to_picus_constraint(constraint))
-            .collect();
-        module.constraints.extend_from_slice(&parsed_constraints);
-    }
     let mut next_fresh_var_id = circuit_output.num_of_variables;
-    add_lookup_constraints(&mut module, &circuit_output.lookups, &mut next_fresh_var_id);
-    add_disjunctive_lookup_constraints(
+    add_circuit_components_to_module(
         &mut module,
-        &circuit_output.picus_extraction_metadata.disjunctive_lookups,
+        circuit_output,
+        None,
+        circuit_output
+            .picus_extraction_metadata
+            .parallel_constraints_enabled,
         &mut next_fresh_var_id,
     );
 
-    for boolean_var in &circuit_output.boolean_vars {
-        let picus_expr = variable_to_picus_expr(*boolean_var);
-        module
-            .constraints
-            .push(PicusConstraint::new_bit(picus_expr));
-    }
-
-    for range_check_query in &circuit_output.range_check_expressions {
-        let lookup_val = lookup_input_to_picus_expr(&range_check_query.input);
-        let bound = 1u64
-            .checked_shl(range_check_query.width as u32)
-            .expect("range check width must be less than 64");
-        module.constraints.push(PicusConstraint::Lt(
-            Box::new(lookup_val),
-            Box::new(PicusExpr::Const(bound)),
-        ));
-    }
-
     if let Some(cs) = circuit_state {
+        let execute_picus = variable_to_picus_expr(cs.execute);
         let rd_is_zero_picus = variable_to_picus_expr(cs.decoder_data.rd_is_zero);
         let funct3_picus = variable_to_picus_expr(cs.decoder_data.funct3);
         let rs1_idx_picus = variable_to_picus_expr(cs.decoder_data.rs1_index);
         let rs2_idx_picus = variable_to_picus_expr(cs.decoder_data.rs2_index);
         let rd_idx_picus = variable_to_picus_expr(cs.decoder_data.rd_index);
+        let circuit_family_extra_mask_picus =
+            variable_to_picus_expr(cs.decoder_data.circuit_family_extra_mask);
         let [rd_imm_low_var, rd_imm_high_var] =
             cs.decoder_data.imm.map(|v| variable_to_picus_expr(v));
         let [pc_low, pc_high] = cs.cycle_start_state.pc.map(|v| variable_to_picus_expr(v));
         let [next_pc_low, next_pc_high] = cs.cycle_end_state.pc.map(|v| variable_to_picus_expr(v));
+        let [next_timestamp_low, next_timestamp_high] = cs
+            .cycle_end_state
+            .timestamp
+            .map(|v| variable_to_picus_expr(v));
+        module.inputs.push(execute_picus.clone());
         module.inputs.push(rd_is_zero_picus.clone());
         module.inputs.push(rd_imm_low_var.clone());
         module.inputs.push(rd_imm_high_var.clone());
@@ -1410,6 +1682,7 @@ fn build_picus_module_from_circuit_output<F: PrimeField>(
         module.inputs.push(rs1_idx_picus.clone());
         module.inputs.push(rs2_idx_picus.clone());
         module.inputs.push(rd_idx_picus.clone());
+        module.inputs.push(circuit_family_extra_mask_picus.clone());
         module
             .constraints
             .push(PicusConstraint::new_lt(funct3_picus.clone(), 8.into()));
@@ -1427,9 +1700,14 @@ fn build_picus_module_from_circuit_output<F: PrimeField>(
         );
         module.outputs.push(next_pc_low.clone());
         module.outputs.push(next_pc_high.clone());
+        module.outputs.push(next_timestamp_low.clone());
+        module.outputs.push(next_timestamp_high.clone());
         module
             .inputs
             .extend_from_slice(&[pc_low.clone(), pc_high.clone()]);
+        module
+            .constraints
+            .push(PicusConstraint::new_bit(execute_picus.clone()));
         module
             .constraints
             .push(PicusConstraint::new_bit(rd_is_zero_picus.clone()));
@@ -1445,11 +1723,822 @@ fn build_picus_module_from_circuit_output<F: PrimeField>(
         module
             .constraints
             .push(PicusConstraint::new_lt(pc_high, U16_BOUND.into()));
+        module.constraints.push(PicusConstraint::new_lt(
+            next_timestamp_low,
+            U16_BOUND.into(),
+        ));
+        module.constraints.push(PicusConstraint::new_lt(
+            next_timestamp_high,
+            U16_BOUND.into(),
+        ));
     }
     module.inputs.extend_from_slice(extra_inputs);
     module.outputs.extend_from_slice(extra_outputs);
     module.constraints.extend_from_slice(extra_constraints);
     module
+}
+
+fn region_descends_from<F: PrimeField>(
+    regions: &[CircuitPicusRegion<F>],
+    candidate_region: usize,
+    owner_region: usize,
+) -> bool {
+    let mut parent_region = regions[candidate_region].parent_region;
+    while let Some(parent) = parent_region {
+        if parent == owner_region {
+            return true;
+        }
+        parent_region = regions[parent].parent_region;
+    }
+
+    false
+}
+
+fn opaque_region_indices_for_owner<F: PrimeField>(
+    regions: &[CircuitPicusRegion<F>],
+    owner_region: Option<usize>,
+) -> Vec<usize> {
+    regions
+        .iter()
+        .enumerate()
+        .filter_map(|(region_index, region)| {
+            if !region.opaque_for_picus {
+                return None;
+            }
+
+            match owner_region {
+                None => Some(region_index),
+                Some(owner_region) => {
+                    if region_index != owner_region
+                        && region_descends_from(regions, region_index, owner_region)
+                    {
+                        Some(region_index)
+                    } else {
+                        None
+                    }
+                }
+            }
+        })
+        .collect()
+}
+
+fn index_in_ranges(index: usize, excluded_ranges: &[std::ops::Range<usize>]) -> bool {
+    excluded_ranges
+        .iter()
+        .any(|range| index >= range.start && index < range.end)
+}
+
+fn add_circuit_components_to_module<F: PrimeField>(
+    module: &mut PicusModule,
+    circuit_output: &CircuitOutput<F>,
+    owner_region: Option<usize>,
+    use_parallel_constraints_only: bool,
+    next_fresh_var_id: &mut usize,
+) {
+    let regions = &circuit_output.picus_extraction_metadata.regions;
+    let opaque_region_indices = opaque_region_indices_for_owner(regions, owner_region);
+
+    let raw_constraint_range = owner_region
+        .map(|region_index| regions[region_index].raw_constraints.clone())
+        .unwrap_or(0..circuit_output.constraints.len());
+    let structured_constraint_range = owner_region
+        .map(|region_index| regions[region_index].structured_constraints.clone())
+        .unwrap_or(
+            0..circuit_output
+                .picus_extraction_metadata
+                .parallel_constraints
+                .len(),
+        );
+    let lookup_range = owner_region
+        .map(|region_index| regions[region_index].lookups.clone())
+        .unwrap_or(0..circuit_output.lookups.len());
+    let disjunctive_lookup_range = owner_region
+        .map(|region_index| regions[region_index].disjunctive_lookups.clone())
+        .unwrap_or(
+            0..circuit_output
+                .picus_extraction_metadata
+                .disjunctive_lookups
+                .len(),
+        );
+    let boolean_var_range = owner_region
+        .map(|region_index| regions[region_index].boolean_vars.clone())
+        .unwrap_or(0..circuit_output.boolean_vars.len());
+    let range_check_range = owner_region
+        .map(|region_index| regions[region_index].range_checks.clone())
+        .unwrap_or(0..circuit_output.range_check_expressions.len());
+
+    let excluded_raw_constraints: Vec<_> = opaque_region_indices
+        .iter()
+        .map(|region_index| regions[*region_index].raw_constraints.clone())
+        .collect();
+    let excluded_structured_constraints: Vec<_> = opaque_region_indices
+        .iter()
+        .map(|region_index| regions[*region_index].structured_constraints.clone())
+        .collect();
+    let excluded_lookups: Vec<_> = opaque_region_indices
+        .iter()
+        .map(|region_index| regions[*region_index].lookups.clone())
+        .collect();
+    let excluded_disjunctive_lookups: Vec<_> = opaque_region_indices
+        .iter()
+        .map(|region_index| regions[*region_index].disjunctive_lookups.clone())
+        .collect();
+    let excluded_boolean_vars: Vec<_> = opaque_region_indices
+        .iter()
+        .map(|region_index| regions[*region_index].boolean_vars.clone())
+        .collect();
+    let excluded_range_checks: Vec<_> = opaque_region_indices
+        .iter()
+        .map(|region_index| regions[*region_index].range_checks.clone())
+        .collect();
+
+    if use_parallel_constraints_only {
+        let structured_constraints: Vec<_> = structured_constraint_range
+            .clone()
+            .filter(|index| !index_in_ranges(*index, &excluded_structured_constraints))
+            .map(|index| {
+                circuit_picus_constraint_to_pcl_constraint::<F>(
+                    &circuit_output
+                        .picus_extraction_metadata
+                        .parallel_constraints[index],
+                )
+            })
+            .collect();
+        module.constraints.extend(structured_constraints);
+    } else {
+        let raw_constraints: Vec<_> = raw_constraint_range
+            .clone()
+            .filter(|index| !index_in_ranges(*index, &excluded_raw_constraints))
+            .map(|index| {
+                let (constraint, _prevent_optimization) = &circuit_output.constraints[index];
+                constraint_to_picus_constraint(constraint)
+            })
+            .collect();
+        module.constraints.extend(raw_constraints);
+    }
+
+    let filtered_lookups: Vec<_> = lookup_range
+        .clone()
+        .filter(|index| !index_in_ranges(*index, &excluded_lookups))
+        .map(|index| circuit_output.lookups[index].clone())
+        .collect();
+    add_lookup_constraints(&mut *module, &filtered_lookups, next_fresh_var_id);
+
+    let filtered_disjunctive_lookups: Vec<_> = disjunctive_lookup_range
+        .clone()
+        .filter(|index| !index_in_ranges(*index, &excluded_disjunctive_lookups))
+        .map(|index| circuit_output.picus_extraction_metadata.disjunctive_lookups[index].clone())
+        .collect();
+    add_disjunctive_lookup_constraints(
+        &mut *module,
+        &filtered_disjunctive_lookups,
+        next_fresh_var_id,
+    );
+
+    for boolean_var in boolean_var_range
+        .clone()
+        .filter(|index| !index_in_ranges(*index, &excluded_boolean_vars))
+        .map(|index| circuit_output.boolean_vars[index])
+    {
+        module
+            .constraints
+            .push(PicusConstraint::new_bit(variable_to_picus_expr(
+                boolean_var,
+            )));
+    }
+
+    for range_check_query in range_check_range
+        .clone()
+        .filter(|index| !index_in_ranges(*index, &excluded_range_checks))
+        .map(|index| &circuit_output.range_check_expressions[index])
+    {
+        let lookup_val = lookup_input_to_picus_expr(&range_check_query.input);
+        let bound = 1u64
+            .checked_shl(range_check_query.width as u32)
+            .expect("range check width must be less than 64");
+        module.constraints.push(PicusConstraint::Lt(
+            Box::new(lookup_val),
+            Box::new(PicusExpr::Const(bound)),
+        ));
+    }
+}
+
+fn sanitize_region_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn region_module_name(root_module_name: &str, region_index: usize, region_name: &str) -> String {
+    format!(
+        "{root_module_name}__region_{region_index}_{}",
+        sanitize_region_name(region_name)
+    )
+}
+
+fn add_region_calls_to_module<F: PrimeField>(
+    module: &mut PicusModule,
+    root_module_name: &str,
+    regions: &[CircuitPicusRegion<F>],
+    parent_region: Option<usize>,
+) {
+    for (region_index, region) in regions.iter().enumerate() {
+        if region.parent_region != parent_region {
+            continue;
+        }
+
+        let inputs: Vec<_> = region
+            .inputs
+            .iter()
+            .map(circuit_picus_expr_to_pcl_expr)
+            .collect();
+        let outputs: Vec<_> = region
+            .outputs
+            .iter()
+            .map(|var| variable_to_picus_expr(*var))
+            .collect();
+        module.calls.push(PicusCall::new(
+            region_module_name(root_module_name, region_index, &region.name),
+            &outputs,
+            &inputs,
+        ));
+    }
+}
+
+fn build_picus_module_from_region<F: PrimeField>(
+    module_name: impl Into<String>,
+    circuit_output: &CircuitOutput<F>,
+    region_index: usize,
+    region: &CircuitPicusRegion<F>,
+) -> PicusModule {
+    let mut module = PicusModule::new(module_name.into());
+    let mut next_fresh_var_id = circuit_output.num_of_variables;
+    for input in region.inputs.iter() {
+        let input_expr = circuit_picus_expr_to_pcl_expr(input);
+        match input_expr {
+            PicusExpr::Var(_) => module.inputs.push(input_expr),
+            _ => {
+                let formal_input = fresh_picus_var_expr(&mut next_fresh_var_id);
+                module.inputs.push(formal_input.clone());
+                module
+                    .constraints
+                    .push(PicusConstraint::new_equality(formal_input, input_expr));
+            }
+        }
+    }
+    module.outputs.extend(
+        region
+            .outputs
+            .iter()
+            .map(|variable| variable_to_picus_expr(*variable)),
+    );
+    add_circuit_components_to_module(
+        &mut module,
+        circuit_output,
+        Some(region_index),
+        false,
+        &mut next_fresh_var_id,
+    );
+
+    module
+}
+
+fn build_region_modules<F: PrimeField>(
+    root_module_name: &str,
+    circuit_output: &CircuitOutput<F>,
+) -> BTreeMap<String, PicusModule> {
+    let regions = &circuit_output.picus_extraction_metadata.regions;
+    let mut modules = BTreeMap::new();
+
+    for (region_index, region) in regions.iter().enumerate() {
+        let name = region_module_name(root_module_name, region_index, &region.name);
+        let mut module =
+            build_picus_module_from_region(name.clone(), circuit_output, region_index, region);
+        add_region_calls_to_module(&mut module, root_module_name, regions, Some(region_index));
+        modules.insert(name, module);
+    }
+
+    modules
+}
+
+fn build_program_from_root_module<F: PrimeField>(
+    mut module: PicusModule,
+    circuit_output: &CircuitOutput<F>,
+) -> PicusProgram {
+    let root_module_name = module.name.clone();
+    add_region_calls_to_module(
+        &mut module,
+        &root_module_name,
+        &circuit_output.picus_extraction_metadata.regions,
+        None,
+    );
+
+    let mut modules = BTreeMap::new();
+    modules.insert(root_module_name.clone(), module);
+    modules.append(&mut build_region_modules(&root_module_name, circuit_output));
+
+    let mut program = PicusProgram::new(F::CHARACTERISTICS);
+    program.add_modules(&mut modules);
+    program
+}
+
+fn build_program_from_root_modules<F: PrimeField>(
+    root_modules: Vec<PicusModule>,
+    circuit_output: &CircuitOutput<F>,
+) -> PicusProgram {
+    let mut modules = BTreeMap::new();
+
+    for mut module in root_modules {
+        let root_module_name = module.name.clone();
+        add_region_calls_to_module(
+            &mut module,
+            &root_module_name,
+            &circuit_output.picus_extraction_metadata.regions,
+            None,
+        );
+
+        modules.insert(root_module_name.clone(), module);
+        modules.append(&mut build_region_modules(&root_module_name, circuit_output));
+    }
+
+    let mut program = PicusProgram::new(F::CHARACTERISTICS);
+    program.add_modules(&mut modules);
+    program
+}
+
+fn compiled_column_var_id<F: PrimeField>(
+    artifact: &crate::one_row_compiler::CompiledCircuitArtifact<F>,
+    address: ColumnAddress,
+) -> usize {
+    let witness_base = 0usize;
+    let memory_base = witness_base + artifact.witness_layout.total_width;
+    let setup_base = memory_base + artifact.memory_layout.total_width;
+    let optimized_base = setup_base + artifact.setup_layout.total_width;
+
+    match address {
+        ColumnAddress::WitnessSubtree(offset) => witness_base + offset,
+        ColumnAddress::MemorySubtree(offset) => memory_base + offset,
+        ColumnAddress::SetupSubtree(offset) => setup_base + offset,
+        ColumnAddress::OptimizedOut(offset) => optimized_base + offset,
+    }
+}
+
+fn compiled_column_to_picus_expr<F: PrimeField>(
+    artifact: &crate::one_row_compiler::CompiledCircuitArtifact<F>,
+    address: ColumnAddress,
+) -> PicusExpr {
+    PicusExpr::Var(compiled_column_var_id(artifact, address))
+}
+
+fn compiled_variable_to_picus_expr<F: PrimeField>(
+    artifact: &crate::one_row_compiler::CompiledCircuitArtifact<F>,
+    variable: Variable,
+) -> PicusExpr {
+    let address = artifact
+        .variable_mapping
+        .get(&variable)
+        .copied()
+        .unwrap_or_else(|| {
+            panic!(
+                "compiled artifact is missing a column mapping for x_{}",
+                variable.0
+            )
+        });
+    compiled_column_to_picus_expr(artifact, address)
+}
+
+fn picus_var_ids(exprs: &[PicusExpr]) -> BTreeSet<usize> {
+    exprs
+        .iter()
+        .map(|expr| match expr {
+            PicusExpr::Var(var_id) => *var_id,
+            _ => panic!("expected variable expression in Picus module interface"),
+        })
+        .collect()
+}
+
+fn push_unique_interface_var(
+    target: &mut Vec<PicusExpr>,
+    seen: &mut BTreeSet<usize>,
+    expr: PicusExpr,
+) {
+    let PicusExpr::Var(var_id) = expr else {
+        panic!("expected variable expression in Picus module interface");
+    };
+    if seen.insert(var_id) {
+        target.push(PicusExpr::Var(var_id));
+    }
+}
+
+fn add_compiled_module_interface<F: PrimeField>(
+    module: &mut PicusModule,
+    artifact: &crate::one_row_compiler::CompiledCircuitArtifact<F>,
+    circuit_output: &CircuitOutput<F>,
+    circuit_state: Option<&OpcodeFamilyCircuitState<F>>,
+) {
+    let mut input_ids = picus_var_ids(&module.inputs);
+    let mut output_ids = picus_var_ids(&module.outputs);
+
+    for query in circuit_output.shuffle_ram_queries.iter() {
+        for value in query.read_value {
+            let picus_var = compiled_variable_to_picus_expr(artifact, value);
+            push_unique_interface_var(&mut module.inputs, &mut input_ids, picus_var.clone());
+            module.constraints.push(PicusConstraint::Lt(
+                Box::new(picus_var),
+                Box::new(PicusExpr::Const(U16_BOUND)),
+            ));
+        }
+        if query.local_timestamp_in_cycle != RS1_LOAD_LOCAL_TIMESTAMP
+            && query.local_timestamp_in_cycle != RS2_LOAD_LOCAL_TIMESTAMP
+        {
+            for value in query.write_value {
+                let picus_var = compiled_variable_to_picus_expr(artifact, value);
+                push_unique_interface_var(&mut module.outputs, &mut output_ids, picus_var.clone());
+            }
+        }
+    }
+
+    if let Some(cs) = circuit_state {
+        let execute_picus = compiled_variable_to_picus_expr(artifact, cs.execute);
+        let rd_is_zero_picus =
+            compiled_variable_to_picus_expr(artifact, cs.decoder_data.rd_is_zero);
+        let funct3_picus = compiled_variable_to_picus_expr(artifact, cs.decoder_data.funct3);
+        let rs1_idx_picus = compiled_variable_to_picus_expr(artifact, cs.decoder_data.rs1_index);
+        let rs2_idx_picus = compiled_variable_to_picus_expr(artifact, cs.decoder_data.rs2_index);
+        let rd_idx_picus = compiled_variable_to_picus_expr(artifact, cs.decoder_data.rd_index);
+        let circuit_family_extra_mask_picus =
+            compiled_variable_to_picus_expr(artifact, cs.decoder_data.circuit_family_extra_mask);
+        let [rd_imm_low_var, rd_imm_high_var] = cs
+            .decoder_data
+            .imm
+            .map(|v| compiled_variable_to_picus_expr(artifact, v));
+        let [pc_low, pc_high] = cs
+            .cycle_start_state
+            .pc
+            .map(|v| compiled_variable_to_picus_expr(artifact, v));
+        let [next_pc_low, next_pc_high] = cs
+            .cycle_end_state
+            .pc
+            .map(|v| compiled_variable_to_picus_expr(artifact, v));
+        let [next_timestamp_low, next_timestamp_high] = cs
+            .cycle_end_state
+            .timestamp
+            .map(|v| compiled_variable_to_picus_expr(artifact, v));
+
+        push_unique_interface_var(&mut module.inputs, &mut input_ids, execute_picus.clone());
+        push_unique_interface_var(&mut module.inputs, &mut input_ids, rd_is_zero_picus.clone());
+        push_unique_interface_var(&mut module.inputs, &mut input_ids, rd_imm_low_var.clone());
+        push_unique_interface_var(&mut module.inputs, &mut input_ids, rd_imm_high_var.clone());
+        push_unique_interface_var(&mut module.inputs, &mut input_ids, funct3_picus.clone());
+        push_unique_interface_var(&mut module.inputs, &mut input_ids, rs1_idx_picus.clone());
+        push_unique_interface_var(&mut module.inputs, &mut input_ids, rs2_idx_picus.clone());
+        push_unique_interface_var(&mut module.inputs, &mut input_ids, rd_idx_picus.clone());
+        push_unique_interface_var(
+            &mut module.inputs,
+            &mut input_ids,
+            circuit_family_extra_mask_picus.clone(),
+        );
+
+        module
+            .constraints
+            .push(PicusConstraint::new_lt(funct3_picus.clone(), 8.into()));
+
+        if let Some(funct7) = cs.decoder_data.funct7 {
+            let funct7_picus = compiled_variable_to_picus_expr(artifact, funct7);
+            push_unique_interface_var(&mut module.inputs, &mut input_ids, funct7_picus.clone());
+            module
+                .constraints
+                .push(PicusConstraint::new_lt(funct7_picus.clone(), 128.into()));
+        }
+
+        for timestamp_var in cs.cycle_start_state.timestamp {
+            push_unique_interface_var(
+                &mut module.inputs,
+                &mut input_ids,
+                compiled_variable_to_picus_expr(artifact, timestamp_var),
+            );
+        }
+        push_unique_interface_var(&mut module.outputs, &mut output_ids, next_pc_low.clone());
+        push_unique_interface_var(&mut module.outputs, &mut output_ids, next_pc_high.clone());
+        push_unique_interface_var(
+            &mut module.outputs,
+            &mut output_ids,
+            next_timestamp_low.clone(),
+        );
+        push_unique_interface_var(
+            &mut module.outputs,
+            &mut output_ids,
+            next_timestamp_high.clone(),
+        );
+        push_unique_interface_var(&mut module.inputs, &mut input_ids, pc_low.clone());
+        push_unique_interface_var(&mut module.inputs, &mut input_ids, pc_high.clone());
+
+        module
+            .constraints
+            .push(PicusConstraint::new_bit(execute_picus.clone()));
+        module
+            .constraints
+            .push(PicusConstraint::new_bit(rd_is_zero_picus.clone()));
+        module
+            .constraints
+            .push(PicusConstraint::new_lt(rs1_idx_picus.clone(), 32.into()));
+        module
+            .constraints
+            .push(PicusConstraint::new_lt(rs2_idx_picus.clone(), 32.into()));
+        module
+            .constraints
+            .push(PicusConstraint::new_lt(rd_idx_picus.clone(), 32.into()));
+        module.constraints.push(PicusConstraint::new_lt(
+            rd_imm_low_var.clone(),
+            PicusExpr::Const(U16_BOUND),
+        ));
+        module.constraints.push(PicusConstraint::new_lt(
+            rd_imm_high_var.clone(),
+            PicusExpr::Const(U16_BOUND),
+        ));
+        module.constraints.push(PicusConstraint::new_lt(
+            pc_low.clone(),
+            PicusExpr::Const(U16_BOUND),
+        ));
+        module.constraints.push(PicusConstraint::new_lt(
+            pc_high.clone(),
+            PicusExpr::Const(U16_BOUND),
+        ));
+        module.constraints.push(PicusConstraint::new_lt(
+            next_pc_low.clone(),
+            PicusExpr::Const(U16_BOUND),
+        ));
+        module.constraints.push(PicusConstraint::new_lt(
+            next_pc_high.clone(),
+            PicusExpr::Const(U16_BOUND),
+        ));
+        module.constraints.push(PicusConstraint::new_lt(
+            next_timestamp_low.clone(),
+            PicusExpr::Const(U16_BOUND),
+        ));
+        module.constraints.push(PicusConstraint::new_lt(
+            next_timestamp_high.clone(),
+            PicusExpr::Const(U16_BOUND),
+        ));
+    }
+
+    let mut used_addresses = BTreeSet::new();
+    for constraint in artifact.degree_1_constraints.iter() {
+        for (_, address) in constraint.linear_terms.iter() {
+            used_addresses.insert(*address);
+        }
+    }
+    for constraint in artifact.degree_2_constraints.iter() {
+        for (_, address) in constraint.linear_terms.iter() {
+            used_addresses.insert(*address);
+        }
+        for (_, lhs, rhs) in constraint.quadratic_terms.iter() {
+            used_addresses.insert(*lhs);
+            used_addresses.insert(*rhs);
+        }
+    }
+
+    for address in used_addresses {
+        if let ColumnAddress::SetupSubtree(_) = address {
+            let picus_var = compiled_column_to_picus_expr(artifact, address);
+            push_unique_interface_var(&mut module.inputs, &mut input_ids, picus_var);
+        }
+    }
+}
+
+fn compiled_degree1_constraint_to_picus_expr<F: PrimeField>(
+    artifact: &crate::one_row_compiler::CompiledCircuitArtifact<F>,
+    constraint: &CompiledDegree1Constraint<F>,
+) -> PicusExpr {
+    let mut expr = field_constant_to_picus_expr(constraint.constant_term);
+    for (coeff, address) in constraint.linear_terms.iter() {
+        expr = expr + scaled_picus_expr(*coeff, compiled_column_to_picus_expr(artifact, *address));
+    }
+    expr
+}
+
+fn compiled_lookup_expression_to_picus_expr<F: PrimeField>(
+    artifact: &crate::one_row_compiler::CompiledCircuitArtifact<F>,
+    expr: &crate::definitions::LookupExpression<F>,
+) -> PicusExpr {
+    match expr {
+        crate::definitions::LookupExpression::Variable(address) => {
+            compiled_column_to_picus_expr(artifact, *address)
+        }
+        crate::definitions::LookupExpression::Expression(constraint) => {
+            compiled_degree1_constraint_to_picus_expr(artifact, constraint)
+        }
+    }
+}
+
+fn compiled_lookup_expression_to_lookup_input<F: PrimeField>(
+    artifact: &crate::one_row_compiler::CompiledCircuitArtifact<F>,
+    expr: &crate::definitions::LookupExpression<F>,
+) -> crate::definitions::LookupInput<F> {
+    match expr {
+        crate::definitions::LookupExpression::Variable(address) => {
+            crate::definitions::LookupInput::Variable(Variable(compiled_column_var_id(
+                artifact, *address,
+            ) as u64))
+        }
+        crate::definitions::LookupExpression::Expression(constraint) => {
+            crate::definitions::LookupInput::Expression {
+                linear_terms: constraint
+                    .linear_terms
+                    .iter()
+                    .map(|(coeff, address)| {
+                        (
+                            *coeff,
+                            Variable(compiled_column_var_id(artifact, *address) as u64),
+                        )
+                    })
+                    .collect(),
+                constant_coeff: constraint.constant_term,
+            }
+        }
+    }
+}
+
+fn compiled_degree2_constraint_to_picus_expr<F: PrimeField>(
+    artifact: &crate::one_row_compiler::CompiledCircuitArtifact<F>,
+    constraint: &CompiledDegree2Constraint<F>,
+) -> PicusExpr {
+    let mut expr = field_constant_to_picus_expr(constraint.constant_term);
+    for (coeff, address) in constraint.linear_terms.iter() {
+        expr = expr + scaled_picus_expr(*coeff, compiled_column_to_picus_expr(artifact, *address));
+    }
+    for (coeff, lhs, rhs) in constraint.quadratic_terms.iter() {
+        expr = expr
+            + scaled_picus_expr(
+                *coeff,
+                compiled_column_to_picus_expr(artifact, *lhs)
+                    * compiled_column_to_picus_expr(artifact, *rhs),
+            );
+    }
+    expr
+}
+
+fn compiled_degree2_constraint_to_picus_constraint<F: PrimeField>(
+    artifact: &crate::one_row_compiler::CompiledCircuitArtifact<F>,
+    constraint: &CompiledDegree2Constraint<F>,
+) -> PicusConstraint {
+    if constraint.is_boolean_constraint() {
+        let var = constraint.linear_terms[0].1;
+        PicusConstraint::new_bit(compiled_column_to_picus_expr(artifact, var))
+    } else {
+        PicusConstraint::Eq(Box::new(compiled_degree2_constraint_to_picus_expr(
+            artifact, constraint,
+        )))
+    }
+}
+
+fn build_picus_module_from_compiled_artifact<F: PrimeField>(
+    module_name: impl Into<String>,
+    artifact: &crate::one_row_compiler::CompiledCircuitArtifact<F>,
+    circuit_output: &CircuitOutput<F>,
+    circuit_state: Option<&OpcodeFamilyCircuitState<F>>,
+) -> PicusModule {
+    assert!(
+        artifact.state_linkage_constraints.is_empty(),
+        "compiled artifact Picus extraction currently expects no linkage constraints"
+    );
+    assert!(
+        artifact.public_inputs.is_empty(),
+        "compiled artifact Picus extraction currently expects no public inputs"
+    );
+
+    let mut module = PicusModule::new(module_name.into());
+
+    for constraint in artifact.degree_1_constraints.iter() {
+        module.constraints.push(PicusConstraint::Eq(Box::new(
+            compiled_degree1_constraint_to_picus_expr(artifact, constraint),
+        )));
+    }
+
+    for constraint in artifact.degree_2_constraints.iter() {
+        module
+            .constraints
+            .push(compiled_degree2_constraint_to_picus_constraint(
+                artifact, constraint,
+            ));
+    }
+
+    for expr in artifact
+        .witness_layout
+        .range_check_16_lookup_expressions
+        .iter()
+    {
+        module.constraints.push(PicusConstraint::new_lt(
+            compiled_lookup_expression_to_picus_expr(artifact, expr),
+            PicusExpr::Const(U16_BOUND),
+        ));
+    }
+
+    for expr in artifact
+        .witness_layout
+        .timestamp_range_check_lookup_expressions
+        .iter()
+    {
+        module.constraints.push(PicusConstraint::new_lt(
+            compiled_lookup_expression_to_picus_expr(artifact, expr),
+            PicusExpr::Const(U16_BOUND),
+        ));
+    }
+
+    let mut next_fresh_var_id = artifact.witness_layout.total_width
+        + artifact.memory_layout.total_width
+        + artifact.setup_layout.total_width
+        + artifact.scratch_space_size_for_witness_gen;
+    let compiled_lookups = artifact
+        .witness_layout
+        .width_3_lookups
+        .iter()
+        .map(|lookup| LookupQuery {
+            row: std::array::from_fn(|i| {
+                compiled_lookup_expression_to_lookup_input(artifact, &lookup.input_columns[i])
+            }),
+            table: match lookup.table_index {
+                crate::definitions::TableIndex::Constant(table) => {
+                    LookupQueryTableType::Constant(table)
+                }
+                crate::definitions::TableIndex::Variable(address) => {
+                    LookupQueryTableType::Variable(Variable(compiled_column_var_id(
+                        artifact, address,
+                    ) as u64))
+                }
+            },
+        })
+        .collect::<Vec<_>>();
+    add_lookup_constraints(&mut module, &compiled_lookups, &mut next_fresh_var_id);
+
+    add_compiled_module_interface(&mut module, artifact, circuit_output, circuit_state);
+    module
+}
+
+pub fn compiled_artifact_to_picus_program<F: PrimeField>(
+    module_name: impl Into<String>,
+    artifact: &crate::one_row_compiler::CompiledCircuitArtifact<F>,
+    circuit_output: &CircuitOutput<F>,
+    circuit_state: Option<&OpcodeFamilyCircuitState<F>>,
+    specialization: Option<&DecoderSpecialization>,
+) -> PicusProgram {
+    let module_name = module_name.into();
+    let module = build_picus_module_from_compiled_artifact(
+        module_name.clone(),
+        artifact,
+        circuit_output,
+        circuit_state,
+    );
+    let mut modules = BTreeMap::new();
+    if let Some(specialization) = specialization {
+        let mapped = map_specialization_to_compiled(artifact, specialization);
+        for env in mapped.assignments.iter() {
+            let specialized = module.partial_eval(env).simplify_with_inferred_equalities();
+            modules.insert(specialized.name.clone(), specialized);
+        }
+    } else {
+        modules.insert(module_name, module);
+    }
+
+    let mut program = PicusProgram::new(F::CHARACTERISTICS);
+    program.add_modules(&mut modules);
+    program
+}
+
+fn map_specialization_to_compiled<F: PrimeField>(
+    artifact: &crate::one_row_compiler::CompiledCircuitArtifact<F>,
+    specialization: &DecoderSpecialization,
+) -> DecoderSpecialization {
+    DecoderSpecialization::from_assignments(
+        specialization
+            .assignments
+            .iter()
+            .map(|env| {
+                env.iter()
+                    .map(|(source_var_id, value)| {
+                        let source_var = Variable(*source_var_id as u64);
+                        let address = artifact
+                            .variable_mapping
+                            .get(&source_var)
+                            .copied()
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "compiled artifact is missing a column mapping for specialized source variable x_{}",
+                                    source_var_id
+                                )
+                            });
+                        (compiled_column_var_id(artifact, address), *value)
+                    })
+                    .collect()
+            })
+            .collect(),
+    )
 }
 
 pub fn circuit_output_to_picus_program<F: PrimeField>(
@@ -1459,7 +2548,7 @@ pub fn circuit_output_to_picus_program<F: PrimeField>(
     specialization: Option<&DecoderSpecialization>,
 ) -> PicusProgram {
     let module_name = module_name.into();
-    let module = build_picus_module_from_circuit_output(
+    let mut module = build_picus_module_from_circuit_output(
         module_name.clone(),
         circuit_output,
         circuit_state,
@@ -1467,6 +2556,13 @@ pub fn circuit_output_to_picus_program<F: PrimeField>(
         &[],
         &[],
     );
+    add_region_calls_to_module(
+        &mut module,
+        &module_name,
+        &circuit_output.picus_extraction_metadata.regions,
+        None,
+    );
+    let root_module_name_for_regions = module.name.clone();
     let mut modules = BTreeMap::new();
     if let Some(specialization) = specialization {
         for env in specialization.assignments.iter() {
@@ -1476,6 +2572,10 @@ pub fn circuit_output_to_picus_program<F: PrimeField>(
     } else {
         modules.insert(module_name, module);
     }
+    modules.append(&mut build_region_modules(
+        &root_module_name_for_regions,
+        circuit_output,
+    ));
 
     let mut program = PicusProgram::new(F::CHARACTERISTICS);
     program.add_modules(&mut modules);
@@ -1594,12 +2694,7 @@ pub fn build_optimized_decoder_picus_program(enable_parallel_constraints: bool) 
         &extra_outputs,
         &[],
     );
-
-    let mut modules = BTreeMap::new();
-    modules.insert(module.name.clone(), module);
-    let mut program = PicusProgram::new(Mersenne31Field::CHARACTERISTICS);
-    program.add_modules(&mut modules);
-    program
+    build_program_from_root_module(module, &circuit_output)
 }
 
 pub fn build_unrolled_decoder_circuit_output(
@@ -1672,12 +2767,7 @@ pub fn build_unrolled_decoder_picus_program(enable_parallel_constraints: bool) -
         &[],
     );
     add_unrolled_decoder_op_type_semantics(&mut module, &metadata);
-
-    let mut modules = BTreeMap::new();
-    modules.insert(module.name.clone(), module);
-    let mut program = PicusProgram::new(Mersenne31Field::CHARACTERISTICS);
-    program.add_modules(&mut modules);
-    program
+    build_program_from_root_module(module, &circuit_output)
 }
 
 pub fn build_add_sub_lui_auipc_mop_circuit_output() -> CircuitOutput<Mersenne31Field> {
@@ -1752,6 +2842,27 @@ pub fn build_load_store_circuit_output_with_decoded_bits() -> (
     load_store_table_addition_fn(&mut cs);
     let (input, decoded_mask_bits) =
         load_store_circuit_with_preprocessed_bytecode_with_decoded_bits::<
+            _,
+            _,
+            { common_constants::ROM_SECOND_WORD_BITS },
+        >(&mut cs);
+    let (circuit_output, _) = cs.finalize();
+    (
+        circuit_output,
+        input,
+        decoded_mask_bits.map(|v| v.0 as usize),
+    )
+}
+
+pub fn build_load_store_word_only_circuit_output_with_decoded_bits() -> (
+    CircuitOutput<Mersenne31Field>,
+    OpcodeFamilyCircuitState<Mersenne31Field>,
+    [usize; WORD_ONLY_MEMORY_FAMILY_NUM_FLAGS],
+) {
+    let mut cs = BasicAssembly::<Mersenne31Field>::new();
+    word_only_load_store_table_addition_fn(&mut cs);
+    let (input, decoded_mask_bits) =
+        word_only_load_store_circuit_with_preprocessed_bytecode_with_decoded_bits::<
             _,
             _,
             { common_constants::ROM_SECOND_WORD_BITS },
@@ -1861,7 +2972,10 @@ pub fn build_reduced_machine_circuit_output_with_decoded_bits() -> (
 pub fn build_add_sub_lui_auipc_mop_picus_program() -> PicusProgram {
     let (circuit_output, input, decoded_bits) =
         build_add_sub_lui_auipc_mop_circuit_output_with_decoded_bits();
-    let specialization = specialization_for_flat_one_hot(decoded_bits.as_slice());
+    let specialization = specialization_for_flat_one_hot_with_mask(
+        decoded_bits.as_slice(),
+        input.decoder_data.circuit_family_extra_mask.0 as usize,
+    );
     circuit_output_to_picus_program(
         "add_sub_lui_auipc_mop",
         &circuit_output,
@@ -1934,7 +3048,10 @@ pub fn build_mul_op_unsigned_only_picus_program() -> PicusProgram {
 }
 
 pub fn build_divrem_op_signed_picus_program() -> PicusProgram {
-    build_standalone_program("divrem_op_signed", build_divrem_harness(DivRemVariant::Signed))
+    build_standalone_program(
+        "divrem_op_signed",
+        build_divrem_harness(DivRemVariant::Signed),
+    )
 }
 
 pub fn build_divrem_op_unsigned_only_picus_program() -> PicusProgram {
@@ -1942,6 +3059,26 @@ pub fn build_divrem_op_unsigned_only_picus_program() -> PicusProgram {
         "divrem_op_unsigned_only",
         build_divrem_harness(DivRemVariant::UnsignedOnly),
     )
+}
+
+pub fn build_divrem_op_signed_testcases_picus_program() -> PicusProgram {
+    let harness = build_divrem_harness(DivRemVariant::Signed);
+    let modules = build_divrem_case_root_modules(
+        "divrem_op_signed_testcases",
+        &harness,
+        DivRemVariant::Signed,
+    );
+    build_program_from_root_modules(modules, &harness.circuit_output)
+}
+
+pub fn build_divrem_op_unsigned_only_testcases_picus_program() -> PicusProgram {
+    let harness = build_divrem_harness(DivRemVariant::UnsignedOnly);
+    let modules = build_divrem_case_root_modules(
+        "divrem_op_unsigned_only_testcases",
+        &harness,
+        DivRemVariant::UnsignedOnly,
+    );
+    build_program_from_root_modules(modules, &harness.circuit_output)
 }
 
 pub fn build_conditional_op_picus_program() -> PicusProgram {
@@ -1957,11 +3094,46 @@ pub fn build_jump_op_untrusted_picus_program() -> PicusProgram {
 }
 
 pub fn build_mul_div_picus_program() -> PicusProgram {
-    build_mul_div_picus_program_with_parallel_constraints::<true>(false)
+    build_mul_div_picus_program_with_parallel_constraints::<true>(true)
+}
+
+pub fn build_mul_div_multiplication_only_picus_program() -> PicusProgram {
+    build_mul_div_group_picus_program(false, true)
+}
+
+pub fn build_mul_div_division_only_picus_program() -> PicusProgram {
+    build_mul_div_group_picus_program(true, true)
 }
 
 pub fn build_mul_div_unsigned_only_picus_program() -> PicusProgram {
-    build_mul_div_picus_program_with_parallel_constraints::<false>(false)
+    build_mul_div_picus_program_with_parallel_constraints::<false>(true)
+}
+
+fn build_mul_div_group_picus_program(
+    division_group: bool,
+    enable_parallel_constraints: bool,
+) -> PicusProgram {
+    let (circuit_output, input, decoded_bits) =
+        build_mul_div_circuit_output_with_decoded_bits_and_parallel_constraints::<true>(
+            enable_parallel_constraints,
+        );
+    let specialization = specialization_filtered_by_assignment(
+        specialization_for_mul_div::<true>(decoded_bits.as_slice()),
+        decoded_bits[0],
+        u64::from(division_group),
+    );
+    let module_name = if division_group {
+        "mul_div_division_only"
+    } else {
+        "mul_div_multiplication_only"
+    };
+
+    circuit_output_to_picus_program(
+        module_name,
+        &circuit_output,
+        Some(&input),
+        Some(&specialization),
+    )
 }
 
 pub fn build_mul_div_picus_program_with_parallel_constraints<const SUPPORT_SIGNED: bool>(
@@ -2015,9 +3187,315 @@ pub fn build_reduced_machine_picus_program() -> PicusProgram {
     )
 }
 
+pub fn build_compiled_add_sub_lui_auipc_mop_picus_program() -> PicusProgram {
+    let (circuit_output, circuit_state, decoded_bits) =
+        build_add_sub_lui_auipc_mop_circuit_output_with_decoded_bits();
+    let specialization = specialization_for_flat_one_hot_with_mask(
+        decoded_bits.as_slice(),
+        circuit_state.decoder_data.circuit_family_extra_mask.0 as usize,
+    );
+    let artifact = compile_unrolled_circuit_state_transition::<Mersenne31Field>(
+        &|cs| add_sub_lui_auipc_mop_table_addition_fn(cs),
+        &|cs| add_sub_lui_auipc_mop_circuit_with_preprocessed_bytecode(cs),
+        1 << 20,
+        24,
+    );
+    compiled_artifact_to_picus_program(
+        "compiled_add_sub_lui_auipc_mop",
+        &artifact,
+        &circuit_output,
+        Some(&circuit_state),
+        Some(&specialization),
+    )
+}
+
+pub fn build_compiled_jump_branch_slt_picus_program() -> PicusProgram {
+    let (circuit_output, circuit_state, decoded_bits) =
+        build_jump_branch_slt_mop_circuit_output_with_decoded_bits();
+    let specialization = specialization_for_jump_branch_slt(
+        decoded_bits.as_slice(),
+        circuit_state.decoder_data.circuit_family_extra_mask.0 as usize,
+    );
+    let artifact = compile_unrolled_circuit_state_transition::<Mersenne31Field>(
+        &|cs| jump_branch_slt_table_addition_fn(cs),
+        &|cs| jump_branch_slt_circuit_with_preprocessed_bytecode::<_, _, true>(cs),
+        1 << 20,
+        24,
+    );
+    compiled_artifact_to_picus_program(
+        "compiled_jump_branch_slt",
+        &artifact,
+        &circuit_output,
+        Some(&circuit_state),
+        Some(&specialization),
+    )
+}
+
+pub fn build_compiled_shift_binop_csrrw_picus_program() -> PicusProgram {
+    let (circuit_output, circuit_state, decoded_bits) =
+        build_shift_binop_csrrw_circuit_output_with_decoded_bits();
+    let specialization = specialization_for_shift_binop_csrrw(
+        decoded_bits.as_slice(),
+        circuit_state.decoder_data.funct3.0 as usize,
+    );
+    let artifact = compile_unrolled_circuit_state_transition::<Mersenne31Field>(
+        &|cs| {
+            shift_binop_csrrw_table_addition_fn(cs);
+            let csr_table = create_csr_table_for_delegation::<Mersenne31Field>(
+                true,
+                &[],
+                TableType::SpecialCSRProperties.to_table_id(),
+            );
+            cs.add_table_with_content(
+                TableType::SpecialCSRProperties,
+                LookupWrapper::Dimensional3(csr_table),
+            );
+        },
+        &|cs| shift_binop_csrrw_circuit_with_preprocessed_bytecode(cs),
+        1 << 20,
+        24,
+    );
+    compiled_artifact_to_picus_program(
+        "compiled_shift_binop_csrrw",
+        &artifact,
+        &circuit_output,
+        Some(&circuit_state),
+        Some(&specialization),
+    )
+}
+
+pub fn build_compiled_load_store_picus_program() -> PicusProgram {
+    let (circuit_output, circuit_state, decoded_bits) =
+        build_load_store_circuit_output_with_decoded_bits();
+    let specialization = specialization_for_single_bit(decoded_bits[0]);
+    let artifact = compile_unrolled_circuit_state_transition::<Mersenne31Field>(
+        &|cs| {
+            load_store_table_addition_fn(cs);
+            for (table_type, table) in create_load_store_special_tables::<
+                _,
+                { common_constants::ROM_SECOND_WORD_BITS },
+            >(DUMMY_UNROLLED_BYTECODE)
+            {
+                cs.add_table_with_content(table_type, table);
+            }
+        },
+        &|cs| {
+            load_store_circuit_with_preprocessed_bytecode::<
+                _,
+                _,
+                { common_constants::ROM_SECOND_WORD_BITS },
+            >(cs)
+        },
+        1 << 20,
+        24,
+    );
+    compiled_artifact_to_picus_program(
+        "compiled_load_store",
+        &artifact,
+        &circuit_output,
+        Some(&circuit_state),
+        Some(&specialization),
+    )
+}
+
+pub fn build_compiled_load_store_word_only_picus_program() -> PicusProgram {
+    let (circuit_output, circuit_state, decoded_bits) =
+        build_load_store_word_only_circuit_output_with_decoded_bits();
+    let specialization = specialization_for_single_bit(decoded_bits[0]);
+    let artifact = compile_unrolled_circuit_state_transition::<Mersenne31Field>(
+        &|cs| {
+            word_only_load_store_table_addition_fn(cs);
+            for (table_type, table) in create_word_only_load_store_special_tables::<
+                _,
+                { common_constants::ROM_SECOND_WORD_BITS },
+            >(DUMMY_UNROLLED_BYTECODE)
+            {
+                cs.add_table_with_content(table_type, table);
+            }
+        },
+        &|cs| {
+            word_only_load_store_circuit_with_preprocessed_bytecode::<
+                _,
+                _,
+                { common_constants::ROM_SECOND_WORD_BITS },
+            >(cs)
+        },
+        1 << 20,
+        24,
+    );
+    compiled_artifact_to_picus_program(
+        "compiled_load_store_word_only",
+        &artifact,
+        &circuit_output,
+        Some(&circuit_state),
+        Some(&specialization),
+    )
+}
+
+pub fn build_compiled_load_store_subword_only_picus_program() -> PicusProgram {
+    let (circuit_output, circuit_state, decoded_bits) =
+        build_load_store_subword_only_circuit_output_with_decoded_bits();
+    let specialization = specialization_for_single_bit(decoded_bits[0]);
+    let artifact = compile_unrolled_circuit_state_transition::<Mersenne31Field>(
+        &|cs| {
+            subword_only_load_store_table_addition_fn(cs);
+            for (table_type, table) in create_load_store_special_tables::<
+                _,
+                { common_constants::ROM_SECOND_WORD_BITS },
+            >(DUMMY_UNROLLED_BYTECODE)
+            {
+                cs.add_table_with_content(table_type, table);
+            }
+        },
+        &|cs| {
+            subword_only_load_store_circuit_with_preprocessed_bytecode::<
+                _,
+                _,
+                { common_constants::ROM_SECOND_WORD_BITS },
+            >(cs)
+        },
+        1 << 20,
+        24,
+    );
+    compiled_artifact_to_picus_program(
+        "compiled_load_store_subword_only",
+        &artifact,
+        &circuit_output,
+        Some(&circuit_state),
+        Some(&specialization),
+    )
+}
+
+pub fn build_compiled_mul_div_picus_program() -> PicusProgram {
+    let (circuit_output, circuit_state, decoded_bits) =
+        build_mul_div_circuit_output_with_decoded_bits();
+    let specialization = specialization_for_mul_div::<true>(decoded_bits.as_slice());
+    let artifact = compile_unrolled_circuit_state_transition::<Mersenne31Field>(
+        &|cs| mul_div_table_addition_fn(cs),
+        &|cs| mul_div_circuit_with_preprocessed_bytecode::<_, _, true>(cs),
+        1 << 20,
+        24,
+    );
+    compiled_artifact_to_picus_program(
+        "compiled_mul_div",
+        &artifact,
+        &circuit_output,
+        Some(&circuit_state),
+        Some(&specialization),
+    )
+}
+
+pub fn build_compiled_mul_div_unsigned_only_picus_program() -> PicusProgram {
+    let (circuit_output, circuit_state, decoded_bits) =
+        build_mul_div_unsigned_only_circuit_output_with_decoded_bits();
+    let specialization = specialization_for_mul_div::<false>(decoded_bits.as_slice());
+    let artifact = compile_unrolled_circuit_state_transition::<Mersenne31Field>(
+        &|cs| mul_div_table_addition_fn(cs),
+        &|cs| mul_div_circuit_with_preprocessed_bytecode::<_, _, false>(cs),
+        1 << 20,
+        24,
+    );
+    compiled_artifact_to_picus_program(
+        "compiled_mul_div_unsigned_only",
+        &artifact,
+        &circuit_output,
+        Some(&circuit_state),
+        Some(&specialization),
+    )
+}
+
+pub fn build_compiled_reduced_machine_picus_program() -> PicusProgram {
+    let (circuit_output, circuit_state, decoded_bits) =
+        build_reduced_machine_circuit_output_with_decoded_bits();
+    let specialization = specialization_with_fixed_assignment(
+        specialization_from_valid_bitmasks(decoded_bits.as_slice(), valid_reduced_machine_masks()),
+        circuit_state.execute.0 as usize,
+        1,
+    );
+    let artifact = compile_unrolled_circuit_state_transition::<Mersenne31Field>(
+        &|cs| {
+            reduced_machine_table_addition_fn(cs);
+            let extra_tables = create_reduced_machine_special_tables::<
+                _,
+                { common_constants::ROM_SECOND_WORD_BITS },
+            >(
+                DUMMY_UNROLLED_BYTECODE,
+                &[
+                    common_constants::NON_DETERMINISM_CSR,
+                    common_constants::delegation_types::blake2s_with_control::BLAKE2S_DELEGATION_CSR_REGISTER,
+                ],
+            );
+            for (table_type, table) in extra_tables {
+                cs.add_table_with_content(table_type, table);
+            }
+        },
+        &|cs| {
+            reduced_machine_circuit_with_preprocessed_bytecode::<
+                _,
+                _,
+                { common_constants::ROM_SECOND_WORD_BITS },
+            >(cs)
+        },
+        1 << 20,
+        23,
+    );
+    compiled_artifact_to_picus_program(
+        "compiled_reduced_machine",
+        &artifact,
+        &circuit_output,
+        Some(&circuit_state),
+        Some(&specialization),
+    )
+}
+
+pub fn build_compiled_reduced_machine_unified_picus_program() -> PicusProgram {
+    let (circuit_output, circuit_state, decoded_bits) =
+        build_reduced_machine_circuit_output_with_decoded_bits();
+    let specialization = specialization_with_fixed_assignment(
+        specialization_from_valid_bitmasks(decoded_bits.as_slice(), valid_reduced_machine_masks()),
+        circuit_state.execute.0 as usize,
+        1,
+    );
+    let artifact = compile_unified_circuit_state_transition::<Mersenne31Field>(
+        &|cs| {
+            reduced_machine_table_addition_fn(cs);
+            let extra_tables = create_reduced_machine_special_tables::<
+                _,
+                { common_constants::ROM_SECOND_WORD_BITS },
+            >(
+                DUMMY_UNROLLED_BYTECODE,
+                &[
+                    common_constants::NON_DETERMINISM_CSR,
+                    common_constants::delegation_types::blake2s_with_control::BLAKE2S_DELEGATION_CSR_REGISTER,
+                ],
+            );
+            for (table_type, table) in extra_tables {
+                cs.add_table_with_content(table_type, table);
+            }
+        },
+        &|cs| {
+            reduced_machine_circuit_with_preprocessed_bytecode::<
+                _,
+                _,
+                { common_constants::ROM_SECOND_WORD_BITS },
+            >(cs)
+        },
+        1 << 20,
+        23,
+    );
+    compiled_artifact_to_picus_program(
+        "compiled_reduced_machine_unified",
+        &artifact,
+        &circuit_output,
+        Some(&circuit_state),
+        Some(&specialization),
+    )
+}
+
 pub fn build_blake2_with_extended_control_delegation_picus_program() -> PicusProgram {
     let mut cs = BasicAssembly::<Mersenne31Field>::new();
-    let (_, _, metadata) = define_blake2_with_extended_control_delegation_circuit_with_metadata(&mut cs);
+    let (_, _, metadata) =
+        define_blake2_with_extended_control_delegation_circuit_with_metadata(&mut cs);
     let (circuit_output, _) = cs.finalize();
 
     let Blake2WithExtendedControlDelegationPicusMetadata {
@@ -2047,17 +3525,13 @@ pub fn build_blake2_with_extended_control_delegation_picus_program() -> PicusPro
         &extra_outputs,
         &[],
     );
-
-    let mut modules = BTreeMap::new();
-    modules.insert(module.name.clone(), module);
-    let mut program = PicusProgram::new(Mersenne31Field::CHARACTERISTICS);
-    program.add_modules(&mut modules);
-    program
+    build_program_from_root_module(module, &circuit_output)
 }
 
 pub fn build_bigint_with_control_delegation_picus_program() -> PicusProgram {
     let mut cs = BasicAssembly::<Mersenne31Field>::new();
-    let (_, _, metadata) = define_u256_ops_extended_control_delegation_circuit_with_metadata(&mut cs);
+    let (_, _, metadata) =
+        define_u256_ops_extended_control_delegation_circuit_with_metadata(&mut cs);
     let (circuit_output, _) = cs.finalize();
 
     let BigintDelegationPicusMetadata {
@@ -2083,12 +3557,7 @@ pub fn build_bigint_with_control_delegation_picus_program() -> PicusProgram {
         &extra_outputs,
         &[],
     );
-
-    let mut modules = BTreeMap::new();
-    modules.insert(module.name.clone(), module);
-    let mut program = PicusProgram::new(Mersenne31Field::CHARACTERISTICS);
-    program.add_modules(&mut modules);
-    program
+    build_program_from_root_module(module, &circuit_output)
 }
 
 #[cfg(test)]
@@ -2102,6 +3571,37 @@ mod tests {
         fs::create_dir_all(&out_dir).expect("failed to create Picus extraction output directory");
         out_dir.push(format!("{test_name}.picus"));
         fs::write(&out_dir, dumped).expect("failed to write Picus extraction output");
+    }
+
+    fn expected_divrem_case_module_names(
+        harness_name: &str,
+        variant: DivRemVariant,
+    ) -> Vec<String> {
+        let mut names = Vec::new();
+
+        if matches!(variant, DivRemVariant::Signed) {
+            for opcode in [DivRemOpcode::Div, DivRemOpcode::Rem] {
+                for scenario in SIGNED_DIVREM_SCENARIOS {
+                    names.push(format!(
+                        "{harness_name}__{}__{}",
+                        opcode.op_name(),
+                        scenario.name
+                    ));
+                }
+            }
+        }
+
+        for opcode in [DivRemOpcode::Divu, DivRemOpcode::Remu] {
+            for scenario in UNSIGNED_DIVREM_SCENARIOS {
+                names.push(format!(
+                    "{harness_name}__{}__{}",
+                    opcode.op_name(),
+                    scenario.name
+                ));
+            }
+        }
+
+        names
     }
 
     #[test]
@@ -2155,6 +3655,95 @@ mod tests {
     }
 
     #[test]
+    fn divrem_signed_testcase_program_emits_expected_case_modules() {
+        let dumped = build_divrem_op_signed_testcases_picus_program().to_string();
+        write_extracted_program("divrem_op_signed_testcases", &dumped);
+
+        for module_name in
+            expected_divrem_case_module_names("divrem_op_signed_testcases", DivRemVariant::Signed)
+        {
+            assert!(
+                dumped.contains(&format!("(begin-module {module_name})")),
+                "missing div/rem signed testcase module {module_name}",
+            );
+        }
+    }
+
+    #[test]
+    fn divrem_unsigned_only_testcase_program_emits_expected_case_modules() {
+        let dumped = build_divrem_op_unsigned_only_testcases_picus_program().to_string();
+        write_extracted_program("divrem_op_unsigned_only_testcases", &dumped);
+
+        for module_name in expected_divrem_case_module_names(
+            "divrem_op_unsigned_only_testcases",
+            DivRemVariant::UnsignedOnly,
+        ) {
+            assert!(
+                dumped.contains(&format!("(begin-module {module_name})")),
+                "missing div/rem unsigned-only testcase module {module_name}",
+            );
+        }
+    }
+
+    #[test]
+    fn compiled_unrolled_artifact_translation_smoke_test() {
+        let programs = [
+            (
+                "compiled_add_sub_lui_auipc_mop",
+                build_compiled_add_sub_lui_auipc_mop_picus_program(),
+            ),
+            (
+                "compiled_jump_branch_slt",
+                build_compiled_jump_branch_slt_picus_program(),
+            ),
+            (
+                "compiled_shift_binop_csrrw",
+                build_compiled_shift_binop_csrrw_picus_program(),
+            ),
+            (
+                "compiled_load_store",
+                build_compiled_load_store_picus_program(),
+            ),
+            (
+                "compiled_load_store_word_only",
+                build_compiled_load_store_word_only_picus_program(),
+            ),
+            (
+                "compiled_load_store_subword_only",
+                build_compiled_load_store_subword_only_picus_program(),
+            ),
+            ("compiled_mul_div", build_compiled_mul_div_picus_program()),
+            (
+                "compiled_mul_div_unsigned_only",
+                build_compiled_mul_div_unsigned_only_picus_program(),
+            ),
+            (
+                "compiled_reduced_machine",
+                build_compiled_reduced_machine_picus_program(),
+            ),
+            (
+                "compiled_reduced_machine_unified",
+                build_compiled_reduced_machine_unified_picus_program(),
+            ),
+        ];
+
+        for (name, program) in programs {
+            let dumped = program.to_string();
+            write_extracted_program(name, &dumped);
+            assert!(dumped.contains(&format!("(begin-module {name}")));
+            assert!(dumped.contains("(prime-number"));
+            assert!(dumped.contains("(assert "));
+        }
+    }
+
+    #[test]
+    fn compiled_add_sub_specialization_removes_family_mask_input() {
+        let dumped = build_compiled_add_sub_lui_auipc_mop_picus_program().to_string();
+        assert!(!dumped.contains("(input x_4)"));
+        assert!(!dumped.contains("(assert (= (+ (- 0 x_4)"));
+    }
+
+    #[test]
     fn optimized_decoder_translation_smoke_test() {
         let program = build_optimized_decoder_picus_program(true);
         let dumped = program.to_string();
@@ -2176,7 +3765,10 @@ mod tests {
     fn add_sub_lui_auipc_mop_one_hot_specialization_emits_one_module_per_bit() {
         let (circuit_output, input, decoded_bits) =
             build_add_sub_lui_auipc_mop_circuit_output_with_decoded_bits();
-        let specialization = specialization_for_flat_one_hot(decoded_bits.as_slice());
+        let specialization = specialization_for_flat_one_hot_with_mask(
+            decoded_bits.as_slice(),
+            input.decoder_data.circuit_family_extra_mask.0 as usize,
+        );
         let program = circuit_output_to_picus_program(
             "add_sub_lui_auipc_mop",
             &circuit_output,
@@ -2193,7 +3785,10 @@ mod tests {
     fn jump_branch_slt_one_hot_specialization_emits_one_module_per_bit() {
         let (circuit_output, input, decoded_bits) =
             build_jump_branch_slt_mop_circuit_output_with_decoded_bits();
-        let specialization = specialization_for_flat_one_hot(decoded_bits.as_slice());
+        let specialization = specialization_for_jump_branch_slt(
+            decoded_bits.as_slice(),
+            input.decoder_data.circuit_family_extra_mask.0 as usize,
+        );
         let program = circuit_output_to_picus_program(
             "jump_branch_slt",
             &circuit_output,
@@ -2202,6 +3797,34 @@ mod tests {
         );
         let dumped = program.to_string();
         write_extracted_program("jump_branch_slt", &dumped);
+    }
+
+    #[test]
+    fn compiled_jump_branch_slt_has_no_constant_contradictions_after_specialization() {
+        let dumped = build_compiled_jump_branch_slt_picus_program().to_string();
+        assert!(!dumped.contains("(assert (= 15 0))"));
+        assert!(!dumped.contains("(assert (= 6 0))"));
+        assert!(!dumped.contains("(assert (= 2147483640 0))"));
+        assert!(!dumped.contains("(assert (= 2147483633 0))"));
+    }
+
+    #[test]
+    fn compiled_reduced_machine_unified_specialization_collapses_variable_lookup_guards() {
+        let dumped = build_compiled_reduced_machine_unified_picus_program().to_string();
+        let module_name = "compiled_reduced_machine_unified19_020_121_122_023_024_025_126_027_028_029_030_031_032_033_034_035_036_0137_1";
+        let start = dumped
+            .find(&format!("(begin-module {module_name})"))
+            .expect("expected reduced-unified specialization module to be present");
+        let rest = &dumped[start..];
+        let end = rest
+            .find("(end-module)")
+            .expect("expected reduced-unified specialization module to terminate");
+        let module = &rest[..end];
+
+        assert!(!module.contains("(! (= (- x_58 "));
+        assert!(!module.contains("(! (= (- x_62 "));
+        assert!(!module.contains("(! (= (- x_66 "));
+        assert!(!module.contains("(! (= (- x_70 "));
     }
 
     #[test]
@@ -2262,6 +3885,34 @@ mod tests {
         );
         let dumped = program.to_string();
         write_extracted_program("mul_div", &dumped);
+    }
+
+    #[test]
+    fn mul_div_multiplication_only_specialization_emits_only_multiplication_patterns() {
+        let dumped = build_mul_div_multiplication_only_picus_program().to_string();
+        write_extracted_program("mul_div_multiplication_only", &dumped);
+        let module_count = dumped.matches("(begin-module ").count();
+        assert_eq!(module_count, 4);
+    }
+
+    #[test]
+    fn mul_div_division_only_specialization_emits_only_division_patterns() {
+        let dumped = build_mul_div_division_only_picus_program().to_string();
+        write_extracted_program("mul_div_division_only", &dumped);
+        let module_count = dumped.matches("(begin-module ").count();
+        assert_eq!(module_count, 4);
+    }
+
+    #[test]
+    fn public_mul_div_builders_enable_parallel_constraints() {
+        assert_eq!(
+            build_mul_div_picus_program().to_string(),
+            build_mul_div_picus_program_with_parallel_constraints::<true>(true).to_string()
+        );
+        assert_eq!(
+            build_mul_div_unsigned_only_picus_program().to_string(),
+            build_mul_div_picus_program_with_parallel_constraints::<false>(true).to_string()
+        );
     }
 
     #[test]
@@ -2327,6 +3978,13 @@ mod tests {
         let dumped = program.to_string();
         write_extracted_program("blake2_with_extended_control_delegation", &dumped);
         assert!(dumped.contains("(begin-module blake2_with_extended_control_delegation)"));
+        assert!(dumped.contains("blake2_extended_state_init"));
+        assert!(dumped.contains("blake2_absorb_input_select"));
+        assert!(dumped.contains("blake2_message_permutation"));
+        assert!(dumped.contains("blake2_g_column_0"));
+        assert!(dumped.contains("blake2_g_diagonal_3"));
+        assert!(dumped.contains("blake2_final_xor_a_c"));
+        assert!(dumped.contains("blake2_final_xor_b_d"));
         assert!(dumped.contains("(prime-number"));
     }
 
@@ -2376,5 +4034,98 @@ mod tests {
         let mut next_fresh_var_id = 128;
         add_lookup_constraints::<Mersenne31Field>(&mut module, &lookups, &mut next_fresh_var_id);
         assert!(!module.constraints.is_empty());
+    }
+
+    #[test]
+    fn picus_regions_capture_raw_and_structured_constraints() {
+        let mut cs = BasicAssembly::<Mersenne31Field>::new();
+        cs.set_picus_parallel_constraints_enabled(true);
+
+        let input = cs.add_variable();
+        let output = cs.add_variable();
+        cs.with_picus_region(
+            crate::cs::circuit::PicusRegionSpec::new("toy_region")
+                .with_inputs(vec![crate::cs::circuit::PicusExpr::Variable(input)])
+                .with_outputs(vec![output]),
+            |cs| {
+                cs.add_constraint_allow_explicit_linear(
+                    Constraint::from(input) - Term::from(output),
+                );
+                cs.add_picus_parallel_constraint(CircuitPicusStructuredConstraint::Eq {
+                    lhs: CircuitPicusExpr::Variable(input),
+                    rhs: CircuitPicusExpr::Variable(output),
+                });
+            },
+        );
+
+        let (circuit_output, _) = cs.finalize();
+        let region = &circuit_output.picus_extraction_metadata.regions[0];
+        assert_eq!(region.raw_constraints, 0..1);
+        assert_eq!(region.structured_constraints, 0..1);
+
+        let regions = build_region_modules("toy", &circuit_output);
+        let region_module = regions.get("toy__region_0_toy_region").unwrap();
+        assert_eq!(region_module.constraints.len(), 2);
+
+        let program = circuit_output_to_picus_program("toy", &circuit_output, None, None);
+        let dumped = program.to_string();
+        assert!(dumped.contains("(begin-module toy__region_0_toy_region)"));
+        assert!(dumped.contains("(call "));
+        assert!(dumped.contains("toy__region_0_toy_region ["));
+    }
+
+    #[test]
+    fn picus_regions_lift_expression_inputs_to_variables() {
+        let mut cs = BasicAssembly::<Mersenne31Field>::new();
+        let input = cs.add_variable();
+        let output = cs.add_variable();
+        cs.with_picus_region(
+            crate::cs::circuit::PicusRegionSpec::new("expr_input_region").with_inputs(vec![
+                crate::cs::circuit::PicusExpr::Variable(input)
+                    + crate::cs::circuit::PicusExpr::Variable(output),
+            ]),
+            |_cs| {},
+        );
+
+        let (circuit_output, _) = cs.finalize();
+        let regions = build_region_modules("toy", &circuit_output);
+        let region_module = regions.get("toy__region_0_expr_input_region").unwrap();
+
+        assert!(matches!(
+            region_module.inputs.as_slice(),
+            [PicusExpr::Var(_)]
+        ));
+        assert_eq!(region_module.constraints.len(), 1);
+        let dumped = region_module.to_string();
+        assert!(!dumped.contains("(input (+"));
+    }
+
+    #[test]
+    fn opaque_picus_regions_are_removed_from_parent_module() {
+        let mut cs = BasicAssembly::<Mersenne31Field>::new();
+        let input = cs.add_variable();
+        let output = cs.add_variable();
+        cs.with_picus_region(
+            crate::cs::circuit::PicusRegionSpec::new("opaque_region")
+                .with_inputs(vec![crate::cs::circuit::PicusExpr::Variable(input)])
+                .with_outputs(vec![output])
+                .opaque_for_picus(),
+            |cs| {
+                cs.add_constraint_allow_explicit_linear(
+                    Constraint::from(input) - Term::from(output),
+                );
+            },
+        );
+
+        let (circuit_output, _) = cs.finalize();
+        let parent_module =
+            build_picus_module_from_circuit_output("toy", &circuit_output, None, &[], &[], &[]);
+        assert!(parent_module.constraints.is_empty());
+        assert_eq!(parent_module.calls.len(), 0);
+
+        let program = circuit_output_to_picus_program("toy", &circuit_output, None, None);
+        let dumped = program.to_string();
+        assert!(dumped.contains("(begin-module toy__region_0_opaque_region)"));
+        assert!(dumped.contains("toy__region_0_opaque_region"));
     }
 }

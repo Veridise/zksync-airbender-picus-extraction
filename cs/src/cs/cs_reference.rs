@@ -45,6 +45,7 @@ pub struct BasicAssembly<F: PrimeField, W: WitnessPlacer<F> = CSDebugWitnessEval
     logger: Vec<(&'static str, u64, OptCtxIndexers)>,
     picus_extraction_metadata: PicusExtractionMetadata<F>,
     picus_parallel_constraints_enabled: bool,
+    picus_region_stack: Vec<PicusRegionHandle>,
 }
 
 impl<F: PrimeField, W: WitnessPlacer<F>> Circuit<F> for BasicAssembly<F, W> {
@@ -75,6 +76,7 @@ impl<F: PrimeField, W: WitnessPlacer<F>> Circuit<F> for BasicAssembly<F, W> {
             logger: vec![],
             picus_extraction_metadata: PicusExtractionMetadata::default(),
             picus_parallel_constraints_enabled: false,
+            picus_region_stack: vec![],
         }
     }
 
@@ -149,6 +151,69 @@ impl<F: PrimeField, W: WitnessPlacer<F>> Circuit<F> for BasicAssembly<F, W> {
         }
     }
 
+    fn begin_picus_region(&mut self, spec: PicusRegionSpec<F>) -> Option<PicusRegionHandle> {
+        let handle = PicusRegionHandle(self.picus_extraction_metadata.regions.len());
+        let raw_constraints_start = self.constraint_storage.len();
+        let structured_constraints_start =
+            self.picus_extraction_metadata.parallel_constraints.len();
+        let lookups_start = self.lookup_storage.len();
+        let disjunctive_lookups_start = self.picus_extraction_metadata.disjunctive_lookups.len();
+        let boolean_vars_start = self.boolean_variables.len();
+        let range_checks_start = self.rangechecked_expressions.len();
+        let parent_region = self.picus_region_stack.last().map(|region| region.0);
+
+        self.picus_extraction_metadata.regions.push(PicusRegion {
+            name: spec.name,
+            inputs: spec.inputs,
+            outputs: spec.outputs,
+            opaque_for_picus: spec.opaque_for_picus,
+            parent_region,
+            raw_constraints: raw_constraints_start..raw_constraints_start,
+            structured_constraints: structured_constraints_start..structured_constraints_start,
+            lookups: lookups_start..lookups_start,
+            disjunctive_lookups: disjunctive_lookups_start..disjunctive_lookups_start,
+            boolean_vars: boolean_vars_start..boolean_vars_start,
+            range_checks: range_checks_start..range_checks_start,
+        });
+        self.picus_region_stack.push(handle);
+
+        Some(handle)
+    }
+
+    fn end_picus_region(&mut self, region: PicusRegionHandle) {
+        let current_region = self
+            .picus_region_stack
+            .pop()
+            .expect("attempted to end a Picus region with an empty stack");
+        assert_eq!(
+            current_region, region,
+            "Picus regions must be closed in LIFO order"
+        );
+
+        let region_meta = self
+            .picus_extraction_metadata
+            .regions
+            .get_mut(region.0)
+            .expect("Picus region handle must refer to an existing region");
+        region_meta.raw_constraints.end = self.constraint_storage.len();
+        region_meta.structured_constraints.end =
+            self.picus_extraction_metadata.parallel_constraints.len();
+        region_meta.lookups.end = self.lookup_storage.len();
+        region_meta.disjunctive_lookups.end =
+            self.picus_extraction_metadata.disjunctive_lookups.len();
+        region_meta.boolean_vars.end = self.boolean_variables.len();
+        region_meta.range_checks.end = self.rangechecked_expressions.len();
+    }
+
+    fn set_picus_region_outputs(&mut self, region: PicusRegionHandle, outputs: Vec<Variable>) {
+        let region_meta = self
+            .picus_extraction_metadata
+            .regions
+            .get_mut(region.0)
+            .expect("Picus region handle must refer to an existing region");
+        region_meta.outputs = outputs;
+    }
+
     #[track_caller]
     fn get_value(&self, var: Variable) -> Option<F> {
         if let Some(witness_placer) = self.witness_placer.as_ref() {
@@ -169,7 +234,10 @@ impl<F: PrimeField, W: WitnessPlacer<F>> Circuit<F> for BasicAssembly<F, W> {
 
     #[track_caller]
     fn add_constraint(&mut self, mut constraint: Constraint<F>) {
-        assert!(constraint.degree() == 2, "use `add_constraint_allow_explicit_linear` if you need to make a variable arising from linear constraint");
+        assert!(
+            constraint.degree() == 2,
+            "use `add_constraint_allow_explicit_linear` if you need to make a variable arising from linear constraint"
+        );
         assert!(constraint.degree() <= 2);
         constraint.normalize();
         self.try_check_constraint(&constraint);
@@ -947,7 +1015,9 @@ impl<F: PrimeField, W: WitnessPlacer<F>> Circuit<F> for BasicAssembly<F, W> {
                 if name == "EXECUTOR" || name == "DECODER" || name == "OPT_CONTEXT" {
                     println!("{name:.<20}{vars:.>3}");
                 } else {
-                    println!("{name:.<20}{vars:.>3} ({add_sub_indexer} addsub, {u16_to_u8x2_decomposition_indexer} u16tou8, {u16_range_check_indexer} u16, {mul_div_indexer} muldiv, {zero_indexer} iszero, {lookup_indexer} lookup, {lookup_outputs_indexer} lookup output, {register_allocation_indexer} reg)");
+                    println!(
+                        "{name:.<20}{vars:.>3} ({add_sub_indexer} addsub, {u16_to_u8x2_decomposition_indexer} u16tou8, {u16_range_check_indexer} u16, {mul_div_indexer} muldiv, {zero_indexer} iszero, {lookup_indexer} lookup, {lookup_outputs_indexer} lookup output, {register_allocation_indexer} reg)"
+                    );
                 }
             }
             println!("TOTAL {total_vars:.>3}");
@@ -1117,7 +1187,8 @@ impl<F: PrimeField, W: WitnessPlacer<F>> Circuit<F> for BasicAssembly<F, W> {
                         if value != F::ZERO {
                             println!(
                                 "[{}:{}] unsatisfied at constraint {constraint:?} with value {value:?}",
-                                file!(), line!()
+                                file!(),
+                                line!()
                             );
                             return false;
                         }

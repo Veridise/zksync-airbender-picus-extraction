@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::pcl::{current_modulus, reduce_mod, PicusCall, PicusConstraint, PicusExpr};
+use crate::pcl::{PicusCall, PicusConstraint, PicusExpr, current_modulus, reduce_mod};
 
 // === Helpers ===
 
@@ -96,7 +96,11 @@ pub fn subst_call(call: &PicusCall, env: &BTreeMap<usize, u64>) -> PicusCall {
     for output in &call.outputs {
         new_outputs.push(subst_expr(output, env));
     }
-    PicusCall { inputs: new_inputs, outputs: new_outputs, mod_name: call.mod_name.clone() }
+    PicusCall {
+        inputs: new_inputs,
+        outputs: new_outputs,
+        mod_name: call.mod_name.clone(),
+    }
 }
 
 // === Constraint substitution/simplification ===
@@ -115,7 +119,7 @@ pub fn subst_constraint(
             // Drop tautologies Eq(0); keep contradictions as Eq(1)
             match ee {
                 PicusExpr::Const(0) => None,
-                PicusExpr::Const(1) => keep(Eq(Box::new(1u64.into()))), // 1 = 0 (unsat marker)
+                PicusExpr::Const(_) => keep(Eq(Box::new(1u64.into()))), // c = 0 for c != 0
                 _ => keep(Eq(Box::new(ee))),
             }
         }
@@ -268,4 +272,27 @@ pub fn partial_evaluate_calls(calls: &[PicusCall], env: &BTreeMap<usize, u64>) -
         out_calls.push(subst_call(call, env))
     }
     out_calls
+}
+
+#[cfg(test)]
+mod tests {
+    use super::partial_evaluate;
+    use crate::pcl::{PicusConstraint, PicusExpr};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn false_equality_guards_collapse_in_implications() {
+        let constraints = vec![PicusConstraint::Implies(
+            Box::new(PicusConstraint::new_equality(
+                PicusExpr::Var(0),
+                43u64.into(),
+            )),
+            Box::new(PicusConstraint::new_equality(
+                PicusExpr::Var(1),
+                0u64.into(),
+            )),
+        )];
+        let reduced = partial_evaluate(&constraints, &BTreeMap::from([(0usize, 18u64)]));
+        assert!(reduced.is_empty());
+    }
 }

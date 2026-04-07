@@ -12,7 +12,7 @@ use crate::{
     tables::TableDriver,
     types::{Boolean, Num},
 };
-use core::ops::{Add, Mul, Sub};
+use core::ops::{Add, Mul, Range, Sub};
 use field::PrimeField;
 use std::collections::HashMap;
 
@@ -160,6 +160,59 @@ pub struct PicusExtractionMetadata<F: PrimeField> {
     pub parallel_constraints_enabled: bool,
     pub disjunctive_lookups: Vec<DisjunctiveLookup<F>>,
     pub parallel_constraints: Vec<PicusStructuredConstraint<F>>,
+    pub regions: Vec<PicusRegion<F>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PicusRegionHandle(pub usize);
+
+#[derive(Clone, Debug)]
+pub struct PicusRegionSpec<F: PrimeField> {
+    pub name: String,
+    pub inputs: Vec<PicusExpr<F>>,
+    pub outputs: Vec<Variable>,
+    pub opaque_for_picus: bool,
+}
+
+impl<F: PrimeField> PicusRegionSpec<F> {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            opaque_for_picus: false,
+        }
+    }
+
+    pub fn with_inputs(mut self, inputs: Vec<PicusExpr<F>>) -> Self {
+        self.inputs = inputs;
+        self
+    }
+
+    pub fn with_outputs(mut self, outputs: Vec<Variable>) -> Self {
+        self.outputs = outputs;
+        self
+    }
+
+    pub fn opaque_for_picus(mut self) -> Self {
+        self.opaque_for_picus = true;
+        self
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PicusRegion<F: PrimeField> {
+    pub name: String,
+    pub inputs: Vec<PicusExpr<F>>,
+    pub outputs: Vec<Variable>,
+    pub opaque_for_picus: bool,
+    pub parent_region: Option<usize>,
+    pub raw_constraints: Range<usize>,
+    pub structured_constraints: Range<usize>,
+    pub lookups: Range<usize>,
+    pub disjunctive_lookups: Range<usize>,
+    pub boolean_vars: Range<usize>,
+    pub range_checks: Range<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -468,6 +521,25 @@ pub trait Circuit<F: PrimeField>: Sized {
     fn add_disjunctive_lookup_hint(&mut self, _hint: DisjunctiveLookup<F>) {}
     fn set_picus_parallel_constraints_enabled(&mut self, _enabled: bool) {}
     fn add_picus_parallel_constraint(&mut self, _constraint: PicusStructuredConstraint<F>) {}
+    fn begin_picus_region(&mut self, _spec: PicusRegionSpec<F>) -> Option<PicusRegionHandle> {
+        None
+    }
+    fn set_picus_region_outputs(&mut self, _region: PicusRegionHandle, _outputs: Vec<Variable>) {}
+    fn end_picus_region(&mut self, _region: PicusRegionHandle) {}
+
+    fn with_picus_region<T>(
+        &mut self,
+        spec: PicusRegionSpec<F>,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let region = self.begin_picus_region(spec);
+        let result = f(self);
+        if let Some(region) = region {
+            self.end_picus_region(region);
+        }
+
+        result
+    }
 
     #[track_caller]
     fn add_boolean_variable(&mut self) -> Boolean {

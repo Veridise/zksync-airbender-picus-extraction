@@ -44,11 +44,17 @@ fn apply_shift_binop_csrrw<F: PrimeField, CS: Circuit<F>>(
     );
 
     // read inputs
-    let (rs1_reg, rs1_mem_query) =
-        get_rs1_as_shuffle_ram(cs, Num::Var(input_circuit_state.decoder_data.rs1_index), true);
+    let (rs1_reg, rs1_mem_query) = get_rs1_as_shuffle_ram(
+        cs,
+        Num::Var(input_circuit_state.decoder_data.rs1_index),
+        true,
+    );
     cs.add_shuffle_ram_query(rs1_mem_query);
-    let (rs2_reg, rs2_mem_query) =
-        get_rs2_as_shuffle_ram(cs, Num::Var(input_circuit_state.decoder_data.rs2_index), true);
+    let (rs2_reg, rs2_mem_query) = get_rs2_as_shuffle_ram(
+        cs,
+        Num::Var(input_circuit_state.decoder_data.rs2_index),
+        true,
+    );
     cs.add_shuffle_ram_query(rs2_mem_query);
     let imm_as_reg = Register::<F>(input_circuit_state.decoder_data.imm.map(|el| Num::Var(el)));
 
@@ -559,7 +565,7 @@ fn apply_shift_binop_csrrw<F: PrimeField, CS: Circuit<F>>(
         );
         // panic if CSR is not supported (even though we could make a table this way, for convenience table just spans 12 bits)
         cs.add_constraint(
-            (Term::from(1)  - Term::from(is_supported_table_output)) * is_csrrw.get_terms(),
+            (Term::from(1) - Term::from(is_supported_table_output)) * is_csrrw.get_terms(),
         );
 
         let t0 = (
@@ -688,7 +694,8 @@ fn apply_shift_binop_csrrw<F: PrimeField, CS: Circuit<F>>(
         // And to avoid prover's possibility to set delegation to 1 when we actually do not execute on this row, check
         // that we indeed execute
         cs.add_constraint(
-            Term::from(execute_delegation) * (Term::from(1u64) - Term::from(input_circuit_state.execute)),
+            Term::from(execute_delegation)
+                * (Term::from(1u64) - Term::from(input_circuit_state.execute)),
         );
 
         let delegation_request = DelegatedComputationRequest {
@@ -874,7 +881,12 @@ fn apply_shift_binop_csrrw<F: PrimeField, CS: Circuit<F>>(
     // write to PC
     bump_pc_no_range_checks_explicit(
         cs,
-        Register(input_circuit_state.cycle_start_state.pc.map(|x| Num::Var(x))),
+        Register(
+            input_circuit_state
+                .cycle_start_state
+                .pc
+                .map(|x| Num::Var(x)),
+        ),
         Register(input_circuit_state.cycle_end_state.pc.map(|x| Num::Var(x))),
     );
 
