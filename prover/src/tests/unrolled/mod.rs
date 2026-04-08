@@ -888,11 +888,8 @@ fn run_execute_zero_search_poc_for_non_mem_family<const FAMILY_IDX: u8, CompileF
     let num_cycles_per_chunk = (1usize << trace_len_log2) - 1;
     let trace_len = 1usize << trace_len_log2;
     let lde_factor = 2;
-    let tree_cap_size = 1;
-    let foldings_number =
-        crate::definitions::OPTIMAL_FOLDING_PROPERTIES[trace_len_log2].folding_sequence.len();
-    let security_config =
-        prover_stages::ProofSecurityConfig::for_queries_only(foldings_number, 0, 1);
+    let tree_cap_size = 32;
+    let security_config = prover_stages::ProofSecurityConfig::for_queries_only(5, 28, 63);
 
     let family_circuit = compile_circuit(max_bytecode_size_in_words, trace_len_log2);
 
