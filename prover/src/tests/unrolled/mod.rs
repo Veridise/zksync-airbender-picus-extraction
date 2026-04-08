@@ -748,6 +748,52 @@ fn dishonest_add_sub_lui_auipc_witness_eval_fn<'a, 'b>(
     (fn_ptr)(proxy);
 }
 
+fn verify_add_sub_lui_auipc_mop_family_proof(
+    proof: &crate::prover_stages::unrolled_prover::UnrolledModeProof,
+    compiled_circuit: &cs::one_row_compiler::CompiledCircuitArtifact<Mersenne31Field>,
+) {
+    use add_sub_lui_auipc_mop_verifier::verifier_common::proof_flattener::flatten_full_unrolled_proof;
+    use add_sub_lui_auipc_mop_verifier::verifier_common::prover::nd_source_std::set_iterator;
+    type VerifierCompiledCircuit =
+        add_sub_lui_auipc_mop_verifier::verifier_common::cs::one_row_compiler::CompiledCircuitArtifact<
+            add_sub_lui_auipc_mop_verifier::field::Mersenne31Field,
+        >;
+    type VerifierProof = add_sub_lui_auipc_mop_verifier::verifier_common::prover::prover_stages::unrolled_prover::UnrolledModeProof;
+
+    let verifier_proof: VerifierProof =
+        serde_json::from_value(serde_json::to_value(proof).expect("must serialize proof"))
+            .expect("must deserialize proof for verifier crate");
+    let verifier_compiled_circuit: VerifierCompiledCircuit = serde_json::from_value(
+        serde_json::to_value(compiled_circuit).expect("must serialize compiled circuit"),
+    )
+    .expect("must deserialize compiled circuit for verifier crate");
+
+    let oracle_data = flatten_full_unrolled_proof(&verifier_proof, &verifier_compiled_circuit);
+
+    let result = std::thread::Builder::new()
+        .name("add_sub verifier thread".to_string())
+        .stack_size(1 << 27)
+        .spawn(move || {
+            let it = oracle_data.into_iter();
+            set_iterator(it);
+
+            #[allow(invalid_value)]
+            unsafe {
+                add_sub_lui_auipc_mop_verifier::verify(
+                    &mut core::mem::MaybeUninit::uninit().assume_init(),
+                    &mut add_sub_lui_auipc_mop_verifier::ProofPublicInputs::uninit(),
+                )
+            };
+        })
+        .expect("must spawn add_sub verifier thread")
+        .join();
+
+    match result {
+        Ok(()) => {}
+        Err(_) => panic!("add_sub_lui_auipc_mop verifier rejected the PoC proof"),
+    }
+}
+
 fn run_execute_zero_search_poc_for_non_mem_family<const FAMILY_IDX: u8, CompileFn>(
     family_name: &str,
     compile_circuit: CompileFn,
@@ -762,6 +808,13 @@ fn run_execute_zero_search_poc_for_non_mem_family<const FAMILY_IDX: u8, CompileF
         >,
     ),
     row_to_disable_override: Option<usize>,
+    forced_trace_len_log2_override: Option<usize>,
+    verifier_fn: Option<
+        fn(
+            &crate::prover_stages::unrolled_prover::UnrolledModeProof,
+            &cs::one_row_compiler::CompiledCircuitArtifact<Mersenne31Field>,
+        ),
+    >,
 ) where
     CompileFn: Fn(usize, usize) -> cs::one_row_compiler::CompiledCircuitArtifact<Mersenne31Field>,
 {
@@ -883,8 +936,11 @@ fn run_execute_zero_search_poc_for_non_mem_family<const FAMILY_IDX: u8, CompileF
     let min_trace_len = (family_buffer.len() + 1)
         .max(max_bytecode_size_in_words + 1)
         .next_power_of_two();
-    let trace_len_log2 =
+    let mut trace_len_log2 =
         (min_trace_len.trailing_zeros() as usize).max(TIMESTAMP_COLUMNS_NUM_BITS as usize + 1);
+    if let Some(forced_trace_len_log2) = forced_trace_len_log2_override {
+        trace_len_log2 = trace_len_log2.max(forced_trace_len_log2);
+    }
     let num_cycles_per_chunk = (1usize << trace_len_log2) - 1;
     let trace_len = 1usize << trace_len_log2;
     let lde_factor = 2;
@@ -1061,8 +1117,11 @@ fn run_execute_zero_search_poc_for_non_mem_family<const FAMILY_IDX: u8, CompileF
             )
         }));
 
-        match prove_result {
+            match prove_result {
             Ok((prover_data, proof)) => {
+                if let Some(verifier_fn) = verifier_fn {
+                    verifier_fn(&proof, &family_circuit);
+                }
                 println!(
                     "{family_name} execute-bit PoC survived proving with row {row_to_disable} disabled; stage1 trace len {}, stage2 caps {}, quotient caps {}, queries {}",
                     prover_data.stage_1_result.ldes[0].trace.len(),
@@ -1111,6 +1170,8 @@ fn jump_branch_slt_execute_zero_search_poc() {
         jump_branch_slt::witness_eval_fn,
         dishonest_jump_branch_slt_witness_eval_fn,
         None,
+        None,
+        None,
     );
 }
 
@@ -1135,6 +1196,8 @@ fn add_sub_lui_auipc_mop_execute_zero_search_poc() {
         add_sub_lui_auipc_mop_table_driver_fn::<Mersenne31Field>,
         add_sub_lui_auipc_mod::witness_eval_fn,
         dishonest_add_sub_lui_auipc_witness_eval_fn,
+        None,
+        None,
         None,
     );
 }
@@ -1161,6 +1224,8 @@ fn add_sub_lui_auipc_mop_execute_zero_row_1_poc() {
         add_sub_lui_auipc_mod::witness_eval_fn,
         dishonest_add_sub_lui_auipc_witness_eval_fn,
         Some(1),
+        Some(24),
+        Some(verify_add_sub_lui_auipc_mop_family_proof),
     );
 }
 
