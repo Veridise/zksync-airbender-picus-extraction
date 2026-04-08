@@ -14,4 +14,4 @@ pub use self::oracles::*;
 pub use self::unified::{
     evaluate_memory_witness_for_unified_executor, evaluate_witness_for_unified_executor,
 };
-pub use self::witness::evaluate_witness_for_executor_family;
+pub(crate) use self::witness::evaluate_witness_for_executor_family;

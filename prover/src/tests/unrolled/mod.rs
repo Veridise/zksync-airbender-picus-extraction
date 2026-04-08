@@ -608,10 +608,563 @@ pub(crate) fn ensure_memory_trace_consistency<const N: usize, const M: usize>(
 const SUPPORT_SIGNED: bool = false;
 const INITIAL_PC: u32 = 0;
 
+struct DishonestNonMemoryCircuitOracle<'a> {
+    inner: &'a [risc_v_simulator::machine_mode_only_unrolled::NonMemoryOpcodeTracingDataWithTimestamp],
+    decoder_table: &'a [cs::cs::oracle::ExecutorFamilyDecoderData],
+    default_pc_value_in_padding: u32,
+    disabled_execute_rows: BTreeSet<usize>,
+}
+
+impl<'a> DishonestNonMemoryCircuitOracle<'a> {
+    fn honest_oracle(&self) -> NonMemoryCircuitOracle<'a> {
+        NonMemoryCircuitOracle {
+            inner: self.inner,
+            decoder_table: self.decoder_table,
+            default_pc_value_in_padding: self.default_pc_value_in_padding,
+        }
+    }
+}
+
+impl<'a, F: ::field::PrimeField> cs::cs::oracle::Oracle<F>
+    for DishonestNonMemoryCircuitOracle<'a>
+{
+    fn get_witness_from_placeholder(
+        &self,
+        placeholder: cs::cs::placeholder::Placeholder,
+        subindex: usize,
+        trace_step: usize,
+    ) -> F {
+        <NonMemoryCircuitOracle<'a> as cs::cs::oracle::Oracle<F>>::get_witness_from_placeholder(
+            &self.honest_oracle(),
+            placeholder,
+            subindex,
+            trace_step,
+        )
+    }
+
+    fn get_u32_witness_from_placeholder(
+        &self,
+        placeholder: cs::cs::placeholder::Placeholder,
+        trace_step: usize,
+    ) -> u32 {
+        <NonMemoryCircuitOracle<'a> as cs::cs::oracle::Oracle<F>>::get_u32_witness_from_placeholder(
+            &self.honest_oracle(),
+            placeholder,
+            trace_step,
+        )
+    }
+
+    fn get_u16_witness_from_placeholder(
+        &self,
+        placeholder: cs::cs::placeholder::Placeholder,
+        trace_step: usize,
+    ) -> u16 {
+        <NonMemoryCircuitOracle<'a> as cs::cs::oracle::Oracle<F>>::get_u16_witness_from_placeholder(
+            &self.honest_oracle(),
+            placeholder,
+            trace_step,
+        )
+    }
+
+    fn get_u8_witness_from_placeholder(
+        &self,
+        placeholder: cs::cs::placeholder::Placeholder,
+        trace_step: usize,
+    ) -> u8 {
+        <NonMemoryCircuitOracle<'a> as cs::cs::oracle::Oracle<F>>::get_u8_witness_from_placeholder(
+            &self.honest_oracle(),
+            placeholder,
+            trace_step,
+        )
+    }
+
+    fn get_boolean_witness_from_placeholder(
+        &self,
+        placeholder: cs::cs::placeholder::Placeholder,
+        trace_step: usize,
+    ) -> bool {
+        if placeholder == cs::cs::placeholder::Placeholder::ExecuteOpcodeFamilyCycle
+            && self.disabled_execute_rows.contains(&trace_step)
+        {
+            false
+        } else {
+            <NonMemoryCircuitOracle<'a> as cs::cs::oracle::Oracle<F>>::get_boolean_witness_from_placeholder(
+                &self.honest_oracle(),
+                placeholder,
+                trace_step,
+            )
+        }
+    }
+
+    fn get_timestamp_witness_from_placeholder(
+        &self,
+        placeholder: cs::cs::placeholder::Placeholder,
+        trace_step: usize,
+    ) -> cs::definitions::TimestampScalar {
+        <NonMemoryCircuitOracle<'a> as cs::cs::oracle::Oracle<F>>::get_timestamp_witness_from_placeholder(
+            &self.honest_oracle(),
+            placeholder,
+            trace_step,
+        )
+    }
+
+    fn get_executor_family_data(&self, trace_step: usize) -> cs::cs::oracle::ExecutorFamilyDecoderData {
+        <NonMemoryCircuitOracle<'a> as cs::cs::oracle::Oracle<F>>::get_executor_family_data(
+            &self.honest_oracle(),
+            trace_step,
+        )
+    }
+}
+
+fn dishonest_jump_branch_slt_witness_eval_fn<'a, 'b>(
+    proxy: &'_ mut crate::witness_evaluator::SimpleWitnessProxy<
+        'a,
+        DishonestNonMemoryCircuitOracle<'b>,
+    >,
+) {
+    let fn_ptr = jump_branch_slt::evaluate_witness_fn::<
+        cs::cs::witness_placer::scalar_witness_type_set::ScalarWitnessTypeSet<
+            Mersenne31Field,
+            true,
+        >,
+        crate::witness_evaluator::SimpleWitnessProxy<'a, DishonestNonMemoryCircuitOracle<'b>>,
+    >;
+    (fn_ptr)(proxy);
+}
+
+fn dishonest_add_sub_lui_auipc_witness_eval_fn<'a, 'b>(
+    proxy: &'_ mut crate::witness_evaluator::SimpleWitnessProxy<
+        'a,
+        DishonestNonMemoryCircuitOracle<'b>,
+    >,
+) {
+    let fn_ptr = add_sub_lui_auipc_mod::evaluate_witness_fn::<
+        cs::cs::witness_placer::scalar_witness_type_set::ScalarWitnessTypeSet<
+            Mersenne31Field,
+            true,
+        >,
+        crate::witness_evaluator::SimpleWitnessProxy<'a, DishonestNonMemoryCircuitOracle<'b>>,
+    >;
+    (fn_ptr)(proxy);
+}
+
+fn run_execute_zero_search_poc_for_non_mem_family<const FAMILY_IDX: u8, CompileFn>(
+    family_name: &str,
+    compile_circuit: CompileFn,
+    table_driver_fn: fn(&mut TableDriver<Mersenne31Field>),
+    honest_witness_eval_fn: for<'a, 'b> fn(
+        &'_ mut crate::witness_evaluator::SimpleWitnessProxy<'a, NonMemoryCircuitOracle<'b>>,
+    ),
+    dishonest_witness_eval_fn: for<'a, 'b> fn(
+        &'_ mut crate::witness_evaluator::SimpleWitnessProxy<
+            'a,
+            DishonestNonMemoryCircuitOracle<'b>,
+        >,
+    ),
+    row_to_disable_override: Option<usize>,
+) where
+    CompileFn: Fn(usize, usize) -> cs::one_row_compiler::CompiledCircuitArtifact<Mersenne31Field>,
+{
+    use crate::cs::machine::ops::unrolled::process_binary_into_separate_tables_ext;
+    use riscv_transpiler::ir::{
+        preprocess_bytecode, FullUnsignedMachineDecoderConfig, Instruction,
+    };
+    use riscv_transpiler::replayer::{ReplayerRam, ReplayerVM};
+    use riscv_transpiler::vm::{
+        Counters, DelegationsAndFamiliesCounters, RamWithRomRegion, ReplayBuffer,
+        SimpleSnapshotter, SimpleTape, State, VM,
+    };
+    use riscv_transpiler::witness::NonMemDestinationHolder;
+    use risc_v_simulator::abstractions::non_determinism::QuasiUARTSource;
+
+    let worker = Worker::new_with_num_threads(8);
+
+    let binary = std::fs::read("../examples/hashed_fibonacci/app.bin").unwrap();
+    assert!(binary.len() % 4 == 0);
+    let binary: Vec<_> = binary
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|el| u32::from_le_bytes(*el))
+        .collect();
+
+    let text_section = std::fs::read("../examples/hashed_fibonacci/app.text").unwrap();
+    assert!(text_section.len() % 4 == 0);
+    let text_section: Vec<_> = text_section
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|el| u32::from_le_bytes(*el))
+        .collect();
+    let max_bytecode_size_in_words = text_section.len().next_power_of_two();
+
+    type CountersT = DelegationsAndFamiliesCounters;
+    let instructions: Vec<Instruction> =
+        preprocess_bytecode::<FullUnsignedMachineDecoderConfig>(&text_section);
+    let tape = SimpleTape::new(&instructions);
+    let cycles_bound = 1 << 20;
+
+    let mut ram =
+        RamWithRomRegion::<{ common_constants::ROM_SECOND_WORD_BITS }>::from_rom_content(
+            &binary,
+            1 << 30,
+        );
+    let mut state = State::initial_with_counters(CountersT::default());
+    let mut snapshotter =
+        SimpleSnapshotter::<CountersT, { common_constants::ROM_SECOND_WORD_BITS }>::new_with_cycle_limit(
+            cycles_bound,
+            state,
+        );
+    let mut non_determinism = QuasiUARTSource::new_with_reads(vec![15, 1]);
+
+    let is_program_finished = VM::<CountersT>::run_basic_unrolled::<_, _, _>(
+        &mut state,
+        &mut ram,
+        &mut snapshotter,
+        &tape,
+        cycles_bound,
+        &mut non_determinism,
+    );
+    assert!(is_program_finished);
+
+    let counters = snapshotter.snapshots.last().unwrap().state.counters;
+    let mut expected_final_state = state;
+    expected_final_state.counters = Default::default();
+
+    let num_calls = counters.get_calls_to_circuit_family::<FAMILY_IDX>();
+    assert!(num_calls >= 3, "need at least three {family_name} rows, got {num_calls}");
+
+    let mut replay_state = snapshotter.initial_snapshot.state;
+    let mut ram_log_buffers = snapshotter
+        .reads_buffer
+        .make_range(0..snapshotter.reads_buffer.len());
+    let mut replay_ram = ReplayerRam::<{ common_constants::ROM_SECOND_WORD_BITS }> {
+        ram_log: &mut ram_log_buffers,
+    };
+
+    let mut family_buffer = vec![
+        risc_v_simulator::machine_mode_only_unrolled::NonMemoryOpcodeTracingDataWithTimestamp::default();
+        num_calls
+    ];
+    let mut buffers = vec![&mut family_buffer[..]];
+    let mut tracer = NonMemDestinationHolder::<FAMILY_IDX> {
+        buffers: &mut buffers[..],
+    };
+
+    ReplayerVM::<CountersT>::replay_basic_unrolled::<_, _>(
+        &mut replay_state,
+        &mut replay_ram,
+        &tape,
+        &mut (),
+        cycles_bound,
+        &mut tracer,
+    );
+    assert_eq!(expected_final_state, replay_state);
+    assert!(
+        family_buffer.len() >= 3,
+        "need at least three real rows for an interior-row execute-bit PoC, got {}",
+        family_buffer.len()
+    );
+
+    let preprocessing_data = process_binary_into_separate_tables_ext::<Mersenne31Field, true, Global>(
+        &text_section,
+        &opcodes_for_full_machine_with_unsigned_mul_div_only_with_mem_word_access_specialization(),
+        max_bytecode_size_in_words,
+        &[
+            NON_DETERMINISM_CSR,
+            BLAKE2S_DELEGATION_CSR_REGISTER as u16,
+            BIGINT_OPS_WITH_CONTROL_CSR_REGISTER as u16,
+            KECCAK_SPECIAL5_CSR_REGISTER as u16,
+        ],
+    );
+    let (decoder_table_data, witness_gen_data) = &preprocessing_data[&FAMILY_IDX];
+    let decoder_table_data = materialize_flattened_decoder_table(decoder_table_data);
+
+    let min_trace_len = (family_buffer.len() + 1)
+        .max(max_bytecode_size_in_words + 1)
+        .next_power_of_two();
+    let trace_len_log2 =
+        (min_trace_len.trailing_zeros() as usize).max(TIMESTAMP_COLUMNS_NUM_BITS as usize + 1);
+    let num_cycles_per_chunk = (1usize << trace_len_log2) - 1;
+    let trace_len = 1usize << trace_len_log2;
+    let lde_factor = 2;
+    let tree_cap_size = 1;
+    let foldings_number =
+        crate::definitions::OPTIMAL_FOLDING_PROPERTIES[trace_len_log2].folding_sequence.len();
+    let security_config =
+        prover_stages::ProofSecurityConfig::for_queries_only(foldings_number, 0, 1);
+
+    let family_circuit = compile_circuit(max_bytecode_size_in_words, trace_len_log2);
+
+    let mut table_driver = TableDriver::<Mersenne31Field>::new();
+    table_driver_fn(&mut table_driver);
+
+    let honest_oracle = NonMemoryCircuitOracle {
+        inner: &family_buffer,
+        decoder_table: witness_gen_data,
+        default_pc_value_in_padding: 4,
+    };
+    let _honest_memory_trace = evaluate_memory_witness_for_executor_family::<_, Global>(
+        &family_circuit,
+        num_cycles_per_chunk,
+        &honest_oracle,
+        &worker,
+        Global,
+    );
+    let honest_trace = evaluate_witness_for_executor_family::<_, Global>(
+        &family_circuit,
+        honest_witness_eval_fn,
+        num_cycles_per_chunk,
+        &honest_oracle,
+        &table_driver,
+        &worker,
+        Global,
+    );
+    assert!(check_satisfied(
+        &family_circuit,
+        &honest_trace.exec_trace,
+        honest_trace.num_witness_columns,
+    ));
+
+    let memory_argument_alpha = Mersenne31Quartic::from_array_of_base([
+        Mersenne31Field(2),
+        Mersenne31Field(5),
+        Mersenne31Field(42),
+        Mersenne31Field(123),
+    ]);
+    let memory_argument_gamma = Mersenne31Quartic::from_array_of_base([
+        Mersenne31Field(11),
+        Mersenne31Field(7),
+        Mersenne31Field(1024),
+        Mersenne31Field(8000),
+    ]);
+    let memory_argument_linearization_challenges: [Mersenne31Quartic; NUM_MEM_ARGUMENT_KEY_PARTS - 1] =
+        materialize_powers_serial_starting_with_elem::<_, Global>(
+            memory_argument_alpha,
+            NUM_MEM_ARGUMENT_KEY_PARTS - 1,
+        )
+        .try_into()
+        .unwrap();
+
+    let state_permutation_argument_alpha = Mersenne31Quartic::from_array_of_base([
+        Mersenne31Field(41),
+        Mersenne31Field(42),
+        Mersenne31Field(43),
+        Mersenne31Field(44),
+    ]);
+    let state_permutation_argument_gamma = Mersenne31Quartic::from_array_of_base([
+        Mersenne31Field(80),
+        Mersenne31Field(90),
+        Mersenne31Field(100),
+        Mersenne31Field(110),
+    ]);
+    let machine_state_linearization_challenges: [Mersenne31Quartic;
+        NUM_MACHINE_STATE_LINEARIZATION_CHALLENGES] =
+        materialize_powers_serial_starting_with_elem::<_, Global>(
+            state_permutation_argument_alpha,
+            NUM_MACHINE_STATE_LINEARIZATION_CHALLENGES,
+        )
+        .try_into()
+        .unwrap();
+
+    let external_challenges = ExternalChallenges {
+        memory_argument: ExternalMemoryArgumentChallenges {
+            memory_argument_linearization_challenges,
+            memory_argument_gamma,
+        },
+        delegation_argument: None,
+        machine_state_permutation_argument: Some(ExternalMachineStateArgumentChallenges {
+            linearization_challenges: machine_state_linearization_challenges,
+            additive_term: state_permutation_argument_gamma,
+        }),
+    };
+
+    let twiddles: Twiddles<_, Global> = Twiddles::new(trace_len, &worker);
+    let lde_precomputations = LdePrecomputations::new(trace_len, lde_factor, &[0, 1], &worker);
+    let setup = SetupPrecomputations::from_tables_and_trace_len_with_decoder_table(
+        &table_driver,
+        &decoder_table_data,
+        trace_len,
+        &family_circuit.setup_layout,
+        &twiddles,
+        &lde_precomputations,
+        lde_factor,
+        tree_cap_size,
+        &worker,
+    );
+
+    let row_candidates: Vec<_> = if let Some(row_to_disable) = row_to_disable_override {
+        assert!(
+            row_to_disable > 0 && row_to_disable < family_buffer.len() - 1,
+            "row_to_disable must be an interior row, got {} for buffer len {}",
+            row_to_disable,
+            family_buffer.len()
+        );
+        vec![row_to_disable]
+    } else {
+        (1..(family_buffer.len() - 1)).collect()
+    };
+
+    let mut successful_row = None;
+    for row_to_disable in row_candidates {
+        let oracle = DishonestNonMemoryCircuitOracle {
+            inner: &family_buffer,
+            decoder_table: witness_gen_data,
+            default_pc_value_in_padding: 4,
+            disabled_execute_rows: [row_to_disable].into_iter().collect(),
+        };
+        let _memory_trace = evaluate_memory_witness_for_executor_family::<_, Global>(
+            &family_circuit,
+            num_cycles_per_chunk,
+            &oracle,
+            &worker,
+            Global,
+        );
+
+        let full_trace = evaluate_witness_for_executor_family::<_, Global>(
+            &family_circuit,
+            dishonest_witness_eval_fn,
+            num_cycles_per_chunk,
+            &oracle,
+            &table_driver,
+            &worker,
+            Global,
+        );
+        let is_satisfied = check_satisfied(
+            &family_circuit,
+            &full_trace.exec_trace,
+            full_trace.num_witness_columns,
+        );
+        println!(
+            "{family_name} execute-bit PoC candidate row {row_to_disable}: check_satisfied = {is_satisfied}"
+        );
+        if !is_satisfied {
+            continue;
+        }
+
+        let prove_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            prove_configured_for_unrolled_circuits::<
+                DEFAULT_TRACE_PADDING_MULTIPLE,
+                _,
+                DefaultTreeConstructor,
+            >(
+                &family_circuit,
+                &[],
+                &external_challenges,
+                full_trace,
+                &[],
+                &setup,
+                &twiddles,
+                &lde_precomputations,
+                None,
+                lde_factor,
+                tree_cap_size,
+                &security_config,
+                &worker,
+            )
+        }));
+
+        match prove_result {
+            Ok((prover_data, proof)) => {
+                println!(
+                    "{family_name} execute-bit PoC survived proving with row {row_to_disable} disabled; stage1 trace len {}, stage2 caps {}, quotient caps {}, queries {}",
+                    prover_data.stage_1_result.ldes[0].trace.len(),
+                    proof.stage_2_tree_caps.len(),
+                    proof.quotient_tree_caps.len(),
+                    proof.queries.len(),
+                );
+                successful_row = Some(row_to_disable);
+                break;
+            }
+            Err(_) => {
+                println!(
+                    "{family_name} execute-bit PoC candidate row {row_to_disable} passed local constraints but failed during proving"
+                );
+            }
+        }
+    }
+
+    assert!(
+        successful_row.is_some(),
+        "no interior {family_name} row survived both local constraints and proving with execute forced to 0"
+    );
+}
+
 // #[ignore = "test has explicit panic inside"]
 #[test]
 fn run_basic_unrolled_test() {
     run_basic_unrolled_test_impl(None);
+}
+
+#[test]
+#[ignore = "experimental execute-bit PoC"]
+fn jump_branch_slt_execute_zero_search_poc() {
+    use crate::cs::machine::ops::unrolled::jump_branch_slt::*;
+    run_execute_zero_search_poc_for_non_mem_family::<JUMP_BRANCH_SLT_CIRCUIT_FAMILY_IDX, _>(
+        "jump_branch_slt",
+        |max_bytecode_size_in_words, trace_len_log2| {
+            compile_unrolled_circuit_state_transition::<Mersenne31Field>(
+                &|cs| jump_branch_slt_table_addition_fn(cs),
+                &|cs| jump_branch_slt_circuit_with_preprocessed_bytecode::<_, _, true>(cs),
+                max_bytecode_size_in_words,
+                trace_len_log2,
+            )
+        },
+        jump_branch_slt_table_driver_fn::<Mersenne31Field>,
+        jump_branch_slt::witness_eval_fn,
+        dishonest_jump_branch_slt_witness_eval_fn,
+        None,
+    );
+}
+
+#[test]
+#[ignore = "experimental execute-bit PoC"]
+fn add_sub_lui_auipc_mop_execute_zero_search_poc() {
+    use crate::cs::machine::ops::unrolled::add_sub_lui_auipc_mop::*;
+
+    run_execute_zero_search_poc_for_non_mem_family::<
+        ADD_SUB_LUI_AUIPC_MOP_CIRCUIT_FAMILY_IDX,
+        _,
+    >(
+        "add_sub_lui_auipc_mop",
+        |max_bytecode_size_in_words, trace_len_log2| {
+            compile_unrolled_circuit_state_transition::<Mersenne31Field>(
+                &|cs| add_sub_lui_auipc_mop_table_addition_fn(cs),
+                &|cs| add_sub_lui_auipc_mop_circuit_with_preprocessed_bytecode(cs),
+                max_bytecode_size_in_words,
+                trace_len_log2,
+            )
+        },
+        add_sub_lui_auipc_mop_table_driver_fn::<Mersenne31Field>,
+        add_sub_lui_auipc_mod::witness_eval_fn,
+        dishonest_add_sub_lui_auipc_witness_eval_fn,
+        None,
+    );
+}
+
+#[test]
+#[ignore = "experimental execute-bit PoC"]
+fn add_sub_lui_auipc_mop_execute_zero_row_1_poc() {
+    use crate::cs::machine::ops::unrolled::add_sub_lui_auipc_mop::*;
+
+    run_execute_zero_search_poc_for_non_mem_family::<
+        ADD_SUB_LUI_AUIPC_MOP_CIRCUIT_FAMILY_IDX,
+        _,
+    >(
+        "add_sub_lui_auipc_mop",
+        |max_bytecode_size_in_words, trace_len_log2| {
+            compile_unrolled_circuit_state_transition::<Mersenne31Field>(
+                &|cs| add_sub_lui_auipc_mop_table_addition_fn(cs),
+                &|cs| add_sub_lui_auipc_mop_circuit_with_preprocessed_bytecode(cs),
+                max_bytecode_size_in_words,
+                trace_len_log2,
+            )
+        },
+        add_sub_lui_auipc_mop_table_driver_fn::<Mersenne31Field>,
+        add_sub_lui_auipc_mod::witness_eval_fn,
+        dishonest_add_sub_lui_auipc_witness_eval_fn,
+        Some(1),
+    );
 }
 
 pub fn run_basic_unrolled_test_impl(
