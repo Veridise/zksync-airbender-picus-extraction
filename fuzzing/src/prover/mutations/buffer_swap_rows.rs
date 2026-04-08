@@ -6,6 +6,12 @@ use crate::prover::mutations::choose_distinct_indices;
 use crate::prover::mutations::Mutator;
 use crate::rv32im::prover::circuits::ProofInputs;
 
+fn swap_rows<T>(v: &mut Vec<T>, rng: &mut StdRng) {
+    if let Some((a, b)) = choose_distinct_indices(v.len(), rng) {
+        v.swap(a, b);
+    }
+}
+
 pub struct BufferSwapRowsMutator;
 
 impl Mutator for BufferSwapRowsMutator {
@@ -18,9 +24,7 @@ impl Mutator for BufferSwapRowsMutator {
         input: &mut ProofInputs<NonMemoryOpcodeTracingDataWithTimestamp>,
         rng: &mut StdRng,
     ) {
-        if let Some((a, b)) = choose_distinct_indices(input.buffer.len(), rng) {
-            input.buffer.swap(a, b);
-        }
+        swap_rows(&mut input.buffer, rng);
     }
 
     fn mutate_mem_inputs(
@@ -28,8 +32,6 @@ impl Mutator for BufferSwapRowsMutator {
         input: &mut ProofInputs<MemoryOpcodeTracingDataWithTimestamp>,
         rng: &mut StdRng,
     ) {
-        if let Some((a, b)) = choose_distinct_indices(input.buffer.len(), rng) {
-            input.buffer.swap(a, b);
-        }
+        swap_rows(&mut input.buffer, rng);
     }
 }

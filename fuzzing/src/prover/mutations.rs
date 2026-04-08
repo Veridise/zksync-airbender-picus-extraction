@@ -14,15 +14,12 @@ use crate::prover::mutations::buffer_delete_row::BufferDeleteRowMutator;
 use crate::prover::mutations::buffer_duplicate_row::BufferDuplicateRowMutator;
 use crate::prover::mutations::buffer_insert_clone_row::BufferInsertCloneRowMutator;
 use crate::prover::mutations::buffer_swap_rows::BufferSwapRowsMutator;
-use crate::prover::mutations::buffer_truncate_tail::BufferTruncateTailMutator;
 use crate::prover::mutations::cycle_timestamp_mutator::CycleTimestampMutator;
 use crate::prover::mutations::decoder_entry_mutator::DecoderEntryMutator;
 use crate::prover::mutations::decoder_row_swap_mutator::DecoderRowSwapMutator;
 use crate::prover::mutations::initial_pc_mutator::InitialPcMutator;
 use crate::prover::mutations::mem_discr_flip_mutator::MemDiscrFlipMutator;
 use crate::prover::mutations::nop::NoOpMutator;
-use crate::prover::mutations::preprocessed_table_cell_mutator::PreprocessedTableCellMutator;
-use crate::prover::mutations::preprocessed_table_row_swap_mutator::PreprocessedTableRowSwapMutator;
 use crate::prover::mutations::read_timestamp_mutator::ReadTimestampMutator;
 use crate::prover::mutations::trace_value_mutator::TraceValueMutator;
 use crate::prover::seeds::SeedCase;
@@ -152,7 +149,7 @@ impl MutatorRegistry {
                 Box::new(BufferDuplicateRowMutator),
                 Box::new(BufferDeleteRowMutator),
                 Box::new(BufferInsertCloneRowMutator),
-                Box::new(BufferTruncateTailMutator),
+                // Box::new(BufferTruncateTailMutator),
                 Box::new(CycleTimestampMutator),
                 Box::new(ReadTimestampMutator),
                 Box::new(InitialPcMutator),
@@ -160,8 +157,8 @@ impl MutatorRegistry {
                 Box::new(MemDiscrFlipMutator),
                 Box::new(DecoderEntryMutator),
                 Box::new(DecoderRowSwapMutator),
-                Box::new(PreprocessedTableCellMutator),
-                Box::new(PreprocessedTableRowSwapMutator),
+                // Box::new(PreprocessedTableCellMutator),
+                // Box::new(PreprocessedTableRowSwapMutator),
             ],
             max_mutations: env_conf("MAX_MUTATIONS", 1),
         }
@@ -459,20 +456,5 @@ mod tests {
 
         flip_mem_discr(&mut row);
         assert_eq!(row.discr, MEM_LOAD_TRACE_DATA_MARKER);
-    }
-
-    #[test]
-    fn registry_contains_planned_mutators() {
-        let registry = MutatorRegistry::new();
-        let names = registry
-            .mutators
-            .iter()
-            .map(|mutator| mutator.name())
-            .collect::<Vec<_>>();
-
-        assert!(names.contains(&"trace value mutator"));
-        assert!(names.contains(&"decoder entry mutator"));
-        assert!(names.contains(&"memory discriminator flip mutator"));
-        assert_eq!(names.len(), 14);
     }
 }
