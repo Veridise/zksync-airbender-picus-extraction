@@ -39,6 +39,18 @@ pub fn run_basic_unrolled_test_in_transpiler_with_word_specialization_impl(
     maybe_gpu_unrolled_comparison_hook: Option<Box<dyn Fn(&GpuComparisonArgs)>>,
     maybe_gpu_delegation_comparison_hook: Option<Box<dyn Fn(&GpuComparisonArgs)>>,
 ) {
+    run_basic_unrolled_test_in_transpiler_with_word_specialization_impl_inner(
+        maybe_gpu_unrolled_comparison_hook,
+        maybe_gpu_delegation_comparison_hook,
+        None,
+    );
+}
+
+fn run_basic_unrolled_test_in_transpiler_with_word_specialization_impl_inner(
+    maybe_gpu_unrolled_comparison_hook: Option<Box<dyn Fn(&GpuComparisonArgs)>>,
+    maybe_gpu_delegation_comparison_hook: Option<Box<dyn Fn(&GpuComparisonArgs)>>,
+    disabled_add_sub_rows: Option<BTreeSet<usize>>,
+) {
     use riscv_transpiler::ir::*;
     use riscv_transpiler::vm::*;
 
@@ -394,31 +406,74 @@ pub fn run_basic_unrolled_test_in_transpiler_with_word_specialization_impl(
 
         let decoder_table_data = materialize_flattened_decoder_table(decoder_table_data);
 
-        let oracle = NonMemoryCircuitOracle {
-            inner: &buffer[..],
-            decoder_table: witness_gen_data,
-            default_pc_value_in_padding: 4,
+        let disabled_add_sub_rows = disabled_add_sub_rows.clone();
+        if let Some(ref disabled_rows) = disabled_add_sub_rows {
+            for row in disabled_rows.iter().copied() {
+                let pc = buffer[row].opcode_data.initial_pc as usize;
+                let opcode = text_section[pc / 4];
+                let (_, _, rd) = formally_parse_rs1_rs2_rd_props_for_tracer(opcode);
+                println!(
+                    "Disabling add_sub row {row}: pc=0x{pc:08x}, opcode=0x{opcode:08x}, rd=x{rd}"
+                );
+            }
+        }
+
+        let is_empty = buffer.is_empty();
+
+        let (memory_trace, full_trace) = if let Some(disabled_rows) = disabled_add_sub_rows {
+            let oracle = DishonestNonMemoryCircuitOracle {
+                inner: &buffer[..],
+                decoder_table: witness_gen_data,
+                default_pc_value_in_padding: 4,
+                disabled_execute_rows: disabled_rows,
+            };
+
+            let memory_trace = evaluate_memory_witness_for_executor_family::<_, Global>(
+                &add_sub_circuit,
+                NUM_CYCLES_PER_CHUNK,
+                &oracle,
+                &worker,
+                Global,
+            );
+
+            let full_trace = evaluate_witness_for_executor_family::<_, Global>(
+                &add_sub_circuit,
+                dishonest_add_sub_lui_auipc_witness_eval_fn,
+                NUM_CYCLES_PER_CHUNK,
+                &oracle,
+                &TableDriver::new(),
+                &worker,
+                Global,
+            );
+
+            (memory_trace, full_trace)
+        } else {
+            let oracle = NonMemoryCircuitOracle {
+                inner: &buffer[..],
+                decoder_table: witness_gen_data,
+                default_pc_value_in_padding: 4,
+            };
+
+            let memory_trace = evaluate_memory_witness_for_executor_family::<_, Global>(
+                &add_sub_circuit,
+                NUM_CYCLES_PER_CHUNK,
+                &oracle,
+                &worker,
+                Global,
+            );
+
+            let full_trace = evaluate_witness_for_executor_family::<_, Global>(
+                &add_sub_circuit,
+                add_sub_lui_auipc_mod::witness_eval_fn,
+                NUM_CYCLES_PER_CHUNK,
+                &oracle,
+                &TableDriver::new(),
+                &worker,
+                Global,
+            );
+
+            (memory_trace, full_trace)
         };
-
-        let is_empty = oracle.inner.is_empty();
-
-        let memory_trace = evaluate_memory_witness_for_executor_family::<_, Global>(
-            &add_sub_circuit,
-            NUM_CYCLES_PER_CHUNK,
-            &oracle,
-            &worker,
-            Global,
-        );
-
-        let full_trace = evaluate_witness_for_executor_family::<_, Global>(
-            &add_sub_circuit,
-            add_sub_lui_auipc_mod::witness_eval_fn,
-            NUM_CYCLES_PER_CHUNK,
-            &oracle,
-            &TableDriver::new(),
-            &worker,
-            Global,
-        );
 
         ensure_memory_trace_consistency(&memory_trace, &full_trace);
 
@@ -2112,6 +2167,179 @@ pub fn run_basic_unrolled_test_in_transpiler_with_word_specialization_impl(
 
     assert_eq!(permutation_argument_accumulator, Mersenne31Quartic::ONE);
     assert_eq!(delegation_argument_accumulator, Mersenne31Quartic::ZERO);
+}
+
+#[test]
+#[ignore = "experimental full-batch execute-bit PoC"]
+fn run_full_unrolled_execute_zero_dead_add_sub_row_poc() {
+    use riscv_transpiler::ir::{preprocess_bytecode, FullUnsignedMachineDecoderConfig};
+    use riscv_transpiler::replayer::{ReplayerRam, ReplayerVM};
+    use riscv_transpiler::vm::{
+        Counters, DelegationsAndFamiliesCounters, RamWithRomRegion, ReplayBuffer,
+        SimpleSnapshotter, SimpleTape, State, VM,
+    };
+    use riscv_transpiler::witness::{NonMemDestinationHolder, UnifiedDestinationHolder};
+    use risc_v_simulator::abstractions::non_determinism::QuasiUARTSource;
+    use risc_v_simulator::machine_mode_only_unrolled::UnifiedOpcodeTracingDataWithTimestamp;
+    use riscv_transpiler::ir::InstructionName;
+
+    type CountersT = DelegationsAndFamiliesCounters;
+
+    let binary = std::fs::read("../examples/hashed_fibonacci/app.bin").unwrap();
+    assert!(binary.len() % 4 == 0);
+    let binary: Vec<_> = binary
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|el| u32::from_le_bytes(*el))
+        .collect();
+
+    let text_section = std::fs::read("../examples/hashed_fibonacci/app.text").unwrap();
+    assert!(text_section.len() % 4 == 0);
+    let text_section: Vec<_> = text_section
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|el| u32::from_le_bytes(*el))
+        .collect();
+
+    let instructions = preprocess_bytecode::<FullUnsignedMachineDecoderConfig>(&text_section);
+    let tape = SimpleTape::new(&instructions);
+    let cycles_bound = 1 << 20;
+
+    let mut ram =
+        RamWithRomRegion::<{ common_constants::ROM_SECOND_WORD_BITS }>::from_rom_content(
+            &binary,
+            1 << 30,
+        );
+    let mut state = State::initial_with_counters(CountersT::default());
+    let mut snapshotter = SimpleSnapshotter::<CountersT, { common_constants::ROM_SECOND_WORD_BITS }>::new_with_cycle_limit(cycles_bound, state);
+    let mut non_determinism = QuasiUARTSource::new_with_reads(vec![15, 1]);
+
+    let is_program_finished = VM::<CountersT>::run_basic_unrolled::<_, _, _>(
+        &mut state,
+        &mut ram,
+        &mut snapshotter,
+        &tape,
+        cycles_bound,
+        &mut non_determinism,
+    );
+    assert!(is_program_finished);
+    let exact_cycles_passed = (state.timestamp - INITIAL_TIMESTAMP) / TIMESTAMP_STEP;
+
+    let counters = snapshotter.snapshots.last().unwrap().state.counters;
+    let num_calls =
+        counters.get_calls_to_circuit_family::<{ ADD_SUB_LUI_AUIPC_MOP_CIRCUIT_FAMILY_IDX }>();
+    assert!(num_calls > 0);
+
+    let mut replay_state = snapshotter.initial_snapshot.state;
+    let mut ram_log_buffers = snapshotter
+        .reads_buffer
+        .make_range(0..snapshotter.reads_buffer.len());
+    let mut replay_ram = ReplayerRam::<{ common_constants::ROM_SECOND_WORD_BITS }> {
+        ram_log: &mut ram_log_buffers,
+    };
+
+    let mut buffer = vec![NonMemoryOpcodeTracingDataWithTimestamp::default(); num_calls];
+    let mut buffers = vec![&mut buffer[..]];
+    let mut tracer = NonMemDestinationHolder::<{ ADD_SUB_LUI_AUIPC_MOP_CIRCUIT_FAMILY_IDX }> {
+        buffers: &mut buffers[..],
+    };
+
+    ReplayerVM::<CountersT>::replay_basic_unrolled::<_, _>(
+        &mut replay_state,
+        &mut replay_ram,
+        &tape,
+        &mut (),
+        cycles_bound,
+        &mut tracer,
+    );
+
+    let mut unified_replay_state = snapshotter.initial_snapshot.state;
+    let mut unified_ram_log_buffers = snapshotter
+        .reads_buffer
+        .make_range(0..snapshotter.reads_buffer.len());
+    let mut unified_replay_ram = ReplayerRam::<{ common_constants::ROM_SECOND_WORD_BITS }> {
+        ram_log: &mut unified_ram_log_buffers,
+    };
+    let mut unified_buffer =
+        vec![UnifiedOpcodeTracingDataWithTimestamp::default(); exact_cycles_passed as usize];
+    let mut unified_buffers = vec![&mut unified_buffer[..]];
+    let mut unified_tracer = UnifiedDestinationHolder {
+        buffers: &mut unified_buffers[..],
+    };
+
+    ReplayerVM::<CountersT>::replay_basic_unrolled::<_, _>(
+        &mut unified_replay_state,
+        &mut unified_replay_ram,
+        &tape,
+        &mut (),
+        cycles_bound,
+        &mut unified_tracer,
+    );
+
+    let is_add_sub_family = |name: InstructionName| {
+        matches!(
+            name,
+            InstructionName::Lui
+                | InstructionName::Auipc
+                | InstructionName::Addi
+                | InstructionName::Add
+                | InstructionName::Sub
+                | InstructionName::ZimopAdd
+                | InstructionName::ZimopSub
+                | InstructionName::ZimopMul
+        )
+    };
+
+    let dead_row = {
+        let mut family_row = 0usize;
+        unified_buffer
+            .iter()
+            .enumerate()
+            .find_map(|(global_idx, row)| {
+                let pc_word = (row.initial_pc() / 4) as usize;
+                let instr = instructions[pc_word];
+                if !is_add_sub_family(instr.name) {
+                    return None;
+                }
+
+                let current_family_row = family_row;
+                family_row += 1;
+
+                if instr.rd == 0 {
+                    return None;
+                }
+
+                let write_timestamp = row.cycle_timestamp() + RD_ACCESS_IDX;
+                let next_access = unified_buffer[global_idx + 1..].iter().find_map(|later| {
+                    if later.rs1_read_timestamp() == write_timestamp
+                        || later.rs2_or_mem_load_read_timestamp() == write_timestamp
+                    {
+                        Some("read")
+                    } else if later.rd_or_mem_store_read_timestamp() == write_timestamp {
+                        Some("write")
+                    } else {
+                        None
+                    }
+                });
+
+                match next_access {
+                    Some("write") => Some(current_family_row),
+                    _ => None,
+                }
+            })
+            .expect("expected at least one add_sub family row overwritten before any later read")
+    };
+
+    println!("Using add_sub dead row candidate {dead_row} for full-batch execute=0 PoC");
+
+    let disabled_rows = BTreeSet::from([dead_row]);
+    run_basic_unrolled_test_in_transpiler_with_word_specialization_impl_inner(
+        None,
+        None,
+        Some(disabled_rows),
+    );
 }
 
 #[test]

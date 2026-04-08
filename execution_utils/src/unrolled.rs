@@ -484,14 +484,226 @@ pub fn prove_unrolled_with_replayer_for_machine_configuration<C: MachineConfig>(
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::path::Path;
+    use std::collections::HashMap;
+    use std::fs::File;
+    use std::io::{BufReader, BufWriter};
+    use std::path::{Path, PathBuf};
 
+    use crate::unrolled::prover::definitions::ExternalChallenges;
     use crate::unrolled::prover::VectorMemoryImplWithRom;
     use risc_v_simulator::abstractions::non_determinism::NonDeterminismCSRSource;
     use risc_v_simulator::abstractions::non_determinism::QuasiUARTSource;
     use risc_v_simulator::cycle::IMStandardIsaConfigWithUnsignedMulDiv;
     use risc_v_simulator::cycle::MachineConfig;
     use std::alloc::Global;
+
+    fn mixed_challenge_cache_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../target/mixed-challenge-cache")
+            .join("hashed_fibonacci_unrolled_program_proof_2p24.json")
+    }
+
+    fn load_or_generate_honest_baseline_program_proof<C: MachineConfig>(
+        binary_image: &[u32],
+        text_section: &[u32],
+        cycles_bound: usize,
+        ram_bound: usize,
+        worker: &prover::worker::Worker,
+    ) -> UnrolledProgramProof {
+        let cache_path = mixed_challenge_cache_path();
+        if cache_path.exists() {
+            println!(
+                "mixed-challenge PoC: loading honest baseline from {:?}",
+                cache_path
+            );
+            return serde_json::from_reader(BufReader::new(
+                File::open(&cache_path).expect("must open cached honest baseline proof"),
+            ))
+            .expect("cached honest baseline proof must deserialize");
+        }
+
+        println!(
+            "mixed-challenge PoC: generating honest baseline and saving it to {:?}",
+            cache_path
+        );
+        let proof = prove_unrolled_for_machine_configuration_into_program_proof::<C>(
+            binary_image,
+            text_section,
+            cycles_bound,
+            QuasiUARTSource::new_with_reads(vec![15, 1]),
+            ram_bound,
+            worker,
+        );
+
+        std::fs::create_dir_all(
+            cache_path
+                .parent()
+                .expect("mixed-challenge cache path must have a parent"),
+        )
+        .expect("must create mixed-challenge cache directory");
+        serde_json::to_writer_pretty(
+            BufWriter::new(
+                File::create(&cache_path).expect("must create cached honest baseline proof"),
+            ),
+            &proof,
+        )
+        .expect("must write cached honest baseline proof");
+
+        proof
+    }
+
+    fn reprove_non_memory_family_chunk_with_challenges<C: MachineConfig>(
+        binary_image: &[u32],
+        text_section: &[u32],
+        cycles_bound: usize,
+        mut non_determinism: impl riscv_transpiler::vm::NonDeterminismCSRSource,
+        ram_bound: usize,
+        worker: &prover::worker::Worker,
+        family_idx: u8,
+        chunk_idx: usize,
+        external_challenges: &ExternalChallenges,
+    ) -> UnrolledModeProof {
+        let families_precomps =
+            setups::unrolled_circuits::get_unrolled_circuits_setups_for_machine_type::<
+                C,
+                Global,
+                Global,
+            >(binary_image, text_section, worker);
+
+        let family_chunk_sizes = HashMap::from_iter(
+            [
+                (
+                    setups::add_sub_lui_auipc_mop::FAMILY_IDX,
+                    setups::add_sub_lui_auipc_mop::NUM_CYCLES,
+                ),
+                (
+                    setups::jump_branch_slt::FAMILY_IDX,
+                    setups::jump_branch_slt::NUM_CYCLES,
+                ),
+                (
+                    setups::shift_binary_csr::FAMILY_IDX,
+                    setups::shift_binary_csr::NUM_CYCLES,
+                ),
+                (
+                    setups::mul_div_unsigned::FAMILY_IDX,
+                    setups::mul_div_unsigned::NUM_CYCLES,
+                ),
+                (
+                    setups::load_store_word_only::FAMILY_IDX,
+                    setups::load_store_word_only::NUM_CYCLES,
+                ),
+                (
+                    setups::load_store_subword_only::FAMILY_IDX,
+                    setups::load_store_subword_only::NUM_CYCLES,
+                ),
+            ]
+            .into_iter(),
+        );
+
+        let delegation_chunk_sizes = HashMap::from_iter(
+            [
+                (
+                    setups::blake2_with_compression::DELEGATION_TYPE_ID as u16,
+                    setups::blake2_with_compression::NUM_DELEGATION_CYCLES,
+                ),
+                (
+                    setups::bigint_with_control::DELEGATION_TYPE_ID as u16,
+                    setups::bigint_with_control::NUM_DELEGATION_CYCLES,
+                ),
+                (
+                    setups::keccak_special5::DELEGATION_TYPE_ID as u16,
+                    setups::keccak_special5::NUM_DELEGATION_CYCLES,
+                ),
+            ]
+            .into_iter(),
+        );
+
+        let (
+            _final_pc,
+            _final_timestamp,
+            _cycles_used,
+            family_circuits,
+            _mem_circuits,
+            _delegation_circuits,
+            _register_final_state,
+            _shuffle_ram_touched_addresses,
+        ) = prover::unrolled::run_unrolled_machine::<C, Global, 5>(
+            common_constants::INITIAL_PC,
+            text_section,
+            binary_image,
+            cycles_bound,
+            ram_bound,
+            &mut non_determinism,
+            family_chunk_sizes,
+            delegation_chunk_sizes,
+            worker,
+        );
+
+        let witness_chunks = family_circuits
+            .get(&family_idx)
+            .expect("target family must be present");
+        let chunk = witness_chunks
+            .get(chunk_idx)
+            .expect("target chunk must be present");
+        let precomputation = &families_precomps[&family_idx];
+
+        let setups::UnrolledCircuitWitnessEvalFn::NonMemory {
+            witness_fn,
+            decoder_table,
+            default_pc_value_in_padding,
+        } = precomputation
+            .witness_eval_fn_for_gpu_tracer
+            .as_ref()
+            .expect("executor family witness function must be present")
+        else {
+            panic!("target family must be non-memory for this PoC");
+        };
+
+        let oracle = prover::unrolled::NonMemoryCircuitOracle {
+            inner: &chunk.data,
+            decoder_table,
+            default_pc_value_in_padding: *default_pc_value_in_padding,
+        };
+
+        let witness_trace = prover::unrolled::evaluate_witness_for_executor_family::<_, Global>(
+            &precomputation.compiled_circuit,
+            *witness_fn,
+            precomputation.trace_len - 1,
+            &oracle,
+            &precomputation.table_driver,
+            worker,
+            Global,
+        );
+
+        assert!(prover::check_satisfied(
+            &precomputation.compiled_circuit,
+            &witness_trace.exec_trace,
+            witness_trace.num_witness_columns
+        ));
+
+        let (_, proof) =
+            prover::prover_stages::unrolled_prover::prove_configured_for_unrolled_circuits::<
+                { prover::DEFAULT_TRACE_PADDING_MULTIPLE },
+                Global,
+                prover::merkle_trees::DefaultTreeConstructor,
+            >(
+                &precomputation.compiled_circuit,
+                &[],
+                external_challenges,
+                witness_trace,
+                &[],
+                &precomputation.setup,
+                &precomputation.twiddles,
+                &precomputation.lde_precomputations,
+                None,
+                precomputation.lde_factor,
+                precomputation.tree_cap_size,
+                &prover_examples::SECURITY_CONFIG.for_prover(),
+                worker,
+            );
+
+        proof
+    }
 
     #[test]
     fn test_prove_unrolled_fibonacci() {
@@ -556,6 +768,154 @@ mod test {
         >(&binary_image, &text_section, proofs);
 
         assert!(is_valid);
+    }
+
+    #[test]
+    #[ignore = "generates or loads the cached honest baseline for the mixed-challenge PoC"]
+    fn test_generate_honest_baseline_for_mixed_challenge_poc() {
+        let (_, binary_image) =
+            setups::read_and_pad_binary(&Path::new("../examples/hashed_fibonacci/app.bin"));
+        let (_, text_section) =
+            setups::read_and_pad_binary(&Path::new("../examples/hashed_fibonacci/app.text"));
+
+        let worker = prover::worker::Worker::new_with_num_threads(8);
+        let cycles_bound = 1 << 24;
+        let rom_bound = 1 << 32;
+
+        let proof = load_or_generate_honest_baseline_program_proof::<
+            IMStandardIsaConfigWithUnsignedMulDiv,
+        >(
+            &binary_image,
+            &text_section,
+            cycles_bound,
+            rom_bound,
+            &worker,
+        );
+
+        let cache_path = mixed_challenge_cache_path();
+        assert!(
+            cache_path.exists(),
+            "expected honest baseline cache file to exist after load-or-generate"
+        );
+        println!(
+            "mixed-challenge PoC: cached honest baseline ready at {:?} ({})",
+            cache_path,
+            proof.debug_info()
+        );
+    }
+
+    #[test]
+    #[ignore = "experimental mixed-challenge verifier PoC"]
+    fn test_full_unrolled_verifier_accepts_mixed_machine_state_challenges() {
+        let (binary, binary_image) =
+            setups::read_and_pad_binary(&Path::new("../examples/hashed_fibonacci/app.bin"));
+        let (text, text_section) =
+            setups::read_and_pad_binary(&Path::new("../examples/hashed_fibonacci/app.text"));
+
+        let worker = prover::worker::Worker::new_with_num_threads(8);
+
+        let cycles_bound = 1 << 24;
+        let rom_bound = 1 << 32;
+        let target_family = common_constants::circuit_families::ADD_SUB_LUI_AUIPC_MOP_CIRCUIT_FAMILY_IDX;
+
+        let setup = compute_setup_for_machine_configuration::<
+            IMStandardIsaConfigWithUnsignedMulDiv,
+        >(&binary, &text);
+        let compiled_circuits_set =
+            setups::unrolled_circuits::get_unrolled_circuits_artifacts_for_machine_type::<
+                IMStandardIsaConfigWithUnsignedMulDiv,
+            >(&binary_image);
+
+        let honest_program_proof = load_or_generate_honest_baseline_program_proof::<
+            IMStandardIsaConfigWithUnsignedMulDiv,
+        >(
+            &binary_image,
+            &text_section,
+            cycles_bound,
+            rom_bound,
+            &worker,
+        );
+        let mut mixed_program_proof = honest_program_proof.clone();
+
+        let honest_target_proof = honest_program_proof
+            .circuit_families_proofs
+            .get(&target_family)
+            .and_then(|proofs| proofs.first())
+            .cloned()
+            .expect("expected an add_sub family proof");
+        let honest_external_challenges = honest_target_proof.external_challenges;
+
+        let mut altered_external_challenges = honest_external_challenges;
+        let mut altered_machine_state = altered_external_challenges
+            .machine_state_permutation_argument
+            .expect("full machine proof must include machine-state challenges");
+        altered_machine_state.additive_term = Mersenne31Quartic::from_array_of_base([
+            Mersenne31Field(7),
+            Mersenne31Field(11),
+            Mersenne31Field(13),
+            Mersenne31Field(17),
+        ]);
+        altered_external_challenges.machine_state_permutation_argument = Some(altered_machine_state);
+
+        assert_ne!(
+            honest_external_challenges.machine_state_permutation_argument,
+            altered_external_challenges.machine_state_permutation_argument
+        );
+
+        println!("mixed-challenge PoC: reproving target family chunk with altered machine-state challenges");
+        let altered_target_proof =
+            reprove_non_memory_family_chunk_with_challenges::<
+                IMStandardIsaConfigWithUnsignedMulDiv,
+            >(
+                &binary_image,
+                &text_section,
+                cycles_bound,
+                QuasiUARTSource::new_with_reads(vec![15, 1]),
+                rom_bound,
+                &worker,
+                target_family,
+                0,
+                &altered_external_challenges,
+            );
+
+        assert_eq!(
+            altered_target_proof.memory_tree_caps,
+            honest_target_proof.memory_tree_caps
+        );
+        assert_eq!(
+            altered_target_proof.external_challenges.memory_argument,
+            honest_target_proof.external_challenges.memory_argument
+        );
+        assert_eq!(
+            altered_target_proof.external_challenges.delegation_argument,
+            honest_target_proof.external_challenges.delegation_argument
+        );
+        assert_ne!(
+            altered_target_proof
+                .external_challenges
+                .machine_state_permutation_argument,
+            honest_target_proof
+                .external_challenges
+                .machine_state_permutation_argument
+        );
+
+        mixed_program_proof
+            .circuit_families_proofs
+            .get_mut(&target_family)
+            .expect("expected target family in proof batch")[0] = altered_target_proof;
+
+        println!("mixed-challenge PoC: running full verifier on mixed batch");
+        let verification_result = verify_unrolled_layer_proof(
+            &mixed_program_proof,
+            &setup,
+            &compiled_circuits_set,
+            true,
+        );
+
+        assert!(
+            verification_result.is_ok(),
+            "mixed-challenge batch should verify if the outer verifier fails to bind all family proofs to one challenge tuple"
+        );
     }
 
     pub fn prove_unrolled_for_machine_configuration<C: MachineConfig>(
