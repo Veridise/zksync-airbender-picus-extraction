@@ -497,10 +497,32 @@ mod test {
     use risc_v_simulator::cycle::MachineConfig;
     use std::alloc::Global;
 
+    fn build_small_addi_mul_program() -> (Vec<u8>, Vec<u8>, Vec<u32>, Vec<u32>) {
+        let mut labels = HashMap::new();
+        let mut words = Vec::with_capacity(3 + riscv_common::EXIT_SEQUENCE.len());
+        for (idx, instr) in ["addi x1, x0, 3", "addi x2, x0, 7", "mul x3, x1, x2"]
+            .into_iter()
+            .enumerate()
+        {
+            let pc = common_constants::INITIAL_PC + (idx as u32) * 4;
+            let word = lib_rv32_asm::assemble_ir(instr, &mut labels, pc)
+                .expect("must assemble tiny mixed-challenge program")
+                .expect("tiny mixed-challenge instruction must produce one word");
+            words.push(word);
+        }
+        words.extend_from_slice(riscv_common::EXIT_SEQUENCE);
+
+        let raw_bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let (binary, binary_image) = setups::pad_binary(raw_bytes.clone());
+        let (text, text_section) = setups::pad_binary(raw_bytes);
+
+        (binary, text, binary_image, text_section)
+    }
+
     fn mixed_challenge_cache_path() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../target/mixed-challenge-cache")
-            .join("hashed_fibonacci_unrolled_program_proof_2p24.json")
+            .join("addi_mul_exit_unrolled_program_proof_2p24.json")
     }
 
     fn load_or_generate_honest_baseline_program_proof<C: MachineConfig>(
@@ -773,10 +795,7 @@ mod test {
     #[test]
     #[ignore = "generates or loads the cached honest baseline for the mixed-challenge PoC"]
     fn test_generate_honest_baseline_for_mixed_challenge_poc() {
-        let (_, binary_image) =
-            setups::read_and_pad_binary(&Path::new("../examples/hashed_fibonacci/app.bin"));
-        let (_, text_section) =
-            setups::read_and_pad_binary(&Path::new("../examples/hashed_fibonacci/app.text"));
+        let (_, _, binary_image, text_section) = build_small_addi_mul_program();
 
         let worker = prover::worker::Worker::new_with_num_threads(8);
         let cycles_bound = 1 << 24;
@@ -807,10 +826,7 @@ mod test {
     #[test]
     #[ignore = "experimental mixed-challenge verifier PoC"]
     fn test_full_unrolled_verifier_accepts_mixed_machine_state_challenges() {
-        let (binary, binary_image) =
-            setups::read_and_pad_binary(&Path::new("../examples/hashed_fibonacci/app.bin"));
-        let (text, text_section) =
-            setups::read_and_pad_binary(&Path::new("../examples/hashed_fibonacci/app.text"));
+        let (binary, text, binary_image, text_section) = build_small_addi_mul_program();
 
         let worker = prover::worker::Worker::new_with_num_threads(8);
 
