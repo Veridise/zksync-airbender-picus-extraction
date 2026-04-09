@@ -81,6 +81,16 @@ pub fn define_blake2_with_extended_control_delegation_circuit<F: PrimeField, CS:
     (output_state, output_extended_state)
 }
 
+/// VERIDISE: Wrapper for downstream translation code that only needs the side effects on `cs`.
+pub fn define_blake2_with_extended_control_delegation_circuit_for_translation<
+    F: PrimeField,
+    CS: Circuit<F>,
+>(
+    cs: &mut CS,
+) {
+    let _ = define_blake2_with_extended_control_delegation_circuit(cs);
+}
+
 fn define_blake2_with_extended_control_delegation_circuit_inner<
     F: PrimeField,
     CS: Circuit<F>,

@@ -85,6 +85,11 @@ impl SemanticLocation {
         Self::new("llzk://constrain/constraints", index, 0)
     }
 
+    /// Location family for Picus extraction metadata parallel constraints.
+    pub fn constrain_parallel_constraint(index: usize) -> Self {
+        Self::new("llzk://constrain/parallel_constraints", index, 0)
+    }
+
     /// Location family for compiled degree-1 constraints.
     pub fn constrain_compiled_degree1(index: usize) -> Self {
         Self::new("llzk://constrain/compiled/degree1", index, 0)
@@ -905,6 +910,21 @@ impl<'ctx, 'sco, F: FieldInfo> OpsBuilder<'ctx, 'sco, F> {
             location,
             array_ty,
             ArrayCtor::Empty,
+        ))
+    }
+
+    /// Append a one-dimensional felt array initialized from the given values.
+    pub fn append_new_felt_array_from_values(
+        &self,
+        location: Location<'ctx>,
+        values: &[Value<'ctx, 'sco>],
+    ) -> Result<Value<'ctx, 'sco>> {
+        let array_ty = ArrayType::try_from(self.felt_array_type(values.len())?)?;
+        self.append_op_with_result(array::new(
+            &OpBuilder::new(self.context),
+            location,
+            array_ty,
+            ArrayCtor::Values(values),
         ))
     }
 
@@ -1894,7 +1914,6 @@ impl<'ctx, 'str, F: FieldInfo> StructBuilder<'ctx, 'str, F> {
         dialect::r#struct::def(
             self.location(),
             self.name,
-            &[],
             std::iter::chain(members, [compute, constrain]),
         )
     }

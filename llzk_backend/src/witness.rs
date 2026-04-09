@@ -46,6 +46,7 @@ use crate::builder::SemanticLocation;
 use crate::codegen::SpecialCsrPropertiesMetadata;
 use crate::codegen::StructVars;
 use crate::field::FieldInfo;
+use crate::keccak_tables::keccak_permutation_indices_outputs;
 
 const U8_MODULUS: u64 = 1 << 8;
 const U16_MODULUS: u64 = 1 << 16;
@@ -212,6 +213,30 @@ fn encode_oracle_placeholder(placeholder: Placeholder) -> EncodedOraclePlacehold
     };
 
     EncodedOraclePlaceholder { kind, arg0, arg1 }
+}
+
+fn placeholder_allows_member_oracle_fallback(placeholder: Placeholder) -> bool {
+    use Placeholder::*;
+
+    matches!(
+        placeholder,
+        ExecuteDelegation
+            | DelegationType
+            | DelegationABIOffset
+            | DelegationWriteTimestamp
+            | DelegationMemoryReadValue(_)
+            | DelegationMemoryReadTimestamp(_)
+            | DelegationMemoryWriteValue(_)
+            | DelegationRegisterReadValue(_)
+            | DelegationRegisterReadTimestamp(_)
+            | DelegationRegisterWriteValue(_)
+            | DelegationIndirectReadValue { .. }
+            | DelegationIndirectReadTimestamp { .. }
+            | DelegationIndirectWriteValue { .. }
+            | DelegationNondeterminismAccess(_)
+            | DelegationNondeterminismAccessNoSplits(_)
+            | DelegationIndirectAccessVariableOffset { .. }
+    )
 }
 
 /// Trait implemented by SSA witness nodes that can emit LLZK IR inside a struct `@compute`
@@ -922,6 +947,7 @@ struct ComputeLowering<'a, 'ctx: 'sco, 'sco, F: FieldInfo> {
     slots: Vec<SsaSlot<'ctx, 'sco>>,
     slot_input_origins: Vec<Option<Variable>>,
     slot_u32_input_origins: Vec<Option<[Variable; 2]>>,
+    latest_var_values: HashMap<Variable, Value<'ctx, 'sco>>,
 }
 
 impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> Deref for ComputeLowering<'a, 'ctx, 'sco, F> {
@@ -960,6 +986,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             slots: Vec::new(),
             slot_input_origins: Vec::new(),
             slot_u32_input_origins: Vec::new(),
+            latest_var_values: HashMap::new(),
         }
     }
 
@@ -1160,6 +1187,9 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
     /// - compiled witness/memory columns in compiled mode
     /// - runtime memory-subtree storage in logical mode
     fn current_write_target_value(&self, variable: &Variable) -> Result<Value<'ctx, 'sco>> {
+        if let Some(value) = self.latest_var_values.get(variable).copied() {
+            return Ok(value);
+        }
         if self.vars.has_member(variable) {
             self.vars
                 .get_compute_val(self.builder, self.self_value, variable)
@@ -1189,18 +1219,25 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
     /// In compiled mode, logical LLZK members that have compiled witness/memory column mappings
     /// are written through a single path so the logical/public member and its compiled-column
     /// mirror stay synchronized.
-    fn assign_write_targets(&self, variable: &Variable, value: Value<'ctx, 'sco>) -> Result<()> {
+    fn assign_write_targets(
+        &mut self,
+        variable: &Variable,
+        value: Value<'ctx, 'sco>,
+    ) -> Result<()> {
         if self.vars.has_member(variable) {
-            return self.vars.assign_compute_member_and_bridge(
+            self.vars.assign_compute_member_and_bridge_with_lookup(
                 self.builder,
                 self.self_value,
                 variable,
                 value,
-            );
+                |var| self.latest_var_values.get(var).copied(),
+            )?;
+            self.latest_var_values.insert(*variable, value);
+            return Ok(());
         }
 
         if self.vars.has_compiled_storage() {
-            return match self.variable_mapping.get(variable).copied() {
+            let result = match self.variable_mapping.get(variable).copied() {
                 Some(
                     address @ (ColumnAddress::WitnessSubtree(_) | ColumnAddress::MemorySubtree(_)),
                 ) => self.vars.assign_compute_compiled_column(
@@ -1217,9 +1254,12 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
                     "variable {variable:?} is not exposed to compiled @compute storage (column {other:?})"
                 )),
             };
+            result?;
+            self.latest_var_values.insert(*variable, value);
+            return Ok(());
         }
 
-        match self.variable_mapping.get(variable).copied() {
+        let result = match self.variable_mapping.get(variable).copied() {
             Some(ColumnAddress::MemorySubtree(offset)) => self.write_memory_subtree(offset, value),
             Some(ColumnAddress::SetupSubtree(..)) => {
                 unreachable!("setup columns are read-only during witness lowering")
@@ -1235,11 +1275,17 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
                         "variable {variable:?} is not exposed to @compute write-back (column {other:?})"
                     )
                 }),
-        }
+        };
+        result?;
+        self.latest_var_values.insert(*variable, value);
+        Ok(())
     }
 
     /// Read `variable` as the felt value currently visible to `@compute`.
     fn read_variable(&self, variable: Variable) -> Result<Value<'ctx, 'sco>> {
+        if let Some(value) = self.latest_var_values.get(&variable).copied() {
+            return Ok(value);
+        }
         if let Some(value) =
             self.vars
                 .try_get_compute_val(self.builder, self.self_value, &variable)?
@@ -1321,9 +1367,13 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             if self.vars.has_compute_input(variable) {
                 self.vars.try_get_compute_input_val(self.builder, variable)
             } else if self.vars.has_member(variable) {
-                Err(anyhow!(
-                    "placeholder {placeholder:?}[{subindex}] is only exposed as a @compute output/member"
-                ))
+                if placeholder_allows_member_oracle_fallback(placeholder) {
+                    Ok(None)
+                } else {
+                    Err(anyhow!(
+                        "placeholder {placeholder:?}[{subindex}] is only exposed as a @compute output/member"
+                    ))
+                }
             } else {
                 Ok(None)
             }
@@ -1357,6 +1407,12 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
                 "placeholder {placeholder:?} is missing its high limb substitution"
             ));
         };
+
+        if (self.vars.has_member(low_var) || self.vars.has_member(high_var))
+            && placeholder_allows_member_oracle_fallback(placeholder)
+        {
+            return Ok(None);
+        }
 
         if self.vars.has_member(low_var)
             || self.vars.has_member(high_var)
@@ -2244,27 +2300,26 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         };
 
         if let Some(lookup_mapping_idx) = lookup_mapping_idx {
-            let expected = self
-                .lookup_sets
-                .get(lookup_mapping_idx)
-                .ok_or_else(|| anyhow!("lookup mapping {lookup_mapping_idx} is out of bounds"))?;
-            match expected.table_index {
-                TableIndex::Constant(expected_table) => {
-                    if let Some(table) = table {
-                        if expected_table != table {
-                            bail!(
-                                "SSA lookup mapping {lookup_mapping_idx} expects table {:?}, found {:?}",
-                                expected_table,
-                                table
-                            );
+            if let Some(expected) = self.lookup_sets.get(lookup_mapping_idx) {
+                match expected.table_index {
+                    TableIndex::Constant(expected_table) => {
+                        if let Some(table) = table {
+                            if expected_table != table {
+                                bail!(
+                                    "SSA lookup mapping {lookup_mapping_idx} expects table {:?}, found {:?}",
+                                    expected_table,
+                                    table
+                                );
+                            }
                         }
+                        return Ok(Some(expected_table));
                     }
-                    return Ok(Some(expected_table));
-                }
-                TableIndex::Variable(column) => {
-                    // TODO(LLZK compute): specialize dynamic lookup columns once a circuit needs
-                    // table families that cannot be handled by the runtime dispatch below.
-                    let _ = column;
+                    TableIndex::Variable(column) => {
+                        // TODO(LLZK compute): specialize dynamic lookup columns once a circuit
+                        // needs table families that cannot be handled by
+                        // the runtime dispatch below.
+                        let _ = column;
+                    }
                 }
             }
         }
@@ -2283,8 +2338,26 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             TableType::RangeCheckSmall => {
                 self.compute_range_check_small_lookup(inputs, num_outputs)
             }
+            TableType::RangeCheck9x9 => {
+                self.compute_range_check_two_tuple_lookup(inputs, num_outputs, "RangeCheck9x9")
+            }
+            TableType::RangeCheck10x10 => {
+                self.compute_range_check_two_tuple_lookup(inputs, num_outputs, "RangeCheck10x10")
+            }
+            TableType::RangeCheck11 => {
+                self.compute_range_check_single_entry_lookup(inputs, num_outputs, "RangeCheck11")
+            }
+            TableType::RangeCheck12 => {
+                self.compute_range_check_single_entry_lookup(inputs, num_outputs, "RangeCheck12")
+            }
+            TableType::RangeCheck13 => {
+                self.compute_range_check_single_entry_lookup(inputs, num_outputs, "RangeCheck13")
+            }
             TableType::U16GetSignAndHighByte => {
                 self.compute_u16_get_sign_and_high_byte_lookup(inputs, num_outputs)
+            }
+            TableType::U16SplitAsBytes => {
+                self.compute_u16_split_as_bytes_lookup(inputs, num_outputs)
             }
             TableType::ConditionalJmpBranchSlt => {
                 self.compute_conditional_jmp_branch_slt_lookup(inputs, num_outputs)
@@ -2327,9 +2400,28 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             TableType::TruncateShiftAmount => {
                 self.compute_truncate_shift_amount_lookup(inputs, num_outputs)
             }
-            TableType::Xor => self.compute_bitwise_byte_lookup(inputs, num_outputs, felt::bit_xor),
-            TableType::Or => self.compute_bitwise_byte_lookup(inputs, num_outputs, felt::bit_or),
-            TableType::And => self.compute_bitwise_byte_lookup(inputs, num_outputs, felt::bit_and),
+            TableType::Xor => {
+                self.compute_bitwise_lookup(inputs, num_outputs, "Xor", felt::bit_xor)
+            }
+            TableType::Xor3 => {
+                self.compute_bitwise_lookup(inputs, num_outputs, "Xor3", felt::bit_xor)
+            }
+            TableType::Xor4 => {
+                self.compute_bitwise_lookup(inputs, num_outputs, "Xor4", felt::bit_xor)
+            }
+            TableType::Xor7 => {
+                self.compute_bitwise_lookup(inputs, num_outputs, "Xor7", felt::bit_xor)
+            }
+            TableType::Xor9 => {
+                self.compute_bitwise_lookup(inputs, num_outputs, "Xor9", felt::bit_xor)
+            }
+            TableType::Xor12 => {
+                self.compute_bitwise_lookup(inputs, num_outputs, "Xor12", felt::bit_xor)
+            }
+            TableType::Or => self.compute_bitwise_lookup(inputs, num_outputs, "Or", felt::bit_or),
+            TableType::And => {
+                self.compute_bitwise_lookup(inputs, num_outputs, "And", felt::bit_and)
+            }
             TableType::RangeCheck16WithZeroPads => {
                 self.compute_range_check_16_with_zero_pads_lookup(inputs, num_outputs)
             }
@@ -2354,6 +2446,11 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             }
             TableType::Sra16BitInputSignFill => {
                 self.compute_sra_16_bit_input_sign_fill_lookup(inputs, num_outputs)
+            }
+            TableType::KeccakPermutationIndices12
+            | TableType::KeccakPermutationIndices34
+            | TableType::KeccakPermutationIndices56 => {
+                self.compute_keccak_permutation_indices_lookup(table, inputs, num_outputs)
             }
             _ => {
                 // TODO: add deterministic lowering for the remaining lookup tables
@@ -2415,6 +2512,57 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         }
 
         Ok(outputs)
+    }
+
+    /// Compute the two output limbs for the keccak permutation index helper tables.
+    fn compute_keccak_permutation_indices_lookup(
+        &self,
+        table: TableType,
+        inputs: &[Value<'ctx, 'sco>],
+        num_outputs: usize,
+    ) -> Result<Vec<Value<'ctx, 'sco>>> {
+        let control_with_exe = match inputs {
+            [control_with_exe] => {
+                if num_outputs != 2 {
+                    bail!("{table:?} expects exactly two outputs in output-producing mode");
+                }
+                *control_with_exe
+            }
+            [control_with_exe, _, _] => {
+                if num_outputs != 0 {
+                    bail!("{table:?} expects zero outputs in row-validation mode");
+                }
+                return Ok(vec![]);
+            }
+            _ => {
+                bail!(
+                    "{table:?} expects either one key input or a width-3 row, found {} inputs",
+                    inputs.len()
+                );
+            }
+        };
+
+        let (first_0, second_0) = keccak_permutation_indices_outputs(table, 0);
+        let mut selected_first = self.get_felt_constant_from_start(first_0)?;
+        let mut selected_second = self.get_felt_constant_from_start(second_0)?;
+
+        for control in 1..(1u64 << 12) {
+            let (candidate_first, candidate_second) =
+                keccak_permutation_indices_outputs(table, control);
+            let is_selected = self.append_field_eq_constant(control_with_exe, control)?;
+            selected_first = self.append_select_value(
+                is_selected,
+                self.get_felt_constant_from_start(candidate_first)?,
+                selected_first,
+            )?;
+            selected_second = self.append_select_value(
+                is_selected,
+                self.get_felt_constant_from_start(candidate_second)?,
+                selected_second,
+            )?;
+        }
+
+        Ok(vec![selected_first, selected_second])
     }
 
     /// Repack unpacked dynamic-lookup inputs into the single felt key expected by the
@@ -2507,6 +2655,39 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         self.finalize_lookup_outputs(vec![], num_outputs)
     }
 
+    /// Lower the width-3 two-tuple range-check tables.
+    ///
+    /// These tables only constrain `(a, b, 0)` rows on the constrain side, so witness lowering
+    /// just pads the output tuple when the query requests materialized outputs.
+    fn compute_range_check_two_tuple_lookup(
+        &self,
+        inputs: &[Value<'ctx, 'sco>],
+        num_outputs: usize,
+        table_name: &str,
+    ) -> Result<Vec<Value<'ctx, 'sco>>> {
+        if inputs.len() != 3 {
+            bail!("{table_name} expects 3 inputs, found {}", inputs.len());
+        }
+
+        self.finalize_lookup_outputs(vec![], num_outputs)
+    }
+
+    /// Lower the width-3 single-entry range-check tables.
+    ///
+    /// Like the other formal width-3 range checks, these tables do not produce witness outputs.
+    fn compute_range_check_single_entry_lookup(
+        &self,
+        inputs: &[Value<'ctx, 'sco>],
+        num_outputs: usize,
+        table_name: &str,
+    ) -> Result<Vec<Value<'ctx, 'sco>>> {
+        if inputs.len() != 3 {
+            bail!("{table_name} expects 3 inputs, found {}", inputs.len());
+        }
+
+        self.finalize_lookup_outputs(vec![], num_outputs)
+    }
+
     /// Lower the `U16GetSignAndHighByte` table directly from the input limb.
     fn compute_u16_get_sign_and_high_byte_lookup(
         &self,
@@ -2527,6 +2708,22 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         let high_byte = self.append_shifted_low_bits(input, 8, 8)?;
 
         self.finalize_lookup_outputs(vec![sign, high_byte], num_outputs)
+    }
+
+    /// Lower `U16SplitAsBytes` directly from the 16-bit input limb.
+    fn compute_u16_split_as_bytes_lookup(
+        &self,
+        inputs: &[Value<'ctx, 'sco>],
+        num_outputs: usize,
+    ) -> Result<Vec<Value<'ctx, 'sco>>> {
+        if inputs.len() != 1 {
+            bail!("U16SplitAsBytes expects 1 input, found {}", inputs.len());
+        }
+
+        let input = inputs[0];
+        let low_byte = self.append_lowest_bits_felt(input, 8)?;
+        let high_byte = self.append_shifted_low_bits(input, 8, 8)?;
+        self.finalize_lookup_outputs(vec![low_byte, high_byte], num_outputs)
     }
 
     /// Lower the ROM word lookup keyed by aligned byte address.
@@ -2617,10 +2814,11 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
     }
 
     /// Lower the generic byte-wise XOR/OR/AND tables.
-    fn compute_bitwise_byte_lookup<FN>(
+    fn compute_bitwise_lookup<FN>(
         &self,
         inputs: &[Value<'ctx, 'sco>],
         num_outputs: usize,
+        table_name: &str,
         op: FN,
     ) -> Result<Vec<Value<'ctx, 'sco>>>
     where
@@ -2632,10 +2830,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             ) -> Result<Operation<'ctx>, llzk::error::Error>,
     {
         if inputs.len() != 2 {
-            bail!(
-                "bitwise byte lookup expects 2 inputs, found {}",
-                inputs.len()
-            );
+            bail!("{table_name} expects 2 inputs, found {}", inputs.len());
         }
 
         let location = self.unknown_location();

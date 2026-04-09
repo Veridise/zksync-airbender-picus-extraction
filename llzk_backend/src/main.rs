@@ -9,7 +9,9 @@ use llzk_backend::config::LlzkStructLayout;
 use llzk_backend::config::OptLevel;
 use llzk_backend::config::UnusedVariablePolicy;
 use llzk_backend::output_format::OutputFormat;
+use llzk_backend::recipes;
 use llzk_backend::CircuitGenerationConfig;
+use llzk_backend::CircuitRecipe;
 
 #[derive(ValueEnum, Clone, Copy, PartialEq, Eq)]
 enum Circuits {
@@ -20,36 +22,75 @@ enum Circuits {
     MulDiv,
     ShiftBinaryCsr,
     UnifiedReducedMachine,
+    AddOp,
+    SubOp,
+    LuiOp,
+    AuipcOp,
+    XorOp,
+    OrOp,
+    AndOp,
+    SllOp,
+    SrlOp,
+    SraOp,
+    AddmodOp,
+    SubmodOp,
+    MulmodOp,
+    ConditionalOp,
+    JumpOpTrusted,
+    JumpOpUntrusted,
+    MulOpSigned,
+    MulOpUnsignedOnly,
+    DivremOpSigned,
+    DivremOpUnsignedOnly,
+    CsrrwOp,
+    LoadOp,
+    StoreOp,
+    BigintWithControlDelegation,
+    Blake2WithExtendedControlDelegation,
+    KeccakSpecial5Delegation,
 }
 
-type CircuitFnTuple = (Circuits, fn(&CircuitGenerationConfig) -> Result<()>);
-const CIRCUITS: &[CircuitFnTuple] = &[
-    (
-        Circuits::AddSubLuiAuipcMop,
-        CircuitGenerationConfig::gen_add_sub_lui_auipc_mop,
-    ),
-    (
-        Circuits::JumpBranchSlt,
-        CircuitGenerationConfig::gen_jump_branch_slt,
-    ),
-    (
-        Circuits::LoadStoreSubwordOnly,
-        CircuitGenerationConfig::gen_load_store_subword_only,
-    ),
-    (
-        Circuits::LoadStoreWordOnly,
-        CircuitGenerationConfig::gen_load_store_word_only,
-    ),
-    (Circuits::MulDiv, CircuitGenerationConfig::gen_mul_div),
-    (
-        Circuits::ShiftBinaryCsr,
-        CircuitGenerationConfig::gen_shift_binary_csr,
-    ),
-    (
-        Circuits::UnifiedReducedMachine,
-        CircuitGenerationConfig::gen_unified_reduced_machine,
-    ),
-];
+impl Circuits {
+    fn recipe(self) -> CircuitRecipe {
+        match self {
+            Self::AddSubLuiAuipcMop => recipes::add_sub_lui_auipc_mop_recipe(),
+            Self::JumpBranchSlt => recipes::jump_branch_slt_recipe(),
+            Self::LoadStoreSubwordOnly => recipes::load_store_subword_only_recipe(),
+            Self::LoadStoreWordOnly => recipes::load_store_word_only_recipe(),
+            Self::MulDiv => recipes::mul_div_recipe(),
+            Self::ShiftBinaryCsr => recipes::shift_binary_csr_recipe(),
+            Self::UnifiedReducedMachine => recipes::unified_reduced_machine_recipe(),
+            Self::AddOp => recipes::add_op_recipe(),
+            Self::SubOp => recipes::sub_op_recipe(),
+            Self::LuiOp => recipes::lui_op_recipe(),
+            Self::AuipcOp => recipes::auipc_op_recipe(),
+            Self::XorOp => recipes::xor_op_recipe(),
+            Self::OrOp => recipes::or_op_recipe(),
+            Self::AndOp => recipes::and_op_recipe(),
+            Self::SllOp => recipes::sll_op_recipe(),
+            Self::SrlOp => recipes::srl_op_recipe(),
+            Self::SraOp => recipes::sra_op_recipe(),
+            Self::AddmodOp => recipes::addmod_op_recipe(),
+            Self::SubmodOp => recipes::submod_op_recipe(),
+            Self::MulmodOp => recipes::mulmod_op_recipe(),
+            Self::ConditionalOp => recipes::conditional_op_recipe(),
+            Self::JumpOpTrusted => recipes::jump_op_trusted_recipe(),
+            Self::JumpOpUntrusted => recipes::jump_op_untrusted_recipe(),
+            Self::MulOpSigned => recipes::mul_op_signed_recipe(),
+            Self::MulOpUnsignedOnly => recipes::mul_op_unsigned_only_recipe(),
+            Self::DivremOpSigned => recipes::divrem_op_signed_recipe(),
+            Self::DivremOpUnsignedOnly => recipes::divrem_op_unsigned_only_recipe(),
+            Self::CsrrwOp => recipes::csrrw_op_recipe(),
+            Self::LoadOp => recipes::load_op_recipe(),
+            Self::StoreOp => recipes::store_op_recipe(),
+            Self::BigintWithControlDelegation => recipes::bigint_with_control_delegation_recipe(),
+            Self::Blake2WithExtendedControlDelegation => {
+                recipes::blake2_with_extended_control_delegation_recipe()
+            }
+            Self::KeccakSpecial5Delegation => recipes::keccak_special5_delegation_recipe(),
+        }
+    }
+}
 
 #[derive(Args, Clone)]
 struct GenerateArgs {
@@ -124,16 +165,16 @@ fn main() -> Result<()> {
     match &cli.command {
         Commands::GenCircuit { circuit, args } => {
             let config = args.generation_config();
-            CIRCUITS
-                .iter()
-                .find_map(|(name, handler)| (name == circuit).then_some(handler))
-                .expect("circuit without a handler function")(&config)?;
+            config.generate_recipe(circuit.recipe())?;
         }
         Commands::GenAllCircuits { args } => {
             let config = args.generation_config();
-            for (_, handler) in CIRCUITS {
-                handler(&config)?;
-            }
+            config.generate_recipes(
+                Circuits::value_variants()
+                    .iter()
+                    .copied()
+                    .map(Circuits::recipe),
+            )?;
         }
     }
     Ok(())

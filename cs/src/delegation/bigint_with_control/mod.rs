@@ -70,6 +70,20 @@ pub fn define_u256_ops_extended_control_delegation_circuit<F: PrimeField, CS: Ci
     (output_state, x12_write_vars)
 }
 
+/// VERIDISE: Wrapper for downstream translation code that only needs the side effects on `cs`.
+///
+/// Returning `()` avoids exposing the const-sized ABI tuple in crates that otherwise hit a
+/// predicate-normalization cycle when referencing `define_u256_ops_extended_control_delegation_circuit`
+/// directly.
+pub fn define_u256_ops_extended_control_delegation_circuit_for_translation<
+    F: PrimeField,
+    CS: Circuit<F>,
+>(
+    cs: &mut CS,
+) {
+    let _ = define_u256_ops_extended_control_delegation_circuit(cs);
+}
+
 fn define_u256_ops_extended_control_delegation_circuit_inner<
     F: PrimeField,
     CS: Circuit<F>,

@@ -18,17 +18,26 @@ use prover::cs::cs::circuit::IndirectAccessType;
 use prover::cs::cs::circuit::LinkedVariablesPair;
 use prover::cs::cs::circuit::LookupQuery;
 use prover::cs::cs::circuit::LookupQueryTableType;
+use prover::cs::cs::circuit::PicusExpr;
+use prover::cs::cs::circuit::PicusStructuredConstraint;
 use prover::cs::cs::circuit::RangeCheckQuery;
 use prover::cs::cs::circuit::RegisterAccessType;
 use prover::cs::cs::circuit::RegisterAndIndirectAccesses;
 use prover::cs::cs::circuit::ShuffleRamMemQuery;
 use prover::cs::cs::circuit::ShuffleRamQueryType;
+use prover::cs::definitions::AlignedColumnSet;
+use prover::cs::definitions::BatchedRamTimestampComparisonAuxVars;
 use prover::cs::definitions::ColumnAddress;
 use prover::cs::definitions::CompiledDegree1Constraint;
 use prover::cs::definitions::CompiledDegree2Constraint;
+use prover::cs::definitions::LookupAndMemoryArgumentLayout;
 use prover::cs::definitions::LookupInput;
+use prover::cs::definitions::MemorySubtree;
 use prover::cs::definitions::OpcodeFamilyCircuitState;
+use prover::cs::definitions::RegisterAndIndirectAccessTimestampComparisonAuxVars;
+use prover::cs::definitions::SetupLayout;
 use prover::cs::definitions::Variable;
+use prover::cs::definitions::WitnessSubtree;
 use prover::cs::definitions::TIMESTAMP_COLUMNS_NUM_BITS;
 use prover::cs::definitions::TIMESTAMP_STEP;
 use prover::cs::one_row_compiler::CompiledCircuitArtifact;
@@ -81,6 +90,100 @@ impl<'ctx: 'op, 'op, F: FieldInfo, T: StructDefOpMutLike<'ctx, 'op>> AddCompute<
 {
 }
 
+/// Minimal compiled artifact used when LLZK only needs logical lowering and witness SSA.
+///
+/// Standalone logical recipes do not currently have a compatible one-row compiler entrypoint.
+/// The backend still constructs a [`WitnessComputation`] for them, but logical lowering only
+/// needs the variable mapping surface, so an empty artifact is sufficient.
+pub(crate) fn empty_compiled_artifact<F: PrimeField>(
+    variable_mapping: BTreeMap<Variable, ColumnAddress>,
+) -> CompiledCircuitArtifact<F> {
+    CompiledCircuitArtifact {
+        witness_layout: WitnessSubtree {
+            multiplicities_columns_for_range_check_16: Default::default(),
+            multiplicities_columns_for_timestamp_range_check: Default::default(),
+            multiplicities_columns_for_decoder_in_executor_families: Default::default(),
+            multiplicities_columns_for_generic_lookup: Default::default(),
+            range_check_8_columns: Default::default(),
+            range_check_16_columns: Default::default(),
+            width_3_lookups: Vec::new(),
+            range_check_16_lookup_expressions: Vec::new(),
+            timestamp_range_check_lookup_expressions: Vec::new(),
+            offset_for_special_shuffle_ram_timestamps_range_check_expressions: 0,
+            boolean_vars_columns_range: Default::default(),
+            scratch_space_columns_range: Default::default(),
+            total_width: 0,
+        },
+        memory_layout: MemorySubtree {
+            shuffle_ram_inits_and_teardowns: Vec::new(),
+            shuffle_ram_access_sets: Vec::new(),
+            delegation_request_layout: None,
+            delegation_processor_layout: None,
+            machine_state_layout: None,
+            intermediate_state_layout: None,
+            batched_ram_accesses: Vec::new(),
+            register_and_indirect_accesses: Vec::new(),
+            total_width: 0,
+        },
+        setup_layout: SetupLayout {
+            timestamp_setup_columns: Default::default(),
+            range_check_16_setup_column: Default::default(),
+            timestamp_range_check_setup_column: Default::default(),
+            generic_lookup_setup_columns: Default::default(),
+            preprocessed_decoder_setup_columns: Default::default(),
+            total_width: 0,
+        },
+        stage_2_layout: LookupAndMemoryArgumentLayout {
+            intermediate_polys_for_range_check_16:
+                prover::cs::definitions::OptimizedOraclesForLookupWidth1::empty(),
+            remainder_for_range_check_16: None,
+            lazy_init_address_range_check_16: None,
+            intermediate_polys_for_timestamp_range_checks:
+                prover::cs::definitions::OptimizedOraclesForLookupWidth1::empty(),
+            intermediate_polys_for_generic_lookup: AlignedColumnSet::empty(),
+            intermediate_poly_for_decoder_accesses: AlignedColumnSet::empty(),
+            intermediate_poly_for_range_check_16_multiplicity: AlignedColumnSet::empty(),
+            intermediate_poly_for_timestamp_range_check_multiplicity: AlignedColumnSet::empty(),
+            intermediate_polys_for_generic_multiplicities: AlignedColumnSet::empty(),
+            intermediate_polys_for_decoder_multiplicities: AlignedColumnSet::empty(),
+            delegation_processing_aux_poly: None,
+            intermediate_polys_for_memory_init_teardown: AlignedColumnSet::empty(),
+            intermediate_polys_for_memory_argument: AlignedColumnSet::empty(),
+            intermediate_polys_for_state_permutation: AlignedColumnSet::empty(),
+            intermediate_polys_for_permutation_masking: AlignedColumnSet::empty(),
+            intermediate_poly_for_grand_product: AlignedColumnSet::empty(),
+            ext4_polys_offset: 0,
+            total_width: 0,
+        },
+        degree_2_constraints: Vec::new(),
+        degree_1_constraints: Vec::new(),
+        state_linkage_constraints: Vec::new(),
+        public_inputs: Vec::new(),
+        variable_mapping,
+        scratch_space_size_for_witness_gen: 0,
+        lazy_init_address_aux_vars: Vec::new(),
+        memory_queries_timestamp_comparison_aux_vars: Vec::new(),
+        batched_memory_access_timestamp_comparison_aux_vars: BatchedRamTimestampComparisonAuxVars {
+            predicate: ColumnAddress::placeholder(),
+            write_timestamp_columns: Default::default(),
+            write_timestamp: [ColumnAddress::placeholder(); 2],
+            aux_borrow_vars: Vec::new(),
+        },
+        register_and_indirect_access_timestamp_comparison_aux_vars:
+            RegisterAndIndirectAccessTimestampComparisonAuxVars {
+                predicate: ColumnAddress::placeholder(),
+                write_timestamp_columns: Default::default(),
+                write_timestamp: [ColumnAddress::placeholder(); 2],
+                aux_borrow_sets: Vec::new(),
+            },
+        executor_family_circuit_next_timestamp_aux_var: None,
+        executor_family_decoder_table_size: 0,
+        trace_len: 1,
+        table_offsets: Vec::new(),
+        total_tables_size: 0,
+    }
+}
+
 /// This enum holds information about extracted variables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ExtractedVariable {
@@ -126,6 +229,43 @@ impl ExtractedVariable {
             ExtractedVariable::Register { low, high } => format!("Register({low:?},{high:?})"),
             ExtractedVariable::Scalar(variable) => format!("{variable:?}"),
         }
+    }
+}
+
+/// Explicit LLZK boundary description for circuits that do not expose an
+/// `executor_machine_state`.
+///
+/// Standalone op harnesses and delegations build their own logical interface directly from the
+/// underlying circuit variables. The backend uses this spec in place of the executor-state-based
+/// extraction path used by unrolled opcode families.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LlzkBoundarySpec {
+    pub inputs: Vec<ExtractedVariable>,
+    pub outputs: Vec<ExtractedVariable>,
+    pub include_shuffle_ram_io: bool,
+    pub use_legacy_query2_input: bool,
+    pub proof_system_signal_vars: BTreeSet<Variable>,
+}
+
+impl LlzkBoundarySpec {
+    pub fn new(inputs: Vec<ExtractedVariable>, outputs: Vec<ExtractedVariable>) -> Self {
+        Self {
+            inputs,
+            outputs,
+            include_shuffle_ram_io: false,
+            use_legacy_query2_input: false,
+            proof_system_signal_vars: BTreeSet::new(),
+        }
+    }
+
+    pub fn with_shuffle_ram_io(mut self) -> Self {
+        self.include_shuffle_ram_io = true;
+        self
+    }
+
+    pub fn with_signal_vars(mut self, signal_vars: impl IntoIterator<Item = Variable>) -> Self {
+        self.proof_system_signal_vars.extend(signal_vars);
+        self
     }
 }
 
@@ -200,6 +340,7 @@ enum VariableUsageSite {
     ExtractedInput,
     ExtractedOutput,
     Constraint,
+    ParallelConstraint,
     Lookup,
     DisjunctiveLookup,
     BooleanInvariant,
@@ -260,12 +401,12 @@ impl VariableExtractionPlan {
         circuit_output: &CircuitOutput<F>,
         compiled_artifact: &CompiledCircuitArtifact<F>,
         witness: &WitnessComputation<F>,
+        boundary_spec: Option<&LlzkBoundarySpec>,
         unused_variable_policy: UnusedVariablePolicy,
         emit_suspicious_unused: bool,
     ) -> Result<Self> {
-        let use_legacy_query2_input = uses_legacy_query2_write_input(circuit_name);
-        let inputs = extracted_inputs(circuit_output, use_legacy_query2_input)?;
-        let outputs = extracted_outputs(circuit_output, use_legacy_query2_input)?;
+        let inputs = extracted_inputs(circuit_output, boundary_spec, circuit_name)?;
+        let outputs = extracted_outputs(circuit_output, boundary_spec, circuit_name)?;
         let usage_analysis = analyze_variable_usage(
             circuit_output,
             compiled_artifact,
@@ -273,7 +414,7 @@ impl VariableExtractionPlan {
             &inputs,
             &outputs,
         )?;
-        let proof_system_signal_vars = usage_analysis
+        let mut proof_system_signal_vars = usage_analysis
             .records
             .iter()
             .filter_map(|(variable, record)| {
@@ -281,8 +422,15 @@ impl VariableExtractionPlan {
                     .then_some(*variable)
             })
             .collect::<BTreeSet<_>>();
+        if let Some(boundary_spec) = boundary_spec {
+            proof_system_signal_vars.extend(boundary_spec.proof_system_signal_vars.iter().copied());
+        }
         let input_vars = extracted_variable_set(&inputs);
         let output_vars = extracted_variable_set(&outputs);
+        if boundary_spec.is_some() {
+            proof_system_signal_vars.extend(input_vars.iter().copied());
+            proof_system_signal_vars.extend(output_vars.iter().copied());
+        }
         let mut live_intermediate_vars = usage_analysis
             .live_variables
             .iter()
@@ -500,6 +648,21 @@ fn analyze_variable_usage<F: FieldInfo>(
     for (constraint, _) in &circuit_output.constraints {
         for term in &constraint.terms {
             mark_term_usage(&mut records, term, VariableUsageSite::Constraint)?;
+        }
+    }
+    if circuit_output
+        .picus_extraction_metadata
+        .parallel_constraints_enabled
+    {
+        for constraint in &circuit_output
+            .picus_extraction_metadata
+            .parallel_constraints
+        {
+            mark_parallel_constraint_usage(
+                &mut records,
+                constraint,
+                VariableUsageSite::ParallelConstraint,
+            )?;
         }
     }
     for lookup in &circuit_output.lookups {
@@ -767,6 +930,36 @@ fn mark_witness_usage(
     }
     for variable in &usage.write_vars {
         mark_usage(records, *variable, VariableUsageSite::WitnessWrite)?;
+    }
+    Ok(())
+}
+
+fn mark_parallel_constraint_usage<F: PrimeField>(
+    records: &mut BTreeMap<Variable, VariableUsageRecord>,
+    constraint: &PicusStructuredConstraint<F>,
+    site: VariableUsageSite,
+) -> Result<()> {
+    match constraint {
+        PicusStructuredConstraint::Eq { lhs, rhs } => {
+            mark_parallel_expr_usage(records, lhs, site)?;
+            mark_parallel_expr_usage(records, rhs, site)?;
+        }
+    }
+    Ok(())
+}
+
+fn mark_parallel_expr_usage<F: PrimeField>(
+    records: &mut BTreeMap<Variable, VariableUsageRecord>,
+    expr: &PicusExpr<F>,
+    site: VariableUsageSite,
+) -> Result<()> {
+    match expr {
+        PicusExpr::Variable(variable) => mark_usage(records, *variable, site)?,
+        PicusExpr::Constant(_) => {}
+        PicusExpr::Add(lhs, rhs) | PicusExpr::Sub(lhs, rhs) | PicusExpr::Mul(lhs, rhs) => {
+            mark_parallel_expr_usage(records, lhs, site)?;
+            mark_parallel_expr_usage(records, rhs, site)?;
+        }
     }
     Ok(())
 }
@@ -1105,15 +1298,11 @@ fn shuffle_write_value_is_input(query_index: usize, use_legacy_query2_input: boo
     use_legacy_query2_input && query_index == 2
 }
 
-fn extracted_inputs<F: PrimeField>(
+fn extend_extracted_inputs_with_shuffle_queries<F: PrimeField>(
+    inputs: &mut Vec<ExtractedVariable>,
     co: &CircuitOutput<F>,
     use_legacy_query2_input: bool,
-) -> Result<Vec<ExtractedVariable>> {
-    let exec_state = &co
-        .executor_machine_state
-        .ok_or_else(|| anyhow!("executor_machine_state not initialized"))?;
-    let mut inputs = exec_state.get_inputs()?;
-
+) {
     for (query_index, query) in co.shuffle_ram_queries.iter().enumerate() {
         inputs.push(ExtractedVariable::register(query.read_value));
         if !query.is_readonly()
@@ -1132,6 +1321,45 @@ fn extracted_inputs<F: PrimeField>(
             }
         }
     }
+}
+
+fn extend_extracted_outputs_with_shuffle_queries<F: PrimeField>(
+    outputs: &mut Vec<ExtractedVariable>,
+    co: &CircuitOutput<F>,
+    use_legacy_query2_input: bool,
+) {
+    for (query_index, query) in co.shuffle_ram_queries.iter().enumerate() {
+        if !query.is_readonly()
+            && !shuffle_write_value_is_input(query_index, use_legacy_query2_input)
+        {
+            outputs.push(ExtractedVariable::register(query.write_value));
+        }
+    }
+}
+
+fn extracted_inputs<F: PrimeField>(
+    co: &CircuitOutput<F>,
+    boundary_spec: Option<&LlzkBoundarySpec>,
+    circuit_name: &str,
+) -> Result<Vec<ExtractedVariable>> {
+    let mut inputs = if let Some(boundary_spec) = boundary_spec {
+        boundary_spec.inputs.clone()
+    } else {
+        let exec_state = &co
+            .executor_machine_state
+            .ok_or_else(|| anyhow!("executor_machine_state not initialized"))?;
+        exec_state.get_inputs()?
+    };
+
+    let use_legacy_query2_input = boundary_spec
+        .map(|spec| spec.use_legacy_query2_input)
+        .unwrap_or_else(|| uses_legacy_query2_write_input(circuit_name));
+    if boundary_spec
+        .map(|spec| spec.include_shuffle_ram_io)
+        .unwrap_or(true)
+    {
+        extend_extracted_inputs_with_shuffle_queries(&mut inputs, co, use_legacy_query2_input);
+    }
     inputs.sort();
     inputs.dedup();
     Ok(inputs)
@@ -1139,18 +1367,25 @@ fn extracted_inputs<F: PrimeField>(
 
 fn extracted_outputs<F: PrimeField>(
     co: &CircuitOutput<F>,
-    use_legacy_query2_input: bool,
+    boundary_spec: Option<&LlzkBoundarySpec>,
+    circuit_name: &str,
 ) -> Result<Vec<ExtractedVariable>> {
-    let exec_state = &co
-        .executor_machine_state
-        .ok_or_else(|| anyhow!("executor_machine_state not initialized"))?;
-    let mut outputs = exec_state.get_outputs()?;
-    for (query_index, query) in co.shuffle_ram_queries.iter().enumerate() {
-        if !query.is_readonly()
-            && !shuffle_write_value_is_input(query_index, use_legacy_query2_input)
-        {
-            outputs.push(ExtractedVariable::register(query.write_value));
-        }
+    let mut outputs = if let Some(boundary_spec) = boundary_spec {
+        boundary_spec.outputs.clone()
+    } else {
+        let exec_state = &co
+            .executor_machine_state
+            .ok_or_else(|| anyhow!("executor_machine_state not initialized"))?;
+        exec_state.get_outputs()?
+    };
+    let use_legacy_query2_input = boundary_spec
+        .map(|spec| spec.use_legacy_query2_input)
+        .unwrap_or_else(|| uses_legacy_query2_write_input(circuit_name));
+    if boundary_spec
+        .map(|spec| spec.include_shuffle_ram_io)
+        .unwrap_or(true)
+    {
+        extend_extracted_outputs_with_shuffle_queries(&mut outputs, co, use_legacy_query2_input);
     }
     outputs.sort();
     outputs.dedup();
@@ -1159,11 +1394,12 @@ fn extracted_outputs<F: PrimeField>(
 
 fn extracted_intermediates<F: PrimeField>(
     co: &CircuitOutput<F>,
-    use_legacy_query2_input: bool,
+    boundary_spec: Option<&LlzkBoundarySpec>,
+    circuit_name: &str,
 ) -> Result<Vec<ExtractedVariable>> {
     let io = [
-        extracted_inputs(co, use_legacy_query2_input)?,
-        extracted_outputs(co, use_legacy_query2_input)?,
+        extracted_inputs(co, boundary_spec, circuit_name)?,
+        extracted_outputs(co, boundary_spec, circuit_name)?,
     ]
     .concat();
     let mut intermediates = (0u64..u64::try_from(co.num_of_variables)?)
@@ -1185,15 +1421,15 @@ fn extracted_intermediates<F: PrimeField>(
 
 impl<F: PrimeField> VariableExtractor for CircuitOutput<F> {
     fn get_inputs(&self) -> Result<Vec<ExtractedVariable>> {
-        extracted_inputs(self, false)
+        extracted_inputs(self, None, "")
     }
 
     fn get_outputs(&self) -> Result<Vec<ExtractedVariable>> {
-        extracted_outputs(self, false)
+        extracted_outputs(self, None, "")
     }
 
     fn get_intermediates(&self) -> Result<Vec<ExtractedVariable>> {
-        extracted_intermediates(self, false)
+        extracted_intermediates(self, None, "")
     }
 }
 
@@ -1208,6 +1444,14 @@ impl<F: FieldInfo> VariableExtractor for CircuitBundle<F> {
 
     fn get_intermediates(&self) -> Result<Vec<ExtractedVariable>> {
         Ok(self.extraction_plan.emitted_intermediates.clone())
+    }
+
+    fn is_signal_output(&self, output: &ExtractedVariable) -> bool {
+        if self.boundary_spec.is_some() {
+            extracted_variable_is_signal(output, &self.extraction_plan.proof_system_signal_vars)
+        } else {
+            true
+        }
     }
 
     fn is_signal_intermediate(&self, intermediate: &ExtractedVariable) -> bool {
@@ -1359,6 +1603,8 @@ pub struct CircuitBundle<F: FieldInfo> {
     circuit_output: CircuitOutput<F>,
     /// One-row compiler output shared by witness lowering and compiled constraint lowering.
     compiled_artifact: CompiledCircuitArtifact<F>,
+    /// Optional explicit LLZK boundary for circuits that do not expose an executor machine state.
+    boundary_spec: Option<LlzkBoundarySpec>,
     /// The output of the witness SSA generation, used for generating witness computation in LLZK,
     /// and for logical variable liveness classification.
     witness: WitnessComputation<F>,
@@ -1379,6 +1625,7 @@ impl<F: FieldInfo> CircuitBundle<F> {
         emit_suspicious_unused: bool,
         circuit_output: CircuitOutput<F>,
         compiled_artifact: CompiledCircuitArtifact<F>,
+        boundary_spec: Option<LlzkBoundarySpec>,
         witness: WitnessComputation<F>,
     ) -> Result<Self> {
         let extraction_plan = VariableExtractionPlan::classify(
@@ -1386,6 +1633,7 @@ impl<F: FieldInfo> CircuitBundle<F> {
             &circuit_output,
             &compiled_artifact,
             &witness,
+            boundary_spec.as_ref(),
             unused_variable_policy,
             emit_suspicious_unused,
         )?;
@@ -1396,6 +1644,7 @@ impl<F: FieldInfo> CircuitBundle<F> {
             unused_variable_policy,
             circuit_output,
             compiled_artifact,
+            boundary_spec,
             witness,
             extraction_plan,
         })
@@ -1647,11 +1896,28 @@ impl<'ctx, F: FieldInfo> EmitLlzkInModule<'ctx, F> for CircuitBundle<F> {
                                             || lookup.emit_constrain(builder, &vars),
                                         )?;
                                     }
-                                    for (idx, constraint) in self.constraints.iter().enumerate() {
-                                        builder.with_semantic_location(
-                                            SemanticLocation::constrain_constraint(idx),
-                                            || constraint.emit_constrain(builder, &vars),
-                                        )?;
+                                    if self.picus_extraction_metadata.parallel_constraints_enabled {
+                                        for (idx, constraint) in self
+                                            .picus_extraction_metadata
+                                            .parallel_constraints
+                                            .iter()
+                                            .enumerate()
+                                        {
+                                            builder.with_semantic_location(
+                                                SemanticLocation::constrain_parallel_constraint(
+                                                    idx,
+                                                ),
+                                                || constraint.emit_constrain(builder, &vars),
+                                            )?;
+                                        }
+                                    } else {
+                                        for (idx, constraint) in self.constraints.iter().enumerate()
+                                        {
+                                            builder.with_semantic_location(
+                                                SemanticLocation::constrain_constraint(idx),
+                                                || constraint.emit_constrain(builder, &vars),
+                                            )?;
+                                        }
                                     }
                                     for (idx, linked_pair) in
                                         self.linked_variables.iter().enumerate()
@@ -1790,6 +2056,12 @@ pub struct StructVars<F: FieldInfo> {
 }
 
 impl<F: FieldInfo> StructVars<F> {
+    fn member_variable_by_slot(&self, member_name: &str, index: Option<u64>) -> Option<Variable> {
+        self.member_map.iter().find_map(|(variable, binding)| {
+            (binding.name == member_name && binding.index == index).then_some(*variable)
+        })
+    }
+
     /// Creates a new [`StructVars`] instance by:
     /// - Extracting struct inputs/outputs/intermediate variables (into [`ExtractedVariable`]s) from
     ///   the provided [`CircuitOutput`] instance,
@@ -2182,6 +2454,19 @@ impl<F: FieldInfo> StructVars<F> {
         var: &Variable,
         value: Value<'ctx, 'sco>,
     ) -> Result<()> {
+        self.assign_compute_member_with_lookup(builder, self_value, var, value, |_| None)
+    }
+
+    /// Update a struct member in `@compute`, rebuilding register-valued members from a fresh
+    /// array so the write does not spuriously depend on the previous member value.
+    pub fn assign_compute_member_with_lookup<'ctx, 'sco>(
+        &self,
+        builder: &OpsBuilder<'ctx, 'sco, F>,
+        self_value: Value<'ctx, 'sco>,
+        var: &Variable,
+        value: Value<'ctx, 'sco>,
+        mut latest_value: impl FnMut(&Variable) -> Option<Value<'ctx, 'sco>>,
+    ) -> Result<()> {
         let binding = self
             .member_map
             .get(var)
@@ -2190,13 +2475,32 @@ impl<F: FieldInfo> StructVars<F> {
         match binding.index {
             None => builder.append_member_write(location, self_value, &binding.name, value),
             Some(index) => {
-                let register = builder.append_member_read_here(
-                    self_value,
-                    builder.register_type(),
-                    &binding.name,
+                let mut limbs = [None, None];
+                for limb_idx in 0..2u64 {
+                    let limb_var = self
+                        .member_variable_by_slot(&binding.name, Some(limb_idx))
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "register member {} is missing limb {limb_idx} in member map",
+                                binding.name
+                            )
+                        })?;
+                    let limb_value = if limb_idx == index {
+                        value
+                    } else if let Some(existing) = latest_value(&limb_var) {
+                        existing
+                    } else {
+                        builder.get_constant_from_start(builder.felt_type(), 0)?
+                    };
+                    limbs[limb_idx as usize] = Some(limb_value);
+                }
+                let register = builder.append_new_felt_array_from_values(
+                    location,
+                    &[
+                        limbs[0].expect("register limb 0 must be initialized"),
+                        limbs[1].expect("register limb 1 must be initialized"),
+                    ],
                 )?;
-                let indices = &[builder.get_constant_from_start(builder.index_type(), index)?];
-                builder.append_array_write(location, register, indices, value)?;
                 builder.append_member_write(location, self_value, &binding.name, register)
             }
         }
@@ -2210,10 +2514,24 @@ impl<F: FieldInfo> StructVars<F> {
         var: &Variable,
         value: Value<'ctx, 'sco>,
     ) -> Result<()> {
+        self.assign_compute_member_and_bridge_with_lookup(builder, self_value, var, value, |_| None)
+    }
+
+    /// Update a logical struct member and its compiled-column mirror, if one exists, using
+    /// already-materialized compute values to rebuild register-valued members without reading
+    /// their previous struct value.
+    pub fn assign_compute_member_and_bridge_with_lookup<'ctx, 'sco>(
+        &self,
+        builder: &OpsBuilder<'ctx, 'sco, F>,
+        self_value: Value<'ctx, 'sco>,
+        var: &Variable,
+        value: Value<'ctx, 'sco>,
+        latest_value: impl FnMut(&Variable) -> Option<Value<'ctx, 'sco>>,
+    ) -> Result<()> {
         if let Some(address) = self.compiled_member_bridge_address(var) {
             self.assign_compute_compiled_column(builder, self_value, address, value)?;
         }
-        self.assign_compute_member(builder, self_value, var, value)
+        self.assign_compute_member_with_lookup(builder, self_value, var, value, latest_value)
     }
 
     fn compiled_member_name(&self, address: ColumnAddress) -> Result<(&str, usize)> {
@@ -2535,7 +2853,9 @@ mod tests {
     use prover::cs::constraint::Constraint;
     use prover::cs::constraint::Term;
     use prover::cs::cs::circuit::CircuitOutput;
+    use prover::cs::cs::circuit::PicusExpr;
     use prover::cs::cs::circuit::PicusExtractionMetadata;
+    use prover::cs::cs::circuit::PicusStructuredConstraint;
     use prover::cs::cs::witness_placer::graph_description::Expression;
     use prover::cs::cs::witness_placer::graph_description::FieldNodeExpression;
     use prover::cs::cs::witness_placer::graph_description::RawExpression;
@@ -2554,7 +2874,10 @@ mod tests {
     use prover::field::Mersenne31Field;
 
     use super::*;
+    use crate::config::ConstraintLoweringMode;
     use crate::config::DebugLocationStyle;
+    use crate::config::LlzkStructLayout;
+    use crate::config::UnusedVariablePolicy;
 
     fn empty_circuit_output(num_of_variables: usize) -> CircuitOutput<Mersenne31Field> {
         CircuitOutput {
@@ -2681,6 +3004,35 @@ mod tests {
 
     fn empty_witness() -> WitnessComputation<Mersenne31Field> {
         witness_with_ssa(vec![])
+    }
+
+    fn emit_bundle_ir(
+        name: &str,
+        circuit_output: CircuitOutput<Mersenne31Field>,
+        boundary_spec: Option<LlzkBoundarySpec>,
+        constraint_lowering_mode: ConstraintLoweringMode,
+    ) -> String {
+        let ctx = LlzkContext::new();
+        let module = llzk_module(Location::unknown(&ctx));
+        let env = ModuleEnv::<Mersenne31Field>::new(&ctx, &module, DebugLocationStyle::Named);
+        let bundle = CircuitBundle::new(
+            name,
+            LlzkStructLayout::ConstrainOnly,
+            constraint_lowering_mode,
+            UnusedVariablePolicy::Ignore,
+            false,
+            circuit_output,
+            empty_compiled_artifact(BTreeMap::new()),
+            boundary_spec,
+            empty_witness(),
+        )
+        .unwrap();
+        bundle.emit_llzk(&env).unwrap();
+        verify_operation_with_diags(&module.as_operation()).unwrap();
+        module
+            .as_operation()
+            .to_string_with_flags(OperationPrintingFlags::new().enable_debug_info(true, false))
+            .unwrap()
     }
 
     fn emit_compiled_constraint_ir(
@@ -3494,5 +3846,87 @@ mod tests {
         assert!(ir.contains("[%c0]"));
         assert!(!ir.contains("[%c3]"));
         assert!(ir.contains("!array.type<1 x !felt.type<\"mersenne31\">>"));
+    }
+
+    #[test]
+    fn logical_lowering_uses_parallel_constraints_when_enabled() {
+        let ordinary_var = Variable(0);
+        let parallel_var = Variable(1);
+        let mut circuit_output = empty_circuit_output(2);
+        circuit_output.constraints.push((
+            Constraint {
+                terms: vec![Term::from(ordinary_var)],
+            },
+            false,
+        ));
+        circuit_output.picus_extraction_metadata = PicusExtractionMetadata {
+            parallel_constraints_enabled: true,
+            parallel_constraints: vec![PicusStructuredConstraint::Eq {
+                lhs: PicusExpr::Variable(parallel_var),
+                rhs: PicusExpr::Constant(Mersenne31Field::ONE),
+            }],
+            ..PicusExtractionMetadata::default()
+        };
+        let boundary_spec = Some(
+            LlzkBoundarySpec::new(
+                vec![
+                    ExtractedVariable::scalar(ordinary_var),
+                    ExtractedVariable::scalar(parallel_var),
+                ],
+                Vec::new(),
+            )
+            .with_signal_vars(BTreeSet::from([ordinary_var, parallel_var])),
+        );
+
+        let ir = emit_bundle_ir(
+            "parallel_constraints_test",
+            circuit_output,
+            boundary_spec,
+            ConstraintLoweringMode::Logical,
+        );
+
+        assert!(ir.contains("llzk://constrain/parallel_constraints"));
+        assert!(!ir.contains("llzk://constrain/constraints"));
+    }
+
+    #[test]
+    fn logical_lowering_uses_ordinary_constraints_when_parallel_disabled() {
+        let ordinary_var = Variable(0);
+        let parallel_var = Variable(1);
+        let mut circuit_output = empty_circuit_output(2);
+        circuit_output.constraints.push((
+            Constraint {
+                terms: vec![Term::from(ordinary_var)],
+            },
+            false,
+        ));
+        circuit_output.picus_extraction_metadata = PicusExtractionMetadata {
+            parallel_constraints_enabled: false,
+            parallel_constraints: vec![PicusStructuredConstraint::Eq {
+                lhs: PicusExpr::Variable(parallel_var),
+                rhs: PicusExpr::Constant(Mersenne31Field::ONE),
+            }],
+            ..PicusExtractionMetadata::default()
+        };
+        let boundary_spec = Some(
+            LlzkBoundarySpec::new(
+                vec![
+                    ExtractedVariable::scalar(ordinary_var),
+                    ExtractedVariable::scalar(parallel_var),
+                ],
+                Vec::new(),
+            )
+            .with_signal_vars(BTreeSet::from([ordinary_var, parallel_var])),
+        );
+
+        let ir = emit_bundle_ir(
+            "ordinary_constraints_test",
+            circuit_output,
+            boundary_spec,
+            ConstraintLoweringMode::Logical,
+        );
+
+        assert!(!ir.contains("llzk://constrain/parallel_constraints"));
+        assert!(ir.contains("llzk://constrain/constraints"));
     }
 }
