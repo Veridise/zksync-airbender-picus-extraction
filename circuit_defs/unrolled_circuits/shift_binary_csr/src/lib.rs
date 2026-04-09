@@ -224,17 +224,34 @@ pub fn witness_eval_fn_for_gpu_tracer<'a, 'b>(
 pub fn generate_artifacts() {
     use std::io::Write;
 
-    // particular bytecode doesn't matter here - it only goes to special lookup tables in setup
-    let compiled_machine = get_circuit_for_rom_bound::<ROM_ADDRESS_SPACE_SECOND_WORD_BITS>(&[]);
+    // The concrete contents do not matter for these generated artifacts, but the
+    // circuit builders expect a ROM-sized bytecode image.
+    let bytecode = vec![0u32; common_constants::rom::ROM_WORD_SIZE];
+    let compiled_machine =
+        get_circuit_for_rom_bound::<ROM_ADDRESS_SPACE_SECOND_WORD_BITS>(&bytecode);
+    let ssa = dump_ssa_form_for_rom_bound::<ROM_ADDRESS_SPACE_SECOND_WORD_BITS>(&bytecode);
+
+    std::fs::create_dir_all("generated").unwrap();
     serialize_to_file(&compiled_machine, "generated/layout.json");
 
-    let (layout, quotient) = verifier_generator::generate_for_description(compiled_machine);
+    let (layout, quotient) = verifier_generator::generate_for_description(compiled_machine.clone());
 
     let mut dst = std::fs::File::create("generated/circuit_layout.rs").unwrap();
     dst.write_all(&layout.as_bytes()).unwrap();
 
     let mut dst = std::fs::File::create("generated/quotient.rs").unwrap();
     dst.write_all(&quotient.as_bytes()).unwrap();
+
+    let witness_fn =
+        witness_eval_generator::derive_from_ssa::derive_from_ssa(&ssa, &compiled_machine, false)
+            .to_string();
+    let mut dst = std::fs::File::create("generated/witness_generation_fn.rs").unwrap();
+    dst.write_all(witness_fn.as_bytes()).unwrap();
+
+    let gpu_witness_fn =
+        gpu_witness_eval_generator::Generator::generate(&ssa, &compiled_machine, false);
+    let mut dst = std::fs::File::create("generated/witness_generation_fn.cuh").unwrap();
+    dst.write_all(gpu_witness_fn.as_bytes()).unwrap();
 }
 
 #[cfg(test)]
