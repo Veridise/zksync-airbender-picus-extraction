@@ -1,22 +1,22 @@
 module attributes {llzk.lang} {
-  struct.def @lookup_test<[]> {
+  struct.def @lookup_test {
     function.def @compute(%arg0: !felt.type<"mersenne31">, %arg1: !felt.type<"mersenne31">, %arg2: !felt.type<"mersenne31">) -> !struct.type<@lookup_test<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
       %self = struct.new : <@lookup_test<[]>>
       function.return %self : !struct.type<@lookup_test<[]>>
     }
     function.def @constrain(%arg0: !struct.type<@lookup_test<[]>>, %arg1: !felt.type<"mersenne31">, %arg2: !felt.type<"mersenne31">, %arg3: !felt.type<"mersenne31">) attributes {function.allow_constraint, function.allow_non_native_field_ops} {
       %true = arith.constant true
-      %felt_const_128 = felt.const  128 <"mersenne31">
-      %felt_const_7 = felt.const  7 <"mersenne31">
-      %felt_const_1 = felt.const  1 <"mersenne31">
+      %felt_const_128 = felt.const  128 : <"mersenne31">
+      %felt_const_7 = felt.const  7 : <"mersenne31">
+      %felt_const_1 = felt.const  1 : <"mersenne31">
       %false = arith.constant false
-      %felt_const_6 = felt.const  6 <"mersenne31">
-      %felt_const_5 = felt.const  5 <"mersenne31">
-      %felt_const_4 = felt.const  4 <"mersenne31">
-      %felt_const_0 = felt.const  0 <"mersenne31">
-      %felt_const_2 = felt.const  2 <"mersenne31">
-      %felt_const_3 = felt.const  3 <"mersenne31">
-      %felt_const_8 = felt.const  8 <"mersenne31">
+      %felt_const_6 = felt.const  6 : <"mersenne31">
+      %felt_const_5 = felt.const  5 : <"mersenne31">
+      %felt_const_4 = felt.const  4 : <"mersenne31">
+      %felt_const_0 = felt.const  0 : <"mersenne31">
+      %felt_const_2 = felt.const  2 : <"mersenne31">
+      %felt_const_3 = felt.const  3 : <"mersenne31">
+      %felt_const_8 = felt.const  8 : <"mersenne31">
       %0 = felt.umod %arg1, %felt_const_8 : !felt.type<"mersenne31">, !felt.type<"mersenne31">
       %1 = felt.shr %arg1, %felt_const_3 : !felt.type<"mersenne31">, !felt.type<"mersenne31">
       %2 = felt.umod %1, %felt_const_2 : !felt.type<"mersenne31">, !felt.type<"mersenne31">
