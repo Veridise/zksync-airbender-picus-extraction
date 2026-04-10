@@ -273,6 +273,31 @@ pub fn add_lookup_constraints_for_table<'ctx, 'sco, F: FieldInfo>(
                 conditional,
             )
         }
+        TableType::QuickDecodeDecompositionCheck4x4x4 => {
+            add_quick_decode_decomposition_lookup_constraints::<F, 4, 4, 4>(
+                builder,
+                vars,
+                query,
+                row_multiplier,
+                conditional,
+            )
+        }
+        TableType::QuickDecodeDecompositionCheck7x3x6 => {
+            add_quick_decode_decomposition_lookup_constraints::<F, 7, 3, 6>(
+                builder,
+                vars,
+                query,
+                row_multiplier,
+                conditional,
+            )
+        }
+        TableType::OpTypeBitmask => add_op_type_bitmask_lookup_constraints(
+            builder,
+            vars,
+            query,
+            row_multiplier,
+            conditional,
+        ),
         TableType::ShiftImplementation => add_shift_implementation_lookup_constraints(
             builder,
             vars,
@@ -385,6 +410,8 @@ fn table_supports_zero_row_multiply_in(table: TableType) -> bool {
             | TableType::SrlWith16BitInputLow
             | TableType::SrlWith16BitInputHigh
             | TableType::Sra16BitInputSignFill
+            | TableType::QuickDecodeDecompositionCheck4x4x4
+            | TableType::QuickDecodeDecompositionCheck7x3x6
             | TableType::TruncateShiftAmount
     )
 }
@@ -1215,6 +1242,74 @@ fn add_memory_load_halfword_or_byte_lookup_constraints<'ctx, 'sco, F: FieldInfo>
     //     )),
     // ));
     Ok(())
+}
+
+/// Lower the width-only quick-decoder decomposition tables.
+///
+/// These tables do not model an interesting functional relation; they only certify that each
+/// tuple entry fits within a fixed bit width. A const-generic helper keeps the `4x4x4` and
+/// `7x3x6` cases aligned while still making the call sites explicit about the expected widths.
+fn add_quick_decode_decomposition_lookup_constraints<
+    'ctx,
+    'sco,
+    F: FieldInfo,
+    const A: usize,
+    const B: usize,
+    const C: usize,
+>(
+    builder: &OpsBuilder<'ctx, 'sco, F>,
+    vars: &StructVars<F>,
+    query: &LookupQuery<F>,
+    row_multiplier: Option<Value<'ctx, 'sco>>,
+    conditional: Option<Value<'ctx, 'sco>>,
+) -> Result<()> {
+    let [a, b, c] = lookup_inputs(builder, vars, query, row_multiplier)?;
+    builder.append_conditional_range_constraint(conditional, a, A)?;
+    builder.append_conditional_range_constraint(conditional, b, B)?;
+    builder.append_conditional_range_constraint(conditional, c, C)?;
+    Ok(())
+}
+
+/// `OpTypeBitmask` is summarized the same way as in `picus_translation`: range bounds only.
+///
+/// The exact table relation is very large. The logical backend keeps the decoder bitmask table
+/// conservative and relies on the surrounding boolean decompositions for the fine-grained logic.
+fn add_op_type_bitmask_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
+    builder: &OpsBuilder<'ctx, 'sco, F>,
+    vars: &StructVars<F>,
+    query: &LookupQuery<F>,
+    row_multiplier: Option<Value<'ctx, 'sco>>,
+    conditional: Option<Value<'ctx, 'sco>>,
+) -> Result<()> {
+    let [packed_opcode, first_chunk, second_chunk] =
+        lookup_inputs(builder, vars, query, row_multiplier)?;
+    builder.append_conditional_range_constraint(conditional, packed_opcode, 17)?;
+    builder.append_conditional_range_constraint(conditional, first_chunk, 30)?;
+    builder.append_conditional_range_constraint(conditional, second_chunk, 30)?;
+    Ok(())
+}
+
+fn lookup_inputs<'ctx, 'sco, F: FieldInfo, const N: usize>(
+    builder: &OpsBuilder<'ctx, 'sco, F>,
+    vars: &StructVars<F>,
+    query: &LookupQuery<F>,
+    row_multiplier: Option<Value<'ctx, 'sco>>,
+) -> Result<[Value<'ctx, 'sco>; N]> {
+    query
+        .row
+        .iter()
+        .map(|input| {
+            apply_row_multiplier(
+                builder,
+                row_multiplier,
+                input.emit_constrain(builder, vars)?,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?
+        .try_into()
+        .map_err(|actual: Vec<_>| {
+            anyhow::anyhow!("expected {N} lookup inputs, found {}", actual.len())
+        })
 }
 
 /// Translation for `ExtendLoadedValue`.

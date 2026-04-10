@@ -60,6 +60,7 @@ const READ_ORACLE_BOOL_EXTERN: &str = "read_oracle_bool";
 const READ_ORACLE_U8_EXTERN: &str = "read_oracle_u8";
 const READ_ORACLE_U16_EXTERN: &str = "read_oracle_u16";
 const READ_ORACLE_U32_EXTERN: &str = "read_oracle_u32";
+const READ_OP_TYPE_BITMASK_EXTERN: &str = "read_op_type_bitmask";
 
 #[derive(Clone, Copy)]
 enum ComputeRuntimeHookKind {
@@ -70,6 +71,7 @@ enum ComputeRuntimeHookKind {
     OracleU8,
     OracleU16,
     OracleU32,
+    DecoderBitmask,
     RomRead,
 }
 
@@ -84,6 +86,7 @@ impl ComputeRuntimeHookKind {
             Self::OracleU8 => "llzk://compute/runtime/oracle_u8",
             Self::OracleU16 => "llzk://compute/runtime/oracle_u16",
             Self::OracleU32 => "llzk://compute/runtime/oracle_u32",
+            Self::DecoderBitmask => "llzk://compute/runtime/decoder_bitmask",
             Self::RomRead => "llzk://compute/runtime/rom_read",
         }
     }
@@ -358,6 +361,11 @@ impl<F: FieldInfo> WitnessComputation<F> {
         maybe_declare(
             READ_ORACLE_U32_EXTERN,
             &[felt_type, felt_type, felt_type],
+            &[felt_type, felt_type],
+        )?;
+        maybe_declare(
+            READ_OP_TYPE_BITMASK_EXTERN,
+            &[felt_type],
             &[felt_type, felt_type],
         )?;
         Ok(())
@@ -2425,6 +2433,13 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             TableType::RangeCheck16WithZeroPads => {
                 self.compute_range_check_16_with_zero_pads_lookup(inputs, num_outputs)
             }
+            TableType::QuickDecodeDecompositionCheck4x4x4 => {
+                self.compute_quick_decode_decomposition_lookup(inputs, num_outputs, [4, 4, 4])
+            }
+            TableType::QuickDecodeDecompositionCheck7x3x6 => {
+                self.compute_quick_decode_decomposition_lookup(inputs, num_outputs, [7, 3, 6])
+            }
+            TableType::OpTypeBitmask => self.compute_op_type_bitmask_lookup(inputs, num_outputs),
             TableType::ShiftImplementation => {
                 self.compute_shift_implementation_lookup(inputs, num_outputs)
             }
@@ -2563,6 +2578,71 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         }
 
         Ok(vec![selected_first, selected_second])
+    }
+
+    /// The quick decoder decomposition tables only certify input bit widths.
+    fn compute_quick_decode_decomposition_lookup(
+        &self,
+        inputs: &[Value<'ctx, 'sco>],
+        num_outputs: usize,
+        _expected_widths: [u32; 3],
+    ) -> Result<Vec<Value<'ctx, 'sco>>> {
+        if inputs.len() != 3 {
+            bail!(
+                "quick decoder decomposition lookup expects 3 inputs, found {}",
+                inputs.len()
+            );
+        }
+        if num_outputs != 0 {
+            bail!(
+                "quick decoder decomposition lookup expects 0 outputs, found {}",
+                num_outputs
+            );
+        }
+        Ok(vec![])
+    }
+
+    /// Evaluate the decoder bitmask helper table exactly when witness SSA requests outputs.
+    fn compute_op_type_bitmask_lookup(
+        &self,
+        inputs: &[Value<'ctx, 'sco>],
+        num_outputs: usize,
+    ) -> Result<Vec<Value<'ctx, 'sco>>> {
+        match inputs {
+            [packed_opcode] => {
+                if num_outputs != 2 {
+                    bail!(
+                        "OpTypeBitmask expects 2 outputs in value-producing mode, found {}",
+                        num_outputs
+                    );
+                }
+
+                self.with_runtime_location(ComputeRuntimeHookKind::DecoderBitmask, || {
+                    let location = self.current_location();
+                    let felt_type = self.felt_type();
+                    let [first, second] = self.append_call::<2>(
+                        location,
+                        READ_OP_TYPE_BITMASK_EXTERN,
+                        &[*packed_opcode],
+                        &[felt_type, felt_type],
+                    )?;
+                    Ok(vec![first, second])
+                })
+            }
+            [packed_opcode, first_chunk, second_chunk] => {
+                if num_outputs != 0 {
+                    bail!(
+                        "OpTypeBitmask expects 0 outputs in row-validation mode, found {}",
+                        num_outputs
+                    );
+                }
+                Ok(vec![])
+            }
+            _ => bail!(
+                "OpTypeBitmask expects either one packed key or a width-3 row, found {} inputs",
+                inputs.len()
+            ),
+        }
     }
 
     /// Repack unpacked dynamic-lookup inputs into the single felt key expected by the

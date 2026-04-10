@@ -4,6 +4,8 @@ use crate::cs::circuit::{
     PicusStructuredConstraint as CircuitPicusStructuredConstraint, ShuffleRamMemQuery,
 };
 use crate::cs::cs_reference::BasicAssembly;
+use crate::cs::witness_placer::graph_description::RawExpression;
+use crate::cs::witness_placer::graph_description::WitnessGraphCreator;
 use crate::delegation::bigint_with_control::{
     define_u256_ops_extended_control_delegation_circuit_with_metadata, BigintDelegationPicusMetadata,
 };
@@ -1482,15 +1484,20 @@ pub fn circuit_output_to_picus_program<F: PrimeField>(
     program
 }
 
-pub fn build_optimized_decoder_circuit_output(
+/// Build the standalone optimized-decoder harness inside an arbitrary circuit builder.
+///
+/// This is factored over `CS` so the exact same harness can be instantiated in two modes:
+/// - `BasicAssembly`, which produces the finalized `CircuitOutput` used by Picus and LLZK; and
+/// - `BasicAssembly<_, WitnessGraphCreator<_>>`, which records the SSA witness graph used for
+///   LLZK `@compute` lowering.
+///
+/// Keeping the harness body in one place avoids drift between the finalized logical circuit and
+/// the witness-graph extraction path. The split wrapper functions below only add the mode-specific
+/// finishing steps (`finalize()` vs. `compute_resolution_order()` plus externally-assigned inputs).
+fn build_optimized_decoder_circuit_output_with_cs<CS: Circuit<Mersenne31Field>>(
+    cs: &mut CS,
     enable_parallel_constraints: bool,
-) -> (
-    CircuitOutput<Mersenne31Field>,
-    Register<Mersenne31Field>,
-    Variable,
-    [Variable; 8],
-) {
-    let mut cs = BasicAssembly::<Mersenne31Field>::new();
+) -> (Register<Mersenne31Field>, Variable, [Variable; 8]) {
     cs.set_picus_parallel_constraints_enabled(enable_parallel_constraints);
     cs.materialize_table(TableType::QuickDecodeDecompositionCheck4x4x4);
     cs.materialize_table(TableType::QuickDecodeDecompositionCheck7x3x6);
@@ -1503,13 +1510,13 @@ pub fn build_optimized_decoder_circuit_output(
         LookupWrapper::Dimensional3(decoder_table),
     );
 
-    let instruction = Register::new(&mut cs);
+    let instruction = Register::new(cs);
     let input = DecoderInput { instruction };
     let (splitting, _) =
         <FullIsaMachineNoExceptionHandling as Machine<Mersenne31Field>>::produce_decoder_table_stub(
         );
     let (invalid_opcode, decoder_output, _opcode_format_bits, _other_bits) =
-        OptimizedDecoder::decode::<Mersenne31Field, _>(&input, &mut cs, splitting);
+        OptimizedDecoder::decode::<Mersenne31Field, _>(&input, cs, splitting);
 
     let invalid_opcode_var = match invalid_opcode {
         Boolean::Is(var) => var,
@@ -1553,10 +1560,7 @@ pub fn build_optimized_decoder_circuit_output(
         lhs: crate::cs::circuit::picus_expr_from_constraint(&decoder_output.funct12),
         rhs: CircuitPicusExpr::Variable(funct12_var),
     });
-    let (circuit_output, _) = cs.finalize();
-
     (
-        circuit_output,
         instruction,
         invalid_opcode_var,
         [
@@ -1570,6 +1574,32 @@ pub fn build_optimized_decoder_circuit_output(
             funct12_var,
         ],
     )
+}
+
+/// Build the finalized standalone optimized-decoder circuit output plus its explicit LLZK boundary.
+///
+/// The returned tuple mirrors the standalone Picus harness:
+/// - the finalized `CircuitOutput`
+/// - the symbolic instruction register input
+/// - the invalid-opcode flag
+/// - the eight decoded scalar outputs
+///
+/// `llzk_backend` consumes this helper directly rather than re-implementing the decoder harness,
+/// which keeps the LLZK translation aligned with the Picus-facing standalone program.
+pub fn build_optimized_decoder_circuit_output(
+    enable_parallel_constraints: bool,
+) -> (
+    CircuitOutput<Mersenne31Field>,
+    Register<Mersenne31Field>,
+    Variable,
+    [Variable; 8],
+) {
+    let mut cs = BasicAssembly::<Mersenne31Field>::new();
+    let (instruction, invalid_opcode_var, outputs) =
+        build_optimized_decoder_circuit_output_with_cs(&mut cs, enable_parallel_constraints);
+    let (circuit_output, _) = cs.finalize();
+
+    (circuit_output, instruction, invalid_opcode_var, outputs)
 }
 
 pub fn build_optimized_decoder_picus_program(enable_parallel_constraints: bool) -> PicusProgram {
@@ -1600,6 +1630,43 @@ pub fn build_optimized_decoder_picus_program(enable_parallel_constraints: bool) 
     let mut program = PicusProgram::new(Mersenne31Field::CHARACTERISTICS);
     program.add_modules(&mut modules);
     program
+}
+
+/// Dump witness SSA for the standalone optimized-decoder harness.
+///
+/// The decoder input register is modeled as an external LLZK boundary input, so the witness graph
+/// must be told that those limbs are already assigned before resolution order is computed.
+/// Without that step, `WitnessGraphCreator` treats the instruction limbs as missing assignments
+/// and panics while building the SSA form.
+///
+/// This helper reuses [`build_optimized_decoder_circuit_output_with_cs`] so the SSA graph is
+/// extracted from the exact same harness that produces the finalized logical circuit.
+pub fn dump_optimized_decoder_witness_eval_form(
+) -> Vec<Vec<RawExpression<Mersenne31Field>>> {
+    let mut cs = BasicAssembly::<Mersenne31Field, WitnessGraphCreator<Mersenne31Field>>::new();
+    cs.witness_placer = Some(WitnessGraphCreator::<Mersenne31Field>::new());
+    let (instruction, _invalid_opcode_var, _outputs) =
+        build_optimized_decoder_circuit_output_with_cs(&mut cs, true);
+    let instruction_vars = instruction.0.map(|num| match num {
+        Num::Var(var) => var,
+        Num::Constant(_) => panic!("decoder instruction input must be variable-backed"),
+    });
+    cs.set_values(
+        move |placer: &mut <BasicAssembly<
+            Mersenne31Field,
+            WitnessGraphCreator<Mersenne31Field>,
+        > as Circuit<Mersenne31Field>>::WitnessPlacer| {
+            use crate::cs::witness_placer::WitnessPlacer;
+
+            for variable in instruction_vars {
+                placer.assume_assigned(variable);
+            }
+        },
+    );
+    let (_output, witness_placer) = cs.finalize();
+    let graph = witness_placer.unwrap();
+    let (_resolution_order, ssa_forms) = graph.compute_resolution_order();
+    ssa_forms
 }
 
 pub fn build_unrolled_decoder_circuit_output(

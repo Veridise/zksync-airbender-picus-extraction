@@ -1886,6 +1886,28 @@ fn build_store_op() -> Result<BuiltCircuit> {
     })
 }
 
+fn optimized_decoder_boundary_spec(
+    instruction: Register<Mersenne31Field>,
+    invalid_opcode: Variable,
+    outputs: [Variable; 8],
+) -> LlzkBoundarySpec {
+    let mut extracted_outputs = vec![scalar_output(invalid_opcode)];
+    extracted_outputs.extend(outputs.into_iter().map(scalar_output));
+    make_boundary_spec(vec![register_input(instruction)], extracted_outputs, false)
+}
+
+fn build_optimized_decoder() -> Result<BuiltCircuit> {
+    let (circuit_output, instruction, invalid_opcode, outputs) =
+        prover::cs::picus_translation::build_optimized_decoder_circuit_output(true);
+    let boundary_spec = optimized_decoder_boundary_spec(instruction, invalid_opcode, outputs);
+    let witness_ssa = prover::cs::picus_translation::dump_optimized_decoder_witness_eval_form();
+    Ok(BuiltCircuit {
+        circuit_output,
+        boundary_spec: Some(boundary_spec),
+        witness_ssa,
+    })
+}
+
 fn build_bigint_with_control_delegation() -> Result<BuiltCircuit> {
     use prover::cs::delegation::bigint_with_control::define_u256_ops_extended_control_delegation_circuit_for_translation;
 
@@ -2392,6 +2414,16 @@ pub fn store_op_recipe() -> CircuitRecipe {
             trace_len_log2: DEFAULT_TRACE_LEN_LOG2,
         },
         build: build_store_op,
+    }
+}
+
+pub fn optimized_decoder_recipe() -> CircuitRecipe {
+    CircuitRecipe {
+        name: "optimized_decoder",
+        build_kind: CircuitBuildKind::PlainCircuit {
+            trace_len_log2: DEFAULT_TRACE_LEN_LOG2,
+        },
+        build: build_optimized_decoder,
     }
 }
 

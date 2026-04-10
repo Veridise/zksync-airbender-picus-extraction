@@ -45,6 +45,7 @@ enum Circuits {
     CsrrwOp,
     LoadOp,
     StoreOp,
+    OptimizedDecoder,
     BigintWithControlDelegation,
     Blake2WithExtendedControlDelegation,
     KeccakSpecial5Delegation,
@@ -83,6 +84,7 @@ impl Circuits {
             Self::CsrrwOp => recipes::csrrw_op_recipe(),
             Self::LoadOp => recipes::load_op_recipe(),
             Self::StoreOp => recipes::store_op_recipe(),
+            Self::OptimizedDecoder => recipes::optimized_decoder_recipe(),
             Self::BigintWithControlDelegation => recipes::bigint_with_control_delegation_recipe(),
             Self::Blake2WithExtendedControlDelegation => {
                 recipes::blake2_with_extended_control_delegation_recipe()
