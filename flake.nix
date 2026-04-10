@@ -7,7 +7,7 @@
     release-helpers.follows = "llzk-lib/release-helpers";
 
     llzk-rs-pkgs = {
-      url = "github:project-llzk/llzk-rs/bot/bump-llzk-lib";
+      url = "github:project-llzk/llzk-rs/main";
       inputs = {
         nixpkgs.follows = "llzk-pkgs/nixpkgs";
         flake-utils.follows = "llzk-pkgs/flake-utils";
