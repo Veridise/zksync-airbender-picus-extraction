@@ -387,6 +387,12 @@ impl<F: FieldInfo> WitnessComputation<F> {
             )?;
         }
         let mut expr_idx = 0usize;
+        // Keep the latest materialized value for each logical variable across SSA blocks.
+        //
+        // Some witness dumps write the two limbs of one logical register in different blocks.
+        // Register-valued LLZK members are rebuilt as whole arrays, so later limb writes must be
+        // able to see earlier writes regardless of block boundaries.
+        let mut latest_var_values = HashMap::new();
         for block in &self.ssa {
             let mut lowering = ComputeLowering::new(
                 builder,
@@ -398,6 +404,7 @@ impl<F: FieldInfo> WitnessComputation<F> {
                 &self.special_csr_properties,
                 has_runtime_memory_reads,
                 block,
+                &mut latest_var_values,
             );
 
             for expr in block {
@@ -955,7 +962,20 @@ struct ComputeLowering<'a, 'ctx: 'sco, 'sco, F: FieldInfo> {
     slots: Vec<SsaSlot<'ctx, 'sco>>,
     slot_input_origins: Vec<Option<Variable>>,
     slot_u32_input_origins: Vec<Option<[Variable; 2]>>,
-    latest_var_values: HashMap<Variable, Value<'ctx, 'sco>>,
+    /// The most recently materialized felt value for each logical variable in `@compute`.
+    ///
+    /// This is not an optimization cache for common subexpressions. It is the backend's local
+    /// model of SSA-over-mutable-storage:
+    /// - witness SSA can write the same logical variable multiple times,
+    /// - LLZK struct members are mutable storage slots, and
+    /// - register-valued members are rebuilt as whole two-limb arrays on every write.
+    ///
+    /// When the low and high limbs of one logical register are written separately, the second
+    /// write must see the first limb's latest value so it can rebuild the full register. Reading
+    /// the struct member directly is not sufficient, because the write that produced the latest
+    /// value may not dominate through the emitted mutable LLZK storage shape or may live in a
+    /// different witness SSA block.
+    latest_var_values: &'a mut HashMap<Variable, Value<'ctx, 'sco>>,
 }
 
 impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> Deref for ComputeLowering<'a, 'ctx, 'sco, F> {
@@ -979,6 +999,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
         special_csr_properties: &'a Option<SpecialCsrPropertiesMetadata>,
         has_runtime_memory_reads: bool,
         block: &'a [RawExpression<F>],
+        latest_var_values: &'a mut HashMap<Variable, Value<'ctx, 'sco>>,
     ) -> Self {
         Self {
             builder,
@@ -994,7 +1015,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
             slots: Vec::new(),
             slot_input_origins: Vec::new(),
             slot_u32_input_origins: Vec::new(),
-            latest_var_values: HashMap::new(),
+            latest_var_values,
         }
     }
 
@@ -1194,6 +1215,10 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
     /// - logical struct members when present
     /// - compiled witness/memory columns in compiled mode
     /// - runtime memory-subtree storage in logical mode
+    ///
+    /// We consult `latest_var_values` first because the LLZK storage object may still contain an
+    /// older whole-register aggregate. The in-memory cache is the source of truth for the most
+    /// recent logical value during one `@compute` lowering pass.
     fn current_write_target_value(&self, variable: &Variable) -> Result<Value<'ctx, 'sco>> {
         if let Some(value) = self.latest_var_values.get(variable).copied() {
             return Ok(value);
@@ -1227,6 +1252,10 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
     /// In compiled mode, logical LLZK members that have compiled witness/memory column mappings
     /// are written through a single path so the logical/public member and its compiled-column
     /// mirror stay synchronized.
+    ///
+    /// Every successful write also updates `latest_var_values`. That cache is what lets later
+    /// writes rebuild register-valued members from the latest logical limbs instead of from a
+    /// stale struct aggregate.
     fn assign_write_targets(
         &mut self,
         variable: &Variable,

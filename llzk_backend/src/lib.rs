@@ -18,6 +18,7 @@ use std::fs::File;
 use std::fs::{self};
 use std::io::Write;
 use std::path::Path;
+use std::path::PathBuf;
 use std::slice;
 
 use crate::builder::ModuleEnv;
@@ -82,6 +83,8 @@ pub struct CircuitGenerationConfig {
     pub output: String,
     pub format: OutputFormat,
     pub emit_bytecode: bool,
+    pub dump_circuit_artifact: bool,
+    pub dump_circuit_output: bool,
     pub opt_level: OptLevel,
     pub layout: LlzkStructLayout,
     pub debug_location_style: DebugLocationStyle,
@@ -105,6 +108,9 @@ impl CircuitGenerationConfig {
         let (boundary_input_vars, boundary_output_vars) =
             boundary_spec_variables(built.boundary_spec.as_ref());
         let circuit_output = built.circuit_output;
+        if self.dump_circuit_output {
+            write_circuit_output(&circuit_output, &self.output, recipe.name)?;
+        }
         let substitutions = merge_llzk_placeholder_aliases(&circuit_output);
         let special_csr_properties = SpecialCsrPropertiesMetadata::new(&circuit_output);
 
@@ -156,6 +162,9 @@ impl CircuitGenerationConfig {
             substitutions,
             special_csr_properties,
         );
+        if self.dump_circuit_artifact {
+            write_circuit_artifact(&compiled_artifact, &self.output, recipe.name)?;
+        }
 
         let ctx = LlzkContext::new();
         let module_location = format!("llzk://layout/module/{}", recipe.name);
@@ -493,6 +502,64 @@ fn write_result<'ctx>(
     Ok(())
 }
 
+fn write_circuit_artifact(
+    artifact: &prover::cs::one_row_compiler::CompiledCircuitArtifact<Mersenne31Field>,
+    output: &str,
+    name: &str,
+) -> Result<()> {
+    if output == "-" {
+        anyhow::bail!("cannot use --dump-circuit-artifact when writing circuit output to stdout");
+    }
+
+    let outpath = artifact_output_path(output, name);
+    if let Some(parent) = outpath.parent() {
+        fs::create_dir_all(parent).map_err(anyhow::Error::from)?;
+    }
+    let file = File::create(&outpath).map_err(anyhow::Error::from)?;
+    serde_json::to_writer_pretty(file, artifact)?;
+    println!("Written successfully: {}", outpath.display());
+    Ok(())
+}
+
+fn write_circuit_output(
+    circuit_output: &CircuitOutput<Mersenne31Field>,
+    output: &str,
+    name: &str,
+) -> Result<()> {
+    if output == "-" {
+        anyhow::bail!("cannot use --dump-circuit-output when writing circuit output to stdout");
+    }
+
+    let outpath = sibling_output_path(output, name, "circuit_output.txt");
+    if let Some(parent) = outpath.parent() {
+        fs::create_dir_all(parent).map_err(anyhow::Error::from)?;
+    }
+    let mut file = File::create(&outpath).map_err(anyhow::Error::from)?;
+    write!(file, "{:#?}", circuit_output)?;
+    println!("Written successfully: {}", outpath.display());
+    Ok(())
+}
+
+fn artifact_output_path(output: &str, name: &str) -> PathBuf {
+    sibling_output_path(output, name, "compiled_circuit_artifact.json")
+}
+
+fn sibling_output_path(output: &str, name: &str, suffix: &str) -> PathBuf {
+    let file_name = format!("{name}.{suffix}");
+    match output {
+        output
+            if [".llzk", ".llzk.bc", ".mlir", ".mlir.bc", ".pcl"]
+                .into_iter()
+                .any(|suffix| output.ends_with(suffix)) =>
+        {
+            let outpath = Path::new(output);
+            let parent = outpath.parent().unwrap_or_else(|| Path::new("."));
+            parent.join(file_name)
+        }
+        output => Path::new(output).join(file_name),
+    }
+}
+
 fn run_optimizer_pipeline(
     ctx: &Context,
     module: &mut Module,
@@ -560,6 +627,38 @@ mod tests {
             read_value: [Variable(read_value[0]), Variable(read_value[1])],
             write_value: [Variable(write_value[0]), Variable(write_value[1])],
         }
+    }
+
+    #[test]
+    fn artifact_output_path_uses_directory_output() {
+        let path = artifact_output_path("llzk_backend/output", "optimized_decoder");
+        assert_eq!(
+            path,
+            Path::new("llzk_backend/output")
+                .join("optimized_decoder.compiled_circuit_artifact.json")
+        );
+    }
+
+    #[test]
+    fn artifact_output_path_uses_parent_of_explicit_output_file() {
+        let path = artifact_output_path("llzk_backend/output/add_op.llzk", "add_op");
+        assert_eq!(
+            path,
+            Path::new("llzk_backend/output").join("add_op.compiled_circuit_artifact.json")
+        );
+    }
+
+    #[test]
+    fn sibling_output_path_uses_directory_output() {
+        let path = sibling_output_path(
+            "llzk_backend/output",
+            "jump_branch_slt",
+            "circuit_output.txt",
+        );
+        assert_eq!(
+            path,
+            Path::new("llzk_backend/output").join("jump_branch_slt.circuit_output.txt")
+        );
     }
 
     #[test]

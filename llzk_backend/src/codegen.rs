@@ -1721,8 +1721,22 @@ impl<F: FieldInfo> CircuitBundle<F> {
                 start_high,
                 carry,
             )?)?;
-            vars.assign_compute_member_and_bridge(builder, self_value, &end_low_var, end_low)?;
-            vars.assign_compute_member_and_bridge(builder, self_value, &end_high_var, end_high)
+            let mut latest_timestamp_values = HashMap::new();
+            vars.assign_compute_member_and_bridge_with_lookup(
+                builder,
+                self_value,
+                &end_low_var,
+                end_low,
+                |var| latest_timestamp_values.get(var).copied(),
+            )?;
+            latest_timestamp_values.insert(end_low_var, end_low);
+            vars.assign_compute_member_and_bridge_with_lookup(
+                builder,
+                self_value,
+                &end_high_var,
+                end_high,
+                |var| latest_timestamp_values.get(var).copied(),
+            )
         })
     }
 
@@ -2459,6 +2473,12 @@ impl<F: FieldInfo> StructVars<F> {
 
     /// Update a struct member in `@compute`, rebuilding register-valued members from a fresh
     /// array so the write does not spuriously depend on the previous member value.
+    ///
+    /// `latest_value` is required for register members because LLZK stores them as one aggregate
+    /// array member while witness SSA writes the two limbs independently. The helper uses the
+    /// latest sibling limb value to assemble the full `[low, high]` register on every write.
+    /// Without that logical cache, the fallback would be to re-read the struct member or insert a
+    /// zero placeholder, both of which can produce semantically wrong `@compute` output.
     pub fn assign_compute_member_with_lookup<'ctx, 'sco>(
         &self,
         builder: &OpsBuilder<'ctx, 'sco, F>,

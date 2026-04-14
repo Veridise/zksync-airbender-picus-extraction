@@ -115,6 +115,10 @@ struct GenerateArgs {
     emit_suspicious_unused: bool,
     #[arg(long, default_value_t = false)]
     emit_bytecode: bool,
+    #[arg(long, default_value_t = false)]
+    dump_circuit_artifact: bool,
+    #[arg(long, default_value_t = false)]
+    dump_circuit_output: bool,
 }
 
 impl GenerateArgs {
@@ -129,6 +133,8 @@ impl GenerateArgs {
             unused_variable_policy: self.unused_variable_policy,
             emit_suspicious_unused: self.emit_suspicious_unused,
             emit_bytecode: self.emit_bytecode,
+            dump_circuit_artifact: self.dump_circuit_artifact,
+            dump_circuit_output: self.dump_circuit_output,
         }
     }
 }
