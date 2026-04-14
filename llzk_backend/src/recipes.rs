@@ -351,15 +351,8 @@ fn boundary_input_variables<F: PrimeField>(
             if !query.is_readonly() && use_legacy_query2_input && query_index == 2 {
                 inputs.extend(query.write_value);
             }
-            if let ShuffleRamQueryType::RegisterOrRam {
-                is_register,
-                address,
-            } = query.query_type
-            {
+            if let ShuffleRamQueryType::RegisterOrRam { address, .. } = query.query_type {
                 inputs.extend(address);
-                if let Some(is_register) = is_register.get_variable() {
-                    inputs.insert(is_register);
-                }
             }
         }
     }
@@ -510,6 +503,25 @@ fn rs2_shuffle_ram_query<CS: Circuit<Mersenne31Field>>(
     let value = Register::new(cs);
     let query = form_mem_op_for_register_only(local_timestamp_in_cycle, reg_encoding, value, value);
     (value, query)
+}
+
+fn rd_shuffle_ram_query<CS: Circuit<Mersenne31Field>>(
+    cs: &mut CS,
+    reg_encoding: Num<Mersenne31Field>,
+    write_value: Register<Mersenne31Field>,
+    bytecode_is_in_rom_only: bool,
+) -> ShuffleRamMemQuery {
+    let local_timestamp_in_cycle = if bytecode_is_in_rom_only { 2 } else { 3 };
+    // Standalone load/store recipes expose shuffle-RAM IO directly through the LLZK boundary.
+    // Keep the synthetic RD prior-value slot input-backed too, otherwise witness SSA sees the
+    // same variables as both externally assigned and internally placeholder-assigned.
+    let read_value = Register::new_unchecked(cs);
+    form_mem_op_for_register_only(
+        local_timestamp_in_cycle,
+        reg_encoding,
+        read_value,
+        write_value,
+    )
 }
 
 fn add_standalone_rom_tables<CS: Circuit<Mersenne31Field>>(cs: &mut CS) {
@@ -738,6 +750,9 @@ fn build_binary_like_decoder_output<CS: Circuit<Mersenne31Field>>(
     imm: Register<Mersenne31Field>,
     funct3: Num<Mersenne31Field>,
 ) -> BasicDecodingResultWithSigns<Mersenne31Field> {
+    // Signed register decomposition uses the fixed `U16GetSignAndHighByte` lookup. Logical LLZK
+    // can tolerate an uninitialized table driver here, but the one-row compiler cannot.
+    cs.materialize_table(TableType::U16GetSignAndHighByte);
     BasicDecodingResultWithSigns {
         pc_next: Register::new_from_constant(0),
         src1: prover::cs::types::RegisterDecompositionWithSign::parse_reg(cs, rs1),
@@ -1164,6 +1179,7 @@ fn jump_harness<CS: Circuit<Mersenne31Field>, const ASSUME_TRUSTED_CODE: bool>(
 ) -> LlzkBoundarySpec {
     cs.set_picus_parallel_constraints_enabled(true);
     cs.materialize_table(TableType::JumpCleanupOffset);
+    cs.materialize_table(TableType::U16GetSignAndHighByte);
 
     let false_flag = fixed_boolean(cs, false);
     let true_flag = fixed_boolean(cs, true);
@@ -1222,6 +1238,7 @@ fn jump_harness<CS: Circuit<Mersenne31Field>, const ASSUME_TRUSTED_CODE: bool>(
 
 fn mul_harness<CS: Circuit<Mersenne31Field>>(cs: &mut CS, variant: MulVariant) -> LlzkBoundarySpec {
     cs.materialize_table(TableType::U16GetSignAndHighByte);
+    cs.materialize_table(TableType::RangeCheckSmall);
     let false_flag = fixed_boolean(cs, false);
     let true_flag = fixed_boolean(cs, true);
     let rs1 = Register::new(cs);
@@ -1312,6 +1329,7 @@ fn divrem_harness<CS: Circuit<Mersenne31Field>>(
     variant: DivRemVariant,
 ) -> LlzkBoundarySpec {
     cs.materialize_table(TableType::U16GetSignAndHighByte);
+    cs.materialize_table(TableType::RangeCheckSmall);
     let false_flag = fixed_boolean(cs, false);
     let true_flag = fixed_boolean(cs, true);
     let rs1 = Register::new(cs);
@@ -1398,6 +1416,7 @@ fn divrem_harness<CS: Circuit<Mersenne31Field>>(
 }
 
 fn csrrw_harness<CS: Circuit<Mersenne31Field>>(cs: &mut CS) -> LlzkBoundarySpec {
+    cs.materialize_table(TableType::U16GetSignAndHighByte);
     let false_flag = fixed_boolean(cs, false);
     let true_flag = fixed_boolean(cs, true);
     let rs1 = Register::new(cs);
@@ -1512,8 +1531,13 @@ fn build_load_mode_flags<CS: Circuit<Mersenne31Field>>(
 }
 
 fn load_query<CS: Circuit<Mersenne31Field>>(cs: &mut CS) -> ShuffleRamMemQuery {
+    let true_flag = fixed_boolean(cs, true);
+    let is_register = cs.add_variable_from_constraint_allow_explicit_linear(
+        prover::cs::constraint::Constraint::from(1u64)
+            - prover::cs::constraint::Term::from(true_flag.get_variable().unwrap()),
+    );
     let query_type = ShuffleRamQueryType::RegisterOrRam {
-        is_register: cs.add_boolean_variable(),
+        is_register: Boolean::Is(is_register),
         address: [cs.add_variable(), cs.add_variable()],
     };
     let read_value = [cs.add_variable(), cs.add_variable()];
@@ -1528,8 +1552,13 @@ fn load_query<CS: Circuit<Mersenne31Field>>(cs: &mut CS) -> ShuffleRamMemQuery {
 }
 
 fn store_query<CS: Circuit<Mersenne31Field>>(cs: &mut CS) -> ShuffleRamMemQuery {
+    let true_flag = fixed_boolean(cs, true);
+    let is_register = cs.add_variable_from_constraint_allow_explicit_linear(
+        prover::cs::constraint::Constraint::from(1u64)
+            - prover::cs::constraint::Term::from(true_flag.get_variable().unwrap()),
+    );
     let query_type = ShuffleRamQueryType::RegisterOrRam {
-        is_register: cs.add_boolean_variable(),
+        is_register: Boolean::Is(is_register),
         address: [cs.add_variable(), cs.add_variable()],
     };
     let read_value = [cs.add_variable(), cs.add_variable()];
@@ -1555,7 +1584,11 @@ fn store_query<CS: Circuit<Mersenne31Field>>(cs: &mut CS) -> ShuffleRamMemQuery 
 }
 
 fn load_harness<CS: Circuit<Mersenne31Field>>(cs: &mut CS) -> LlzkBoundarySpec {
-    for table in [TableType::MemoryOffsetGetBits, TableType::ExtendLoadedValue] {
+    for table in [
+        TableType::MemoryOffsetGetBits,
+        TableType::ExtendLoadedValue,
+        TableType::U16GetSignAndHighByte,
+    ] {
         cs.materialize_table(table);
     }
     add_standalone_rom_tables(cs);
@@ -1590,6 +1623,17 @@ fn load_harness<CS: Circuit<Mersenne31Field>>(cs: &mut CS) -> LlzkBoundarySpec {
         &mut opt_ctx,
     );
     let rd_outputs = materialize_rd_outputs(cs, diffs.clone());
+    // The chunked-memory one-row compiler assumes the executor-style memory-query shape:
+    // RS1 read, RS2/load read, then RD/store writeback. Standalone loads only need the first
+    // two queries semantically, so we synthesize the RD writeback query here from the explicit
+    // boundary-backed destination register index and the already-materialized RD result.
+    let rd_write_query = rd_shuffle_ram_query(
+        cs,
+        Num::Var(rs2_index),
+        Register(rd_outputs.map(Num::Var)),
+        true,
+    );
+    cs.add_shuffle_ram_query(rd_write_query);
     let next_pc_outputs = materialize_next_pc_outputs(cs, &diffs, pc_next);
     opt_ctx.enforce_all(cs);
     load_boundary_spec(
@@ -1638,6 +1682,7 @@ fn store_harness<CS: Circuit<Mersenne31Field>>(cs: &mut CS) -> LlzkBoundarySpec 
         TableType::MemoryOffsetGetBits,
         TableType::StoreByteSourceContribution,
         TableType::StoreByteExistingContribution,
+        TableType::U16GetSignAndHighByte,
     ] {
         cs.materialize_table(table);
     }

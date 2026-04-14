@@ -22,6 +22,7 @@ It currently supports:
 - executor/unrolled circuits
 - standalone non-unrolled op harnesses
 - several delegation circuits
+- bytecode emission for LLZK and PCL-MLIR outputs
 
 It does **not** own the source circuit definitions. It is a backend-only translation layer.
 
@@ -47,6 +48,7 @@ Examples:
 XDG_CACHE_HOME=/tmp/nix-cache nix develop -c cargo build -p llzk_backend
 XDG_CACHE_HOME=/tmp/nix-cache nix develop -c cargo test -p llzk_backend --lib
 XDG_CACHE_HOME=/tmp/nix-cache nix develop -c target/debug/llzk_backend gen-all-circuits --output llzk_backend/output --format llzk --debug-location-style file-line-col
+XDG_CACHE_HOME=/tmp/nix-cache nix develop -c target/debug/llzk_backend gen-circuit --output llzk_backend/output_bytecode --circuit optimized-decoder --format llzk --emit-bytecode
 ```
 
 ## High-Level Architecture
@@ -71,6 +73,7 @@ CLI entrypoint:
 `CircuitGenerationConfig`
 - top-level generation options
 - used by both `gen-circuit` and `gen-all-circuits`
+- also controls text vs bytecode emission for MLIR-based formats
 
 `CircuitRecipe`
 - one recipe per supported circuit family
@@ -118,17 +121,33 @@ Important responsibilities:
 - build and emit `CircuitBundle`
 - write output files
 
+Bytecode output:
+- `--emit-bytecode` is supported for:
+  - `--format llzk`
+  - `--format pcl-mlir`
+- it is rejected for:
+  - `--format pcl`
+- directory outputs use:
+  - `.llzk.bc`
+  - `.mlir.bc`
+
 Compiler dispatch currently works as:
 - `ExecutorPreprocessedBytecode`
   - `compile_executor_circuit_assuming_preprocessed_bytecode(...)`
 - `PlainCircuit`
   - logical mode: uses `empty_compiled_artifact(...)`
-  - compiled mode: `compile_output_for_chunked_memory_argument(...)`
+  - compiled mode:
+    - stateless plain circuits use `compile_stateless_circuit(...)`
+    - memory/shuffle-bearing plain circuits use `compile_output_for_chunked_memory_argument(...)`
 - `Delegation`
   - `compile_to_evaluate_delegations(...)`
 
-Important limitation:
-- compiled mode for many standalone plain circuits is still blocked by one-row compiler shape assumptions in the upstream compiler path
+Standalone plain-circuit compiled mode now covers the full in-scope corpus, including:
+- `optimized_decoder`
+- standalone arithmetic/binop/shift/mop/jump/mul/div recipes
+- `csrrw_op`
+- `load_op`
+- `store_op`
 
 ### `src/recipes.rs`
 
@@ -315,7 +334,9 @@ Supported logically:
 - `load_op`
 - `store_op`
 
-Compiled-mode support for standalone plain circuits is still incomplete because the upstream plain-circuit one-row compiler path assumes executor-style shuffle layout.
+Compiled-mode support for standalone plain circuits is now landed for the full in-scope set:
+- `optimized_decoder`
+- all standalone non-unrolled op recipes currently exposed by the backend
 
 ### Delegations
 
@@ -329,27 +350,28 @@ Still out of scope:
 
 ### Decoder standalone circuit
 
-Currently supported in logical mode:
+Currently supported in logical and compiled modes:
 - `optimized_decoder`
-
-Current compiled-mode status:
-- blocked by the same upstream `PlainCircuit` one-row compiler invariant that affects other standalone plain circuits
 
 ## Known Blockers
 
-### 1. Compiled mode for standalone plain circuits
+### 1. Standalone compiled path is no longer the main blocker
 
-The one-row compiler path used for `PlainCircuit` in compiled mode still expects executor-style shuffle layout.
+The standalone compiled path now works for the full in-scope plain-circuit corpus.
 
-Observed failure:
-- assertion in upstream compiler layout code
-- specifically around assumptions like:
-  - `shuffle_ram_queries.len() == 3`
-  - no extra register/indirect accesses
+Key fixes that made that work:
+- stateless plain circuits bypass the old executor-style shuffle/layout invariant
+- non-constant lookup table IDs are accepted in the stateless compiled path
+- standalone `mul` / `divrem` harnesses now materialize the fixed tables required by the compiler
+- standalone memory recipes now satisfy chunked-memory assumptions around:
+  - `3` shuffle-RAM queries
+  - variable-backed `is_register`
+  - witness-SSA boundary ownership for query values vs derived metadata
+  - empty executor-style `public_inputs`
+  - odd 16-bit range-check packing
+  - preserving public outputs from `OptimizedOut(..)` in standalone chunked-memory compilation
 
-This affects compiled support for many standalone ops.
-
-Delegations use a different compiled path and are not blocked by the same invariant.
+Delegations use a different compiled path and remain unaffected by those standalone fixes.
 
 ## Important Historical Fixes
 
@@ -558,9 +580,7 @@ This caused confusion more than once with the keccak delegation work.
 Most promising next items:
 
 1. Regenerate full logical and compiled corpora with the current backend
-2. Investigate compiled-mode support for standalone `PlainCircuit` recipes
-3. Add support for the remaining out-of-scope targets:
-   - `blake2_single_round`
+2. Keep `blake2_single_round` out of scope unless the upstream deprecation status changes
 
 Order recommendation:
 - rerun full generation
@@ -570,6 +590,6 @@ Order recommendation:
 
 As of this handoff:
 - `keccak_special5_delegation` generates in both logical and compiled modes
-- `optimized_decoder` generates in logical mode
+- `optimized_decoder` generates in both logical and compiled modes
 - standalone logical coverage is broad
-- compiled coverage is strongest for unrolled circuits and delegations
+- compiled coverage includes the full in-scope standalone plain-circuit corpus

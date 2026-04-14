@@ -113,6 +113,8 @@ struct GenerateArgs {
     unused_variable_policy: UnusedVariablePolicy,
     #[arg(long, default_value_t = false)]
     emit_suspicious_unused: bool,
+    #[arg(long, default_value_t = false)]
+    emit_bytecode: bool,
 }
 
 impl GenerateArgs {
@@ -126,6 +128,7 @@ impl GenerateArgs {
             constraint_lowering_mode: self.constraint_lowering_mode,
             unused_variable_policy: self.unused_variable_policy,
             emit_suspicious_unused: self.emit_suspicious_unused,
+            emit_bytecode: self.emit_bytecode,
         }
     }
 }

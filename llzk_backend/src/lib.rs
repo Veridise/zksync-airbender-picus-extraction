@@ -1,7 +1,10 @@
 use anyhow::Result;
 use llzk::prelude::*;
-use melior::ir::operation::OperationLike;
 use melior::ir::operation::OperationPrintingFlags;
+use mlir_sys::mlirBytecodeWriterConfigCreate;
+use mlir_sys::mlirBytecodeWriterConfigDestroy;
+use mlir_sys::mlirOperationWriteBytecodeWithConfig;
+use mlir_sys::MlirStringRef;
 use prover::cs::cs::circuit::CircuitOutput;
 use prover::cs::cs::circuit::ShuffleRamMemQuery;
 use prover::cs::cs::circuit::ShuffleRamQueryType;
@@ -10,10 +13,12 @@ use prover::cs::definitions::Variable;
 use prover::cs::one_row_compiler::OneRowCompiler;
 use prover::field::Mersenne31Field;
 use std::collections::HashMap;
+use std::ffi::c_void;
 use std::fs::File;
 use std::fs::{self};
 use std::io::Write;
 use std::path::Path;
+use std::slice;
 
 use crate::builder::ModuleEnv;
 use crate::codegen::empty_compiled_artifact;
@@ -45,11 +50,38 @@ pub mod recipes;
 mod test_helpers;
 mod witness;
 
+fn boundary_spec_variables(
+    boundary_spec: Option<&crate::codegen::LlzkBoundarySpec>,
+) -> (Vec<Variable>, Vec<Variable>) {
+    let Some(boundary_spec) = boundary_spec else {
+        return (Vec::new(), Vec::new());
+    };
+
+    let flatten = |values: &[crate::codegen::ExtractedVariable]| {
+        values
+            .iter()
+            .flat_map(|value| match value {
+                crate::codegen::ExtractedVariable::Register { low, high } => {
+                    [Some(*low), Some(*high)]
+                }
+                crate::codegen::ExtractedVariable::Scalar(variable) => [Some(*variable), None],
+            })
+            .flatten()
+            .collect::<Vec<_>>()
+    };
+
+    (
+        flatten(&boundary_spec.inputs),
+        flatten(&boundary_spec.outputs),
+    )
+}
+
 /// Shared generation options for emitting one or more circuit families.
 #[derive(Clone, Debug)]
 pub struct CircuitGenerationConfig {
     pub output: String,
     pub format: OutputFormat,
+    pub emit_bytecode: bool,
     pub opt_level: OptLevel,
     pub layout: LlzkStructLayout,
     pub debug_location_style: DebugLocationStyle,
@@ -61,7 +93,17 @@ pub struct CircuitGenerationConfig {
 impl CircuitGenerationConfig {
     /// Build, lower, and serialize one circuit family from the given recipe.
     pub fn generate_recipe(&self, recipe: CircuitRecipe) -> Result<()> {
+        if self.emit_bytecode && !self.format.supports_bytecode() {
+            anyhow::bail!(
+                "bytecode emission is only supported for '{}' and '{}', not '{}'",
+                OutputFormat::Llzk,
+                OutputFormat::PclMlir,
+                self.format
+            );
+        }
         let built = (recipe.build)()?;
+        let (boundary_input_vars, boundary_output_vars) =
+            boundary_spec_variables(built.boundary_spec.as_ref());
         let circuit_output = built.circuit_output;
         let substitutions = merge_llzk_placeholder_aliases(&circuit_output);
         let special_csr_properties = SpecialCsrPropertiesMetadata::new(&circuit_output);
@@ -82,11 +124,26 @@ impl CircuitGenerationConfig {
                         let _ = trace_len_log2;
                         empty_compiled_artifact(Default::default())
                     }
-                    ConstraintLoweringMode::Compiled => compiler
-                        .compile_output_for_chunked_memory_argument(
-                            circuit_output.clone(),
-                            trace_len_log2,
-                        ),
+                    ConstraintLoweringMode::Compiled => {
+                        if circuit_output.shuffle_ram_queries.is_empty()
+                            && circuit_output
+                                .register_and_indirect_memory_accesses
+                                .is_empty()
+                            && circuit_output.degegated_request_to_process.is_none()
+                        {
+                            compiler.compile_stateless_circuit(
+                                circuit_output.clone(),
+                                &boundary_input_vars,
+                                &boundary_output_vars,
+                                trace_len_log2,
+                            )
+                        } else {
+                            compiler.compile_output_for_chunked_memory_argument(
+                                circuit_output.clone(),
+                                trace_len_log2,
+                            )
+                        }
+                    }
                 }
             }
             CircuitBuildKind::Delegation { trace_len_log2 } => {
@@ -123,8 +180,14 @@ impl CircuitGenerationConfig {
         run_optimizer_pipeline(&ctx, &mut module, self.format, self.opt_level)?;
         verify_operation_with_diags(&module.as_operation())?;
 
-        let res = GenCircuitResult::new(self.format, &module)?;
-        write_result(&res, self.format, &self.output, recipe.name)?;
+        let res = GenCircuitResult::new(self.format, self.emit_bytecode, &module)?;
+        write_result(
+            &res,
+            self.format,
+            self.emit_bytecode,
+            &self.output,
+            recipe.name,
+        )?;
 
         Ok(())
     }
@@ -141,16 +204,26 @@ impl CircuitGenerationConfig {
 /// A wrapper for the two circuit outputs, that being MLIR formats (LLZK and PCL IR)
 /// and PCL code.
 enum GenCircuitResult<'ctx> {
-    Mlir(&'ctx Module<'ctx>),
+    Mlir {
+        module: &'ctx Module<'ctx>,
+        emit_bytecode: bool,
+    },
     Pcl(String),
 }
 
 impl<'ctx> GenCircuitResult<'ctx> {
     /// Construct a new result from the given MLIR module based on the expected
     /// output format.
-    pub fn new(format: OutputFormat, module: &'ctx Module<'ctx>) -> Result<Self> {
+    pub fn new(
+        format: OutputFormat,
+        emit_bytecode: bool,
+        module: &'ctx Module<'ctx>,
+    ) -> Result<Self> {
         Ok(match format {
-            OutputFormat::Llzk | OutputFormat::PclMlir => Self::Mlir(module),
+            OutputFormat::Llzk | OutputFormat::PclMlir => Self::Mlir {
+                module,
+                emit_bytecode,
+            },
             OutputFormat::Pcl => Self::Pcl(translate_module(module)?),
         })
     }
@@ -158,19 +231,60 @@ impl<'ctx> GenCircuitResult<'ctx> {
     /// Write the result to the given file.
     pub fn dump<F: Write>(&self, file: &mut F) -> Result<()> {
         match self {
-            GenCircuitResult::Mlir(module) => {
-                // pretty_form is not parsable by llzk-opt
-                let flags = OperationPrintingFlags::new().enable_debug_info(true, false);
-                write!(
-                    file,
-                    "{}",
-                    module.as_operation().to_string_with_flags(flags)?
-                )?
+            GenCircuitResult::Mlir {
+                module,
+                emit_bytecode,
+            } => {
+                if *emit_bytecode {
+                    write_mlir_bytecode(module, file)?;
+                } else {
+                    // pretty_form is not parsable by llzk-opt
+                    let flags = OperationPrintingFlags::new().enable_debug_info(true, false);
+                    write!(
+                        file,
+                        "{}",
+                        module.as_operation().to_string_with_flags(flags)?
+                    )?;
+                }
             }
             GenCircuitResult::Pcl(picus_program) => write!(file, "{}", picus_program)?,
         }
         Ok(())
     }
+}
+
+fn write_mlir_bytecode<'ctx, F: Write>(module: &Module<'ctx>, file: &mut F) -> Result<()> {
+    let mut buffer = Vec::<u8>::new();
+    let mut callback_data = (&mut buffer, Result::<()>::Ok(()));
+    let config = unsafe { mlirBytecodeWriterConfigCreate() };
+    let result = unsafe {
+        mlirOperationWriteBytecodeWithConfig(
+            module.as_operation().to_raw(),
+            config,
+            Some(write_bytecode_callback),
+            &mut callback_data as *mut _ as *mut c_void,
+        )
+    };
+    unsafe { mlirBytecodeWriterConfigDestroy(config) };
+    callback_data.1?;
+    if result.value != 1 {
+        anyhow::bail!("failed to write MLIR bytecode with the default writer configuration");
+    }
+    file.write_all(&buffer)?;
+    Ok(())
+}
+
+unsafe extern "C" fn write_bytecode_callback(
+    raw_string: mlir_sys::MlirStringRef,
+    data: *mut c_void,
+) {
+    let (buffer, result) = &mut *(data as *mut (&mut Vec<u8>, Result<()>));
+    if result.is_err() {
+        return;
+    }
+    let MlirStringRef { data, length } = raw_string;
+    let bytes = slice::from_raw_parts(data as *const u8, length);
+    buffer.extend_from_slice(bytes);
 }
 
 /// Merge the core circuit substitutions with the extra placeholder aliases that LLZK can derive
@@ -340,6 +454,7 @@ fn insert_scalar_alias(
 fn write_result<'ctx>(
     res: &GenCircuitResult<'ctx>,
     format: OutputFormat,
+    emit_bytecode: bool,
     output: &str,
     name: &str,
 ) -> Result<()> {
@@ -352,7 +467,7 @@ fn write_result<'ctx>(
         }
         // A file.
         output
-            if [".llzk", ".mlir", ".pcl"]
+            if [".llzk", ".llzk.bc", ".mlir", ".mlir.bc", ".pcl"]
                 .into_iter()
                 .any(|suffix| output.ends_with(suffix)) =>
         {
@@ -364,7 +479,7 @@ fn write_result<'ctx>(
         // A directory.
         output => {
             // Write to file
-            let file_name = format!("{}.{}", name, format.extension());
+            let file_name = format!("{}.{}", name, format.extension(emit_bytecode));
             let outpath = Path::new(output).join(file_name);
             // Ensure parent directories exist
             if let Some(parent) = outpath.parent() {

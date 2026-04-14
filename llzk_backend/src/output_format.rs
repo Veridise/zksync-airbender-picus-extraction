@@ -12,12 +12,19 @@ pub enum OutputFormat {
 
 impl OutputFormat {
     /// Standard file extension for the given output format.
-    pub fn extension(&self) -> &'static str {
+    pub fn extension(&self, bytecode: bool) -> &'static str {
         match self {
+            OutputFormat::Llzk if bytecode => "llzk.bc",
             OutputFormat::Llzk => "llzk",
+            OutputFormat::PclMlir if bytecode => "mlir.bc",
             OutputFormat::PclMlir => "mlir",
             OutputFormat::Pcl => "pcl",
         }
+    }
+
+    /// Whether this format supports MLIR bytecode emission.
+    pub fn supports_bytecode(&self) -> bool {
+        matches!(self, OutputFormat::Llzk | OutputFormat::PclMlir)
     }
 }
 
