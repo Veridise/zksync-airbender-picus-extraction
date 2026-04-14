@@ -2572,7 +2572,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
                 }
                 *control_with_exe
             }
-            [control_with_exe, _, _] => {
+            [_control_with_exe, _, _] => {
                 if num_outputs != 0 {
                     bail!("{table:?} expects zero outputs in row-validation mode");
                 }
@@ -2658,7 +2658,7 @@ impl<'a, 'ctx: 'sco, 'sco, F: FieldInfo> ComputeLowering<'a, 'ctx, 'sco, F> {
                     Ok(vec![first, second])
                 })
             }
-            [packed_opcode, first_chunk, second_chunk] => {
+            [_packed_opcode, _first_chunk, _second_chunk] => {
                 if num_outputs != 0 {
                     bail!(
                         "OpTypeBitmask expects 0 outputs in row-validation mode, found {}",
