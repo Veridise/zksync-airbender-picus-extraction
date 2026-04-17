@@ -4,6 +4,7 @@ use crate::builder::OpsBuilder;
 use crate::codegen::StructVars;
 use crate::constraints::EmitLlzkInConstrain as _;
 use crate::field::FieldInfo;
+use crate::keccak_tables::keccak_permutation_indices_outputs;
 use anyhow::Result;
 use llzk::dialect::bool;
 use llzk::dialect::felt;
@@ -36,6 +37,48 @@ pub fn add_lookup_constraints_for_table<'ctx, 'sco, F: FieldInfo>(
             conditional,
         ),
         TableType::U16GetSignAndHighByte => add_u16_get_sign_and_high_byte_lookup_constraints(
+            builder,
+            vars,
+            query,
+            row_multiplier,
+            conditional,
+        ),
+        TableType::U16SplitAsBytes => add_u16_split_as_bytes_lookup_constraints(
+            builder,
+            vars,
+            query,
+            row_multiplier,
+            conditional,
+        ),
+        TableType::RangeCheck9x9 => add_range_check_two_tuple_lookup_constraints::<F, 9>(
+            builder,
+            vars,
+            query,
+            row_multiplier,
+            conditional,
+        ),
+        TableType::RangeCheck10x10 => add_range_check_two_tuple_lookup_constraints::<F, 10>(
+            builder,
+            vars,
+            query,
+            row_multiplier,
+            conditional,
+        ),
+        TableType::RangeCheck11 => add_range_check_single_entry_lookup_constraints::<F, 11>(
+            builder,
+            vars,
+            query,
+            row_multiplier,
+            conditional,
+        ),
+        TableType::RangeCheck12 => add_range_check_single_entry_lookup_constraints::<F, 12>(
+            builder,
+            vars,
+            query,
+            row_multiplier,
+            conditional,
+        ),
+        TableType::RangeCheck13 => add_range_check_single_entry_lookup_constraints::<F, 13>(
             builder,
             vars,
             query,
@@ -155,6 +198,52 @@ pub fn add_lookup_constraints_for_table<'ctx, 'sco, F: FieldInfo>(
             query,
             row_multiplier,
             conditional,
+            8,
+            felt::bit_xor,
+        ),
+        TableType::Xor3 => add_bitwise_byte_lookup_constraints(
+            builder,
+            vars,
+            query,
+            row_multiplier,
+            conditional,
+            3,
+            felt::bit_xor,
+        ),
+        TableType::Xor4 => add_bitwise_byte_lookup_constraints(
+            builder,
+            vars,
+            query,
+            row_multiplier,
+            conditional,
+            4,
+            felt::bit_xor,
+        ),
+        TableType::Xor7 => add_bitwise_byte_lookup_constraints(
+            builder,
+            vars,
+            query,
+            row_multiplier,
+            conditional,
+            7,
+            felt::bit_xor,
+        ),
+        TableType::Xor9 => add_bitwise_byte_lookup_constraints(
+            builder,
+            vars,
+            query,
+            row_multiplier,
+            conditional,
+            9,
+            felt::bit_xor,
+        ),
+        TableType::Xor12 => add_bitwise_byte_lookup_constraints(
+            builder,
+            vars,
+            query,
+            row_multiplier,
+            conditional,
+            12,
             felt::bit_xor,
         ),
         TableType::Or => add_bitwise_byte_lookup_constraints(
@@ -163,6 +252,7 @@ pub fn add_lookup_constraints_for_table<'ctx, 'sco, F: FieldInfo>(
             query,
             row_multiplier,
             conditional,
+            8,
             felt::bit_or,
         ),
         TableType::And => add_bitwise_byte_lookup_constraints(
@@ -171,6 +261,7 @@ pub fn add_lookup_constraints_for_table<'ctx, 'sco, F: FieldInfo>(
             query,
             row_multiplier,
             conditional,
+            8,
             felt::bit_and,
         ),
         TableType::RangeCheck16WithZeroPads => {
@@ -182,6 +273,31 @@ pub fn add_lookup_constraints_for_table<'ctx, 'sco, F: FieldInfo>(
                 conditional,
             )
         }
+        TableType::QuickDecodeDecompositionCheck4x4x4 => {
+            add_quick_decode_decomposition_lookup_constraints::<F, 4, 4, 4>(
+                builder,
+                vars,
+                query,
+                row_multiplier,
+                conditional,
+            )
+        }
+        TableType::QuickDecodeDecompositionCheck7x3x6 => {
+            add_quick_decode_decomposition_lookup_constraints::<F, 7, 3, 6>(
+                builder,
+                vars,
+                query,
+                row_multiplier,
+                conditional,
+            )
+        }
+        TableType::OpTypeBitmask => add_op_type_bitmask_lookup_constraints(
+            builder,
+            vars,
+            query,
+            row_multiplier,
+            conditional,
+        ),
         TableType::ShiftImplementation => add_shift_implementation_lookup_constraints(
             builder,
             vars,
@@ -240,6 +356,18 @@ pub fn add_lookup_constraints_for_table<'ctx, 'sco, F: FieldInfo>(
             row_multiplier,
             conditional,
         ),
+        TableType::KeccakPermutationIndices12
+        | TableType::KeccakPermutationIndices34
+        | TableType::KeccakPermutationIndices56 => {
+            add_keccak_permutation_indices_lookup_constraints(
+                builder,
+                vars,
+                query,
+                table,
+                row_multiplier,
+                conditional,
+            )
+        }
         _ => panic!("unsupported lookup table in LLZK lookup lowering: {table:#?}"),
     }
 }
@@ -253,6 +381,12 @@ fn table_supports_zero_row_multiply_in(table: TableType) -> bool {
         table,
         TableType::RangeCheckSmall
             | TableType::U16GetSignAndHighByte
+            | TableType::U16SplitAsBytes
+            | TableType::RangeCheck9x9
+            | TableType::RangeCheck10x10
+            | TableType::RangeCheck11
+            | TableType::RangeCheck12
+            | TableType::RangeCheck13
             | TableType::MemoryOffsetGetBits
             | TableType::ExtendLoadedValue
             | TableType::StoreByteSourceContribution
@@ -260,6 +394,11 @@ fn table_supports_zero_row_multiply_in(table: TableType) -> bool {
             | TableType::MemoryLoadHalfwordOrByte
             | TableType::MemStoreClearOriginalRamValueLimb
             | TableType::Xor
+            | TableType::Xor3
+            | TableType::Xor4
+            | TableType::Xor7
+            | TableType::Xor9
+            | TableType::Xor12
             | TableType::Or
             | TableType::And
             | TableType::RangeCheck16WithZeroPads
@@ -271,6 +410,8 @@ fn table_supports_zero_row_multiply_in(table: TableType) -> bool {
             | TableType::SrlWith16BitInputLow
             | TableType::SrlWith16BitInputHigh
             | TableType::Sra16BitInputSignFill
+            | TableType::QuickDecodeDecompositionCheck4x4x4
+            | TableType::QuickDecodeDecompositionCheck7x3x6
             | TableType::TruncateShiftAmount
     )
 }
@@ -459,6 +600,89 @@ fn add_range_check_small_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
     builder.append_conditional_constrain_eq_here(conditional, zero_pad, zero)
 }
 
+/// Translation for the width-3 two-tuple range-check tables `(a, b, 0)`.
+fn add_range_check_two_tuple_lookup_constraints<'ctx, 'sco, F: FieldInfo, const WIDTH: usize>(
+    builder: &OpsBuilder<'ctx, 'sco, F>,
+    vars: &StructVars<F>,
+    query: &LookupQuery<F>,
+    row_multiplier: Option<Value<'ctx, 'sco>>,
+    conditional: Option<Value<'ctx, 'sco>>,
+) -> Result<()> {
+    let (a, b, zero_pad) = constrain_lookup_row3(builder, vars, query, row_multiplier)?;
+    let zero = builder.get_constant_from_start(builder.felt_type(), 0)?;
+
+    builder.append_conditional_range_constraint(conditional, a, WIDTH)?;
+    builder.append_conditional_range_constraint(conditional, b, WIDTH)?;
+    builder.append_conditional_constrain_eq_here(conditional, zero_pad, zero)
+}
+
+/// Translation for the width-3 single-entry range-check tables `(value, 0, 0)`.
+fn add_range_check_single_entry_lookup_constraints<'ctx, 'sco, F: FieldInfo, const WIDTH: usize>(
+    builder: &OpsBuilder<'ctx, 'sco, F>,
+    vars: &StructVars<F>,
+    query: &LookupQuery<F>,
+    row_multiplier: Option<Value<'ctx, 'sco>>,
+    conditional: Option<Value<'ctx, 'sco>>,
+) -> Result<()> {
+    let (value, zero_0, zero_1) = constrain_lookup_row3(builder, vars, query, row_multiplier)?;
+    let zero = builder.get_constant_from_start(builder.felt_type(), 0)?;
+
+    builder.append_conditional_range_constraint(conditional, value, WIDTH)?;
+    builder.append_conditional_constrain_eq_here(conditional, zero_0, zero)?;
+    builder.append_conditional_constrain_eq_here(conditional, zero_1, zero)
+}
+
+/// Translation for the `KeccakPermutationIndices{12,34,56}` tables.
+///
+/// These tables are total width-3 lookups of the form `(control_with_exe, out_i, out_j)`, where
+/// the two outputs are deterministic small constants derived from the 12-bit control key.
+fn add_keccak_permutation_indices_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
+    builder: &OpsBuilder<'ctx, 'sco, F>,
+    vars: &StructVars<F>,
+    query: &LookupQuery<F>,
+    table: TableType,
+    row_multiplier: Option<Value<'ctx, 'sco>>,
+    conditional: Option<Value<'ctx, 'sco>>,
+) -> Result<()> {
+    let (control_with_exe, out_0, out_1) =
+        constrain_lookup_row3(builder, vars, query, row_multiplier)?;
+    builder.append_conditional_range_constraint(conditional, control_with_exe, 12)?;
+
+    let (expected_0, expected_1) =
+        append_keccak_permutation_indices_expected_outputs(builder, control_with_exe, table)?;
+    let location = builder.current_location();
+    builder.append_conditional_constrain_eq(location, conditional, out_0, expected_0)?;
+    builder.append_conditional_constrain_eq(location, conditional, out_1, expected_1)
+}
+
+fn append_keccak_permutation_indices_expected_outputs<'ctx, 'sco, F: FieldInfo>(
+    builder: &OpsBuilder<'ctx, 'sco, F>,
+    control_with_exe: Value<'ctx, 'sco>,
+    table: TableType,
+) -> Result<(Value<'ctx, 'sco>, Value<'ctx, 'sco>)> {
+    let (first_0, second_0) = keccak_permutation_indices_outputs(table, 0);
+    let mut selected_first = builder.get_felt_constant_from_start(first_0)?;
+    let mut selected_second = builder.get_felt_constant_from_start(second_0)?;
+
+    for control in 1..(1u64 << 12) {
+        let (candidate_first, candidate_second) =
+            keccak_permutation_indices_outputs(table, control);
+        let is_selected = builder.append_field_eq_constant(control_with_exe, control)?;
+        selected_first = builder.append_select_value(
+            is_selected,
+            builder.get_felt_constant_from_start(candidate_first)?,
+            selected_first,
+        )?;
+        selected_second = builder.append_select_value(
+            is_selected,
+            builder.get_felt_constant_from_start(candidate_second)?,
+            selected_second,
+        )?;
+    }
+
+    Ok((selected_first, selected_second))
+}
+
 /// Translation for `U16GetSignAndHighByte`.
 ///
 /// The table row is `(value, sign_bit, high_byte)`, with `sign_bit` equal to the top bit of the
@@ -497,6 +721,32 @@ fn add_u16_get_sign_and_high_byte_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
         builder.append_op_with_result(felt::mul(location, sign_scale, sign)?)?,
     )?)?;
     builder.append_conditional_constrain_eq(location, conditional, high_byte, expected_high_byte)
+}
+
+/// Translation for `U16SplitAsBytes`.
+///
+/// The table row is `(value, low_byte, high_byte)`, with `value = low_byte + 256 * high_byte`.
+fn add_u16_split_as_bytes_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
+    builder: &OpsBuilder<'ctx, 'sco, F>,
+    vars: &StructVars<F>,
+    query: &LookupQuery<F>,
+    row_multiplier: Option<Value<'ctx, 'sco>>,
+    conditional: Option<Value<'ctx, 'sco>>,
+) -> Result<()> {
+    let (value, low_byte, high_byte) = constrain_lookup_row3(builder, vars, query, row_multiplier)?;
+    let location = builder.current_location();
+    let byte_scale = builder.get_constant_from_start(builder.felt_type(), 1 << 8)?;
+
+    builder.append_conditional_range_constraint(conditional, value, 16)?;
+    builder.append_conditional_range_constraint(conditional, low_byte, 8)?;
+    builder.append_conditional_range_constraint(conditional, high_byte, 8)?;
+
+    let reconstructed = builder.append_op_with_result(felt::add(
+        location,
+        low_byte,
+        builder.append_op_with_result(felt::mul(location, byte_scale, high_byte)?)?,
+    )?)?;
+    builder.append_conditional_constrain_eq(location, conditional, value, reconstructed)
 }
 
 /// Translation for `MemoryOffsetGetBits`.
@@ -770,6 +1020,7 @@ fn add_bitwise_byte_lookup_constraints<'ctx, 'sco, F: FieldInfo, FN>(
     query: &LookupQuery<F>,
     row_multiplier: Option<Value<'ctx, 'sco>>,
     conditional: Option<Value<'ctx, 'sco>>,
+    width: usize,
     op: FN,
 ) -> Result<()>
 where
@@ -783,9 +1034,9 @@ where
     let (lhs, rhs, out) = constrain_lookup_row3(builder, vars, query, row_multiplier)?;
     let location = builder.current_location();
 
-    builder.append_conditional_range_constraint(conditional, lhs, 8)?;
-    builder.append_conditional_range_constraint(conditional, rhs, 8)?;
-    builder.append_conditional_range_constraint(conditional, out, 8)?;
+    builder.append_conditional_range_constraint(conditional, lhs, width)?;
+    builder.append_conditional_range_constraint(conditional, rhs, width)?;
+    builder.append_conditional_range_constraint(conditional, out, width)?;
     let expected = builder.append_op_with_result(op(location, lhs, rhs)?)?;
     builder.append_conditional_constrain_eq(location, conditional, out, expected)
 }
@@ -991,6 +1242,74 @@ fn add_memory_load_halfword_or_byte_lookup_constraints<'ctx, 'sco, F: FieldInfo>
     //     )),
     // ));
     Ok(())
+}
+
+/// Lower the width-only quick-decoder decomposition tables.
+///
+/// These tables do not model an interesting functional relation; they only certify that each
+/// tuple entry fits within a fixed bit width. A const-generic helper keeps the `4x4x4` and
+/// `7x3x6` cases aligned while still making the call sites explicit about the expected widths.
+fn add_quick_decode_decomposition_lookup_constraints<
+    'ctx,
+    'sco,
+    F: FieldInfo,
+    const A: usize,
+    const B: usize,
+    const C: usize,
+>(
+    builder: &OpsBuilder<'ctx, 'sco, F>,
+    vars: &StructVars<F>,
+    query: &LookupQuery<F>,
+    row_multiplier: Option<Value<'ctx, 'sco>>,
+    conditional: Option<Value<'ctx, 'sco>>,
+) -> Result<()> {
+    let [a, b, c] = lookup_inputs(builder, vars, query, row_multiplier)?;
+    builder.append_conditional_range_constraint(conditional, a, A)?;
+    builder.append_conditional_range_constraint(conditional, b, B)?;
+    builder.append_conditional_range_constraint(conditional, c, C)?;
+    Ok(())
+}
+
+/// `OpTypeBitmask` is summarized the same way as in `picus_translation`: range bounds only.
+///
+/// The exact table relation is very large. The logical backend keeps the decoder bitmask table
+/// conservative and relies on the surrounding boolean decompositions for the fine-grained logic.
+fn add_op_type_bitmask_lookup_constraints<'ctx, 'sco, F: FieldInfo>(
+    builder: &OpsBuilder<'ctx, 'sco, F>,
+    vars: &StructVars<F>,
+    query: &LookupQuery<F>,
+    row_multiplier: Option<Value<'ctx, 'sco>>,
+    conditional: Option<Value<'ctx, 'sco>>,
+) -> Result<()> {
+    let [packed_opcode, first_chunk, second_chunk] =
+        lookup_inputs(builder, vars, query, row_multiplier)?;
+    builder.append_conditional_range_constraint(conditional, packed_opcode, 17)?;
+    builder.append_conditional_range_constraint(conditional, first_chunk, 30)?;
+    builder.append_conditional_range_constraint(conditional, second_chunk, 30)?;
+    Ok(())
+}
+
+fn lookup_inputs<'ctx, 'sco, F: FieldInfo, const N: usize>(
+    builder: &OpsBuilder<'ctx, 'sco, F>,
+    vars: &StructVars<F>,
+    query: &LookupQuery<F>,
+    row_multiplier: Option<Value<'ctx, 'sco>>,
+) -> Result<[Value<'ctx, 'sco>; N]> {
+    query
+        .row
+        .iter()
+        .map(|input| {
+            apply_row_multiplier(
+                builder,
+                row_multiplier,
+                input.emit_constrain(builder, vars)?,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?
+        .try_into()
+        .map_err(|actual: Vec<_>| {
+            anyhow::anyhow!("expected {N} lookup inputs, found {}", actual.len())
+        })
 }
 
 /// Translation for `ExtendLoadedValue`.
@@ -1381,6 +1700,7 @@ mod tests {
                         flag: Boolean::Is(flag),
                         row: row.map(LookupInput::from),
                         table: TableType::$table.to_num(),
+                        guard: None,
                     }],
                 };
                 let ir = emit_test_constrain_ir(

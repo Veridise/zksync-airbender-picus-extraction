@@ -3,23 +3,15 @@
     llzk-pkgs.url = "github:project-llzk/llzk-nix-pkgs";
     nixpkgs.follows = "llzk-pkgs/nixpkgs";
     flake-utils.follows = "llzk-pkgs/flake-utils";
-    llzk-lib = {
-      url = "github:project-llzk/llzk-lib";
-      inputs = {
-        nixpkgs.follows = "llzk-pkgs/nixpkgs";
-        flake-utils.follows = "llzk-pkgs/flake-utils";
-        llzk-pkgs.follows = "llzk-pkgs";
-      };
-    };
+    llzk-lib.follows = "llzk-rs-pkgs/llzk-lib";
     release-helpers.follows = "llzk-lib/release-helpers";
 
     llzk-rs-pkgs = {
-      url = "git+https://github.com/project-llzk/llzk-rs?submodules=1";
+      url = "github:project-llzk/llzk-rs/main";
       inputs = {
         nixpkgs.follows = "llzk-pkgs/nixpkgs";
         flake-utils.follows = "llzk-pkgs/flake-utils";
         llzk-pkgs.follows = "llzk-pkgs";
-        llzk-lib.follows = "llzk-lib";
       };
     };
     rust-overlay.url = "github:oxalica/rust-overlay";
@@ -91,6 +83,7 @@
                 "llzk_backend"
               ];
               preBuild = createFileCheckSymlink;
+              LLZK_SYS_10_PREFIX = "${pkgs.llzk}";
             }
             // pkgs.llzkSharedEnvironment.env
             // pkgs.llzkSharedEnvironment.pkgSettings
@@ -107,6 +100,7 @@
                 ## Bail out of pipes where any command fails
                 set -uo pipefail
                 ${createFileCheckSymlink}
+                export LLZK_SYS_10_PREFIX="${pkgs.llzk}"
                 echo "Welcome to the airbender-to-llzk devshell!"
 
                 # set up pre-commit

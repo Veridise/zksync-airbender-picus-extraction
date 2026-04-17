@@ -19,25 +19,31 @@
     "llzk-lib": {
       "inputs": {
         "flake-utils": [
+          "llzk-rs-pkgs",
           "llzk-pkgs",
           "flake-utils"
         ],
         "llzk-pkgs": [
+          "llzk-rs-pkgs",
           "llzk-pkgs"
         ],
         "nixpkgs": [
+          "llzk-rs-pkgs",
           "llzk-pkgs",
           "nixpkgs"
         ],
-        "pcl-mlir-pkg": "pcl-mlir-pkg",
+        "pcl-mlir-pkg": [
+          "llzk-rs-pkgs",
+          "pcl-mlir-pkg"
+        ],
         "release-helpers": "release-helpers"
       },
       "locked": {
-        "lastModified": 1772573302,
-        "narHash": "sha256-RWz+jPSxLD18I+LSNy5EjnbxkBQFqmeMw3AJ4kXDXEM=",
+        "lastModified": 1775836305,
+        "narHash": "sha256-2PwzKqj9vV9qZ9to6TsfLwiNJ52GEsh4EH+NLiyKxqs=",
         "owner": "project-llzk",
         "repo": "llzk-lib",
-        "rev": "6685f787a3abe0070312e061497c6db32807b013",
+        "rev": "6636d85c10791e413b8647f1023e4893df2125c8",
         "type": "github"
       },
       "original": {
@@ -71,9 +77,7 @@
           "llzk-pkgs",
           "flake-utils"
         ],
-        "llzk-lib": [
-          "llzk-lib"
-        ],
+        "llzk-lib": "llzk-lib",
         "llzk-pkgs": [
           "llzk-pkgs"
         ],
@@ -81,27 +85,27 @@
           "llzk-pkgs",
           "nixpkgs"
         ],
-        "pcl-mlir-pkg": "pcl-mlir-pkg_2",
+        "pcl-mlir-pkg": "pcl-mlir-pkg",
         "release-helpers": [
           "llzk-rs-pkgs",
           "llzk-lib",
           "release-helpers"
-        ]
+        ],
+        "rust-overlay": "rust-overlay"
       },
       "locked": {
-        "lastModified": 1773158532,
-        "narHash": "sha256-RYwwoaOMM06e9ZV2PCD6Dk9P2TpdjS4eNqmjeTIkelY=",
-        "ref": "refs/heads/main",
-        "rev": "5ece3d585b3cf2a6946f2118b108611b8525869f",
-        "revCount": 346,
-        "submodules": true,
-        "type": "git",
-        "url": "https://github.com/project-llzk/llzk-rs"
+        "lastModified": 1775836408,
+        "narHash": "sha256-M6MOvLvM8HMy6bUR9e4vo1TASh4NZOyfy+4lvL1om8A=",
+        "owner": "project-llzk",
+        "repo": "llzk-rs",
+        "rev": "29367ba75d5b14ed9fb9d712117c8829740955e9",
+        "type": "github"
       },
       "original": {
-        "submodules": true,
-        "type": "git",
-        "url": "https://github.com/project-llzk/llzk-rs"
+        "owner": "project-llzk",
+        "ref": "main",
+        "repo": "llzk-rs",
+        "type": "github"
       }
     },
     "nixpkgs": {
@@ -139,41 +143,6 @@
     "pcl-mlir-pkg": {
       "inputs": {
         "flake-utils": [
-          "llzk-lib",
-          "llzk-pkgs",
-          "flake-utils"
-        ],
-        "nixpkgs": [
-          "llzk-lib",
-          "llzk-pkgs",
-          "nixpkgs"
-        ],
-        "release-helpers": [
-          "llzk-lib",
-          "release-helpers"
-        ],
-        "shared-pkgs": [
-          "llzk-lib",
-          "llzk-pkgs"
-        ]
-      },
-      "locked": {
-        "lastModified": 1762369885,
-        "narHash": "sha256-j7aARWOa10cranctQ39cfEELMlEAeZsRrJIGKPJ5o88=",
-        "owner": "Veridise",
-        "repo": "pcl-mlir",
-        "rev": "a82620c4dabf6e51ceda66bba2abb19f7f74ac7d",
-        "type": "github"
-      },
-      "original": {
-        "owner": "Veridise",
-        "repo": "pcl-mlir",
-        "type": "github"
-      }
-    },
-    "pcl-mlir-pkg_2": {
-      "inputs": {
-        "flake-utils": [
           "llzk-rs-pkgs",
           "llzk-pkgs",
           "flake-utils"
@@ -209,22 +178,24 @@
     "release-helpers": {
       "inputs": {
         "flake-utils": [
+          "llzk-rs-pkgs",
           "llzk-lib",
           "llzk-pkgs",
           "flake-utils"
         ],
         "nixpkgs": [
+          "llzk-rs-pkgs",
           "llzk-lib",
           "llzk-pkgs",
           "nixpkgs"
         ]
       },
       "locked": {
-        "lastModified": 1747068965,
-        "narHash": "sha256-px7s7IVHnR3SiShc7FKCUiL6vfqew5AM6jnkH7qO03I=",
+        "lastModified": 1775793201,
+        "narHash": "sha256-q129kMo7c75Fgb+lMDOiYkkggoze0Z/6x7cV5uekVKg=",
         "owner": "project-llzk",
         "repo": "open-source-release-helpers",
-        "rev": "c3d1ab6082cc62b167927d074f2836f290b9e3b7",
+        "rev": "aeec44f1169dd1cedc37df750556177a937c4445",
         "type": "github"
       },
       "original": {
@@ -239,7 +210,10 @@
           "llzk-pkgs",
           "flake-utils"
         ],
-        "llzk-lib": "llzk-lib",
+        "llzk-lib": [
+          "llzk-rs-pkgs",
+          "llzk-lib"
+        ],
         "llzk-pkgs": "llzk-pkgs",
         "llzk-rs-pkgs": "llzk-rs-pkgs",
         "nixpkgs": [
@@ -250,10 +224,32 @@
           "llzk-lib",
           "release-helpers"
         ],
-        "rust-overlay": "rust-overlay"
+        "rust-overlay": "rust-overlay_2"
       }
     },
     "rust-overlay": {
+      "inputs": {
+        "nixpkgs": [
+          "llzk-rs-pkgs",
+          "llzk-pkgs",
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1773630837,
+        "narHash": "sha256-zJhgAGnbVKeBMJOb9ctZm4BGS/Rnrz+5lfSXTVah4HQ=",
+        "owner": "oxalica",
+        "repo": "rust-overlay",
+        "rev": "f600ea449c7b5bb596fa1cf21c871cc5b9e31316",
+        "type": "github"
+      },
+      "original": {
+        "owner": "oxalica",
+        "repo": "rust-overlay",
+        "type": "github"
+      }
+    },
+    "rust-overlay_2": {
       "inputs": {
         "nixpkgs": "nixpkgs_2"
       },

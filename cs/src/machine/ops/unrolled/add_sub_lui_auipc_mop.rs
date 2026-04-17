@@ -485,7 +485,32 @@ pub fn add_sub_lui_auipc_mop_circuit_with_preprocessed_bytecode<F: PrimeField, C
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{cs::cs_reference::BasicAssembly, utils::serialize_to_file};
+    use crate::{
+        cs::cs_reference::BasicAssembly,
+        definitions::{
+            ColumnAddress, CompiledDegree1Constraint, TIMESTAMP_COLUMNS_NUM_BITS, TIMESTAMP_STEP,
+        },
+        utils::serialize_to_file,
+    };
+    use field::{Field, PrimeField};
+
+    fn equal_up_to_sign(
+        lhs: &CompiledDegree1Constraint<field::Mersenne31Field>,
+        rhs: &CompiledDegree1Constraint<field::Mersenne31Field>,
+    ) -> bool {
+        if lhs == rhs {
+            return true;
+        }
+
+        let mut neg_rhs = rhs.clone();
+        for (coeff, _) in neg_rhs.linear_terms.iter_mut() {
+            coeff.negate();
+        }
+        neg_rhs.constant_term.negate();
+        neg_rhs.normalize();
+
+        lhs == &neg_rhs
+    }
 
     #[test]
     fn compile_circuit_output() {
@@ -520,5 +545,75 @@ mod test {
             &|cs| add_sub_lui_auipc_mop_circuit_with_preprocessed_bytecode(cs),
         );
         serialize_to_file(&ssa_forms, "add_sub_lui_auipc_mop_preprocessed_ssa.json");
+    }
+
+    #[test]
+    fn compiled_add_sub_lui_auipc_mop_keeps_protected_timestamp_constraints() {
+        use ::field::Mersenne31Field;
+
+        let compiled = compile_unrolled_circuit_state_transition::<Mersenne31Field>(
+            &|cs| add_sub_lui_auipc_mop_table_addition_fn(cs),
+            &|cs| add_sub_lui_auipc_mop_circuit_with_preprocessed_bytecode(cs),
+            1 << 20,
+            24,
+        );
+
+        let machine_state = compiled
+            .memory_layout
+            .machine_state_layout
+            .expect("compiled add/sub family must contain machine state layout");
+        let intermediate_state = compiled
+            .memory_layout
+            .intermediate_state_layout
+            .expect("compiled add/sub family must contain intermediate state layout");
+        let carry = compiled
+            .executor_family_circuit_next_timestamp_aux_var
+            .expect("compiled add/sub family must expose timestamp carry aux var");
+        let next_timestamp_range = machine_state.timestamp.full_range();
+        let next_timestamp = [
+            ColumnAddress::MemorySubtree(next_timestamp_range.start),
+            ColumnAddress::MemorySubtree(next_timestamp_range.start + 1),
+        ];
+        let current_timestamp_range = intermediate_state.timestamp.full_range();
+        let current_timestamp = [
+            ColumnAddress::MemorySubtree(current_timestamp_range.start),
+            ColumnAddress::MemorySubtree(current_timestamp_range.start + 1),
+        ];
+
+        let mut expected_low = CompiledDegree1Constraint {
+            linear_terms: vec![
+                (Mersenne31Field::ONE, next_timestamp[0]),
+                (Mersenne31Field::MINUS_ONE, current_timestamp[0]),
+                (
+                    Mersenne31Field::from_u64_with_reduction(1 << TIMESTAMP_COLUMNS_NUM_BITS),
+                    carry,
+                ),
+            ]
+            .into_boxed_slice(),
+            constant_term: Mersenne31Field::from_u64_with_reduction(
+                Mersenne31Field::CHARACTERISTICS - TIMESTAMP_STEP as u64,
+            ),
+        };
+        expected_low.normalize();
+
+        let mut expected_high = CompiledDegree1Constraint {
+            linear_terms: vec![
+                (Mersenne31Field::ONE, next_timestamp[1]),
+                (Mersenne31Field::MINUS_ONE, current_timestamp[1]),
+                (Mersenne31Field::MINUS_ONE, carry),
+            ]
+            .into_boxed_slice(),
+            constant_term: Mersenne31Field::ZERO,
+        };
+        expected_high.normalize();
+
+        assert!(compiled
+            .degree_1_constraints
+            .iter()
+            .any(|constraint| equal_up_to_sign(constraint, &expected_low)));
+        assert!(compiled
+            .degree_1_constraints
+            .iter()
+            .any(|constraint| equal_up_to_sign(constraint, &expected_high)));
     }
 }

@@ -1,5 +1,5 @@
 module attributes {llzk.lang} {
-  struct.def @constraint_test<[]> {
+  struct.def @constraint_test {
     struct.member @member_0 : !felt.type<"mersenne31"> {column}
     function.def @compute() -> !struct.type<@constraint_test<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
       %self = struct.new : <@constraint_test<[]>>

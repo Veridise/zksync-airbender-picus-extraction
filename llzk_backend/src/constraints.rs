@@ -9,6 +9,8 @@ use prover::cs::constraint::Term;
 use prover::cs::cs::circuit::DisjunctiveLookup;
 use prover::cs::cs::circuit::LookupQuery;
 use prover::cs::cs::circuit::LookupQueryTableType;
+use prover::cs::cs::circuit::PicusExpr;
+use prover::cs::cs::circuit::PicusStructuredConstraint;
 use prover::cs::cs::circuit::RangeCheckQuery;
 use prover::cs::definitions::LookupInput;
 use prover::cs::types::Boolean;
@@ -226,6 +228,58 @@ impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInConstrain<'ctx, 'sco, F> for Look
                             term_val?,
                         )?)
                     })
+            }
+        }
+    }
+}
+
+impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInConstrain<'ctx, 'sco, F> for PicusExpr<F> {
+    type Output = Value<'ctx, 'sco>;
+
+    fn emit_constrain(
+        &self,
+        builder: &OpsBuilder<'ctx, 'sco, F>,
+        vars: &StructVars<F>,
+    ) -> Result<Self::Output> {
+        match self {
+            PicusExpr::Variable(variable) => vars.get_constrain_val(builder, variable),
+            PicusExpr::Constant(constant) => {
+                builder.get_constant_from_start(builder.felt_type(), constant.as_u64_reduced())
+            }
+            PicusExpr::Add(lhs, rhs) => {
+                let lhs = lhs.emit_constrain(builder, vars)?;
+                let rhs = rhs.emit_constrain(builder, vars)?;
+                builder.append_op_with_result(felt::add(builder.current_location(), lhs, rhs)?)
+            }
+            PicusExpr::Sub(lhs, rhs) => {
+                let lhs = lhs.emit_constrain(builder, vars)?;
+                let rhs = rhs.emit_constrain(builder, vars)?;
+                builder.append_op_with_result(felt::sub(builder.current_location(), lhs, rhs)?)
+            }
+            PicusExpr::Mul(lhs, rhs) => {
+                let lhs = lhs.emit_constrain(builder, vars)?;
+                let rhs = rhs.emit_constrain(builder, vars)?;
+                builder.append_op_with_result(felt::mul(builder.current_location(), lhs, rhs)?)
+            }
+        }
+    }
+}
+
+impl<'ctx: 'sco, 'sco, F: FieldInfo> EmitLlzkInConstrain<'ctx, 'sco, F>
+    for PicusStructuredConstraint<F>
+{
+    type Output = ();
+
+    fn emit_constrain(
+        &self,
+        builder: &OpsBuilder<'ctx, 'sco, F>,
+        vars: &StructVars<F>,
+    ) -> Result<Self::Output> {
+        match self {
+            PicusStructuredConstraint::Eq { lhs, rhs } => {
+                let lhs = lhs.emit_constrain(builder, vars)?;
+                let rhs = rhs.emit_constrain(builder, vars)?;
+                builder.append_constrain_eq_here(lhs, rhs)
             }
         }
     }

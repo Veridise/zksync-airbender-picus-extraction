@@ -1,32 +1,39 @@
 use anyhow::Result;
 use llzk::prelude::*;
-use melior::ir::operation::OperationLike;
 use melior::ir::operation::OperationPrintingFlags;
-use prover::common_constants;
-use prover::cs::cs::circuit::Circuit as _;
+use mlir_sys::mlirBytecodeWriterConfigCreate;
+use mlir_sys::mlirBytecodeWriterConfigDestroy;
+use mlir_sys::mlirOperationWriteBytecodeWithConfig;
+use mlir_sys::MlirStringRef;
 use prover::cs::cs::circuit::CircuitOutput;
 use prover::cs::cs::circuit::ShuffleRamMemQuery;
 use prover::cs::cs::circuit::ShuffleRamQueryType;
-use prover::cs::cs::cs_reference::BasicAssembly;
 use prover::cs::cs::placeholder::Placeholder;
-use prover::cs::cs::witness_placer::graph_description::RawExpression;
 use prover::cs::definitions::Variable;
 use prover::cs::one_row_compiler::OneRowCompiler;
 use prover::field::Mersenne31Field;
 use std::collections::HashMap;
+use std::ffi::c_void;
 use std::fs::File;
 use std::fs::{self};
 use std::io::Write;
 use std::path::Path;
+use std::path::PathBuf;
+use std::slice;
 
 use crate::builder::ModuleEnv;
+use crate::codegen::empty_compiled_artifact;
 use crate::codegen::CircuitBundle;
 use crate::codegen::EmitLlzkInModule as _;
 use crate::codegen::SpecialCsrPropertiesMetadata;
+use crate::config::ConstraintLoweringMode;
 use crate::config::DebugLocationStyle;
 use crate::config::LlzkStructLayout;
 use crate::config::OptLevel;
+use crate::config::UnusedVariablePolicy;
 use crate::output_format::OutputFormat;
+use crate::recipes::CircuitBuildKind;
+pub use crate::recipes::CircuitRecipe;
 use crate::witness::WitnessComputation;
 
 use llzk::targets::pcl::translate_module;
@@ -36,302 +43,196 @@ mod codegen;
 pub mod config;
 mod constraints;
 mod field;
+mod keccak_tables;
 mod lookups;
 pub mod output_format;
+pub mod recipes;
 #[cfg(test)]
 mod test_helpers;
 mod witness;
 
-/// Generate the `add_sub_lui_auipc_mop` circuit.
-pub fn gen_add_sub_lui_auipc_mop(
-    output: &str,
-    format: OutputFormat,
-    opt_level: OptLevel,
-    layout: LlzkStructLayout,
-    debug_location_style: DebugLocationStyle,
-) -> Result<()> {
-    use add_sub_lui_auipc_mop::dump_ssa_form;
-    use add_sub_lui_auipc_mop::ROM_ADDRESS_SPACE_SECOND_WORD_BITS;
-    use add_sub_lui_auipc_mop::TRACE_LEN_LOG2;
-    use prover::cs::machine::ops::unrolled::add_sub_lui_auipc_mop::add_sub_lui_auipc_mop_circuit_with_preprocessed_bytecode;
-    use prover::cs::machine::ops::unrolled::add_sub_lui_auipc_mop::add_sub_lui_auipc_mop_table_addition_fn;
-    let bytecode_size = (1 << (16 + ROM_ADDRESS_SPACE_SECOND_WORD_BITS)) / 4;
+fn boundary_spec_variables(
+    boundary_spec: Option<&crate::codegen::LlzkBoundarySpec>,
+) -> (Vec<Variable>, Vec<Variable>) {
+    let Some(boundary_spec) = boundary_spec else {
+        return (Vec::new(), Vec::new());
+    };
 
-    generate_circuit_command(
-        "add_sub_lui_auipc_mop",
-        output,
-        format,
-        opt_level,
-        layout,
-        debug_location_style,
-        bytecode_size,
-        TRACE_LEN_LOG2 as usize,
-        |cs| {
-            add_sub_lui_auipc_mop_table_addition_fn(cs);
-            add_sub_lui_auipc_mop_circuit_with_preprocessed_bytecode(cs);
-        },
-        dump_ssa_form,
+    let flatten = |values: &[crate::codegen::ExtractedVariable]| {
+        values
+            .iter()
+            .flat_map(|value| match value {
+                crate::codegen::ExtractedVariable::Register { low, high } => {
+                    [Some(*low), Some(*high)]
+                }
+                crate::codegen::ExtractedVariable::Scalar(variable) => [Some(*variable), None],
+            })
+            .flatten()
+            .collect::<Vec<_>>()
+    };
+
+    (
+        flatten(&boundary_spec.inputs),
+        flatten(&boundary_spec.outputs),
     )
 }
 
-/// Generate the `jump_branch_slt` circuit with `SUPPORT_SIGNED=true`
-/// (all invocations appear use this configuration).
-pub fn gen_jump_branch_slt(
-    output: &str,
-    format: OutputFormat,
-    opt_level: OptLevel,
-    layout: LlzkStructLayout,
-    debug_location_style: DebugLocationStyle,
-) -> Result<()> {
-    use jump_branch_slt::dump_ssa_form;
-    use jump_branch_slt::ROM_ADDRESS_SPACE_SECOND_WORD_BITS;
-    use jump_branch_slt::TRACE_LEN_LOG2;
-    use prover::cs::machine::ops::unrolled::jump_branch_slt::jump_branch_slt_circuit_with_preprocessed_bytecode;
-    use prover::cs::machine::ops::unrolled::jump_branch_slt::jump_branch_slt_table_addition_fn;
-    let bytecode_size = (1 << (16 + ROM_ADDRESS_SPACE_SECOND_WORD_BITS)) / 4;
-
-    generate_circuit_command(
-        "jump_branch_slt",
-        output,
-        format,
-        opt_level,
-        layout,
-        debug_location_style,
-        bytecode_size,
-        TRACE_LEN_LOG2 as usize,
-        |cs| {
-            jump_branch_slt_table_addition_fn(cs);
-            jump_branch_slt_circuit_with_preprocessed_bytecode::<_, _, true>(cs);
-        },
-        dump_ssa_form,
-    )
+/// Shared generation options for emitting one or more circuit families.
+#[derive(Clone, Debug)]
+pub struct CircuitGenerationConfig {
+    pub output: String,
+    pub format: OutputFormat,
+    pub emit_bytecode: bool,
+    pub dump_circuit_artifact: bool,
+    pub dump_circuit_output: bool,
+    pub opt_level: OptLevel,
+    pub layout: LlzkStructLayout,
+    pub debug_location_style: DebugLocationStyle,
+    pub constraint_lowering_mode: ConstraintLoweringMode,
+    pub unused_variable_policy: UnusedVariablePolicy,
+    pub emit_suspicious_unused: bool,
 }
 
-/// Generate the `load_store_subword_only` circuit.
-pub fn gen_load_store_subword_only(
-    output: &str,
-    format: OutputFormat,
-    opt_level: OptLevel,
-    layout: LlzkStructLayout,
-    debug_location_style: DebugLocationStyle,
-) -> Result<()> {
-    use load_store_subword_only::dump_ssa_form;
-    use load_store_subword_only::ROM_ADDRESS_SPACE_SECOND_WORD_BITS;
-    use load_store_subword_only::TRACE_LEN_LOG2;
-    use prover::cs::machine::ops::unrolled::load_store_subword_only::subword_only_load_store_circuit_with_preprocessed_bytecode;
-    use prover::cs::machine::ops::unrolled::load_store_subword_only::subword_only_load_store_table_addition_fn;
-    let bytecode_size = (1 << (16 + ROM_ADDRESS_SPACE_SECOND_WORD_BITS)) / 4;
-
-    generate_circuit_command(
-        "load_store_subword_only",
-        output,
-        format,
-        opt_level,
-        layout,
-        debug_location_style,
-        bytecode_size,
-        TRACE_LEN_LOG2 as usize,
-        |cs| {
-            subword_only_load_store_table_addition_fn(cs);
-            // TODO: Requires real bytecode, not placeholder bytecode
-            // let extra_tables = create_load_store_special_tables::<
-            //     _,
-            //     { common_constants::ROM_SECOND_WORD_BITS },
-            // >(bytecode);
-            // for (table_type, table) in extra_tables {
-            //     cs.add_table_with_content(table_type, table);
-            // }
-            subword_only_load_store_circuit_with_preprocessed_bytecode::<
-                _,
-                _,
-                { common_constants::ROM_SECOND_WORD_BITS },
-            >(cs);
-        },
-        dump_ssa_form,
-    )
-}
-
-/// Generate the `load_store_word_only` circuit.
-pub fn gen_load_store_word_only(
-    output: &str,
-    format: OutputFormat,
-    opt_level: OptLevel,
-    layout: LlzkStructLayout,
-    debug_location_style: DebugLocationStyle,
-) -> Result<()> {
-    use load_store_word_only::dump_ssa_form;
-    use load_store_word_only::ROM_ADDRESS_SPACE_SECOND_WORD_BITS;
-    use load_store_word_only::TRACE_LEN_LOG2;
-    use prover::cs::machine::ops::unrolled::load_store_word_only::word_only_load_store_circuit_with_preprocessed_bytecode;
-    use prover::cs::machine::ops::unrolled::load_store_word_only::word_only_load_store_table_addition_fn;
-    let bytecode_size = (1 << (16 + ROM_ADDRESS_SPACE_SECOND_WORD_BITS)) / 4;
-
-    generate_circuit_command(
-        "load_store_word_only",
-        output,
-        format,
-        opt_level,
-        layout,
-        debug_location_style,
-        bytecode_size,
-        TRACE_LEN_LOG2 as usize,
-        |cs| {
-            word_only_load_store_table_addition_fn(cs);
-            // TODO: `RomRead` / `RomAddressSpaceSeparator` table contents depend on the concrete
-            // bytecode image. Do not synthesize those tables from the mock bytecode.
-            word_only_load_store_circuit_with_preprocessed_bytecode::<
-                _,
-                _,
-                { common_constants::ROM_SECOND_WORD_BITS },
-            >(cs);
-        },
-        dump_ssa_form,
-    )
-}
-
-/// Generate the signed `mul_div` circuit.
-pub fn gen_mul_div(
-    output: &str,
-    format: OutputFormat,
-    opt_level: OptLevel,
-    layout: LlzkStructLayout,
-    debug_location_style: DebugLocationStyle,
-) -> Result<()> {
-    use mul_div::dump_ssa_form;
-    use mul_div::ROM_ADDRESS_SPACE_SECOND_WORD_BITS;
-    use mul_div::TRACE_LEN_LOG2;
-    use prover::cs::machine::ops::unrolled::mul_div::mul_div_circuit_with_preprocessed_bytecode;
-    use prover::cs::machine::ops::unrolled::mul_div::mul_div_table_addition_fn;
-    let bytecode_size = (1 << (16 + ROM_ADDRESS_SPACE_SECOND_WORD_BITS)) / 4;
-
-    generate_circuit_command(
-        "mul_div",
-        output,
-        format,
-        opt_level,
-        layout,
-        debug_location_style,
-        bytecode_size,
-        TRACE_LEN_LOG2 as usize,
-        |cs| {
-            mul_div_table_addition_fn(cs);
-            // SUPPORT_SIGNED = true is the usage in the frontend
-            mul_div_circuit_with_preprocessed_bytecode::<_, _, true>(cs);
-        },
-        dump_ssa_form,
-    )
-}
-
-/// Generate the `shift_binary_csr` circuit.
-pub fn gen_shift_binary_csr(
-    output: &str,
-    format: OutputFormat,
-    opt_level: OptLevel,
-    layout: LlzkStructLayout,
-    debug_location_style: DebugLocationStyle,
-) -> Result<()> {
-    use prover::cs::machine::machine_configurations::create_csr_table_for_delegation;
-    use prover::cs::machine::ops::unrolled::shift_binary_csr::shift_binop_csrrw_circuit_with_preprocessed_bytecode;
-    use prover::cs::machine::ops::unrolled::shift_binary_csr::shift_binop_csrrw_table_addition_fn;
-    use prover::cs::tables::LookupWrapper;
-    use prover::cs::tables::TableType;
-    use shift_binary_csr::dump_ssa_form;
-    use shift_binary_csr::ALLOWED_DELEGATION_CSRS;
-    use shift_binary_csr::ROM_ADDRESS_SPACE_SECOND_WORD_BITS;
-    use shift_binary_csr::TRACE_LEN_LOG2;
-    let bytecode_size = (1 << (16 + ROM_ADDRESS_SPACE_SECOND_WORD_BITS)) / 4;
-
-    generate_circuit_command(
-        "shift_binary_csr",
-        output,
-        format,
-        opt_level,
-        layout,
-        debug_location_style,
-        bytecode_size,
-        TRACE_LEN_LOG2 as usize,
-        |cs| {
-            let csr_table = create_csr_table_for_delegation::<Mersenne31Field>(
-                true,
-                ALLOWED_DELEGATION_CSRS,
-                TableType::SpecialCSRProperties.to_table_id(),
+impl CircuitGenerationConfig {
+    /// Build, lower, and serialize one circuit family from the given recipe.
+    pub fn generate_recipe(&self, recipe: CircuitRecipe) -> Result<()> {
+        if self.emit_bytecode && !self.format.supports_bytecode() {
+            anyhow::bail!(
+                "bytecode emission is only supported for '{}' and '{}', not '{}'",
+                OutputFormat::Llzk,
+                OutputFormat::PclMlir,
+                self.format
             );
-            shift_binop_csrrw_table_addition_fn(cs);
-            cs.add_table_with_content(
-                TableType::SpecialCSRProperties,
-                LookupWrapper::Dimensional3(csr_table),
-            );
-            shift_binop_csrrw_circuit_with_preprocessed_bytecode(cs);
-        },
-        dump_ssa_form,
-    )
-}
+        }
+        let built = (recipe.build)()?;
+        let (boundary_input_vars, boundary_output_vars) =
+            boundary_spec_variables(built.boundary_spec.as_ref());
+        let circuit_output = built.circuit_output;
+        if self.dump_circuit_output {
+            write_circuit_output(&circuit_output, &self.output, recipe.name)?;
+        }
+        let substitutions = merge_llzk_placeholder_aliases(&circuit_output);
+        let special_csr_properties = SpecialCsrPropertiesMetadata::new(&circuit_output);
 
-/// Generate the `unified_reduced_machine` circuit.
-pub fn gen_unified_reduced_machine(
-    output: &str,
-    format: OutputFormat,
-    opt_level: OptLevel,
-    layout: LlzkStructLayout,
-    debug_location_style: DebugLocationStyle,
-) -> Result<()> {
-    use prover::cs::machine::machine_configurations::create_csr_table_for_delegation;
-    use prover::cs::machine::ops::unrolled::reduced_machine_ops::reduced_machine_circuit_with_preprocessed_bytecode;
-    use prover::cs::machine::ops::unrolled::reduced_machine_ops::reduced_machine_table_addition_fn;
-    use prover::cs::tables::LookupWrapper;
-    use prover::cs::tables::TableType;
-    use unified_reduced_machine::dump_ssa_form;
-    use unified_reduced_machine::ALLOWED_DELEGATION_CSRS;
-    use unified_reduced_machine::ROM_ADDRESS_SPACE_SECOND_WORD_BITS;
-    use unified_reduced_machine::TRACE_LEN_LOG2;
-    let bytecode_size = (1 << (16 + ROM_ADDRESS_SPACE_SECOND_WORD_BITS)) / 4;
+        let compiler = OneRowCompiler::<Mersenne31Field>::default();
+        let compiled_artifact = match recipe.build_kind {
+            CircuitBuildKind::ExecutorPreprocessedBytecode {
+                bytecode_size,
+                trace_len_log2,
+            } => compiler.compile_executor_circuit_assuming_preprocessed_bytecode(
+                circuit_output.clone(),
+                bytecode_size,
+                trace_len_log2,
+            ),
+            CircuitBuildKind::PlainCircuit { trace_len_log2 } => {
+                match self.constraint_lowering_mode {
+                    ConstraintLoweringMode::Logical => {
+                        let _ = trace_len_log2;
+                        empty_compiled_artifact(Default::default())
+                    }
+                    ConstraintLoweringMode::Compiled => {
+                        if circuit_output.shuffle_ram_queries.is_empty()
+                            && circuit_output
+                                .register_and_indirect_memory_accesses
+                                .is_empty()
+                            && circuit_output.degegated_request_to_process.is_none()
+                        {
+                            compiler.compile_stateless_circuit(
+                                circuit_output.clone(),
+                                &boundary_input_vars,
+                                &boundary_output_vars,
+                                trace_len_log2,
+                            )
+                        } else {
+                            compiler.compile_output_for_chunked_memory_argument(
+                                circuit_output.clone(),
+                                trace_len_log2,
+                            )
+                        }
+                    }
+                }
+            }
+            CircuitBuildKind::Delegation { trace_len_log2 } => {
+                compiler.compile_to_evaluate_delegations(circuit_output.clone(), trace_len_log2)
+            }
+        };
+        let witness = WitnessComputation::new(
+            compiled_artifact.clone(),
+            built.witness_ssa,
+            substitutions,
+            special_csr_properties,
+        );
+        if self.dump_circuit_artifact {
+            write_circuit_artifact(&compiled_artifact, &self.output, recipe.name)?;
+        }
 
-    generate_circuit_command(
-        "unified_reduced_machine",
-        output,
-        format,
-        opt_level,
-        layout,
-        debug_location_style,
-        bytecode_size,
-        TRACE_LEN_LOG2 as usize,
-        |cs| {
-            let csr_table = create_csr_table_for_delegation::<Mersenne31Field>(
-                true,
-                ALLOWED_DELEGATION_CSRS,
-                TableType::SpecialCSRProperties.to_table_id(),
-            );
-            reduced_machine_table_addition_fn(cs);
-            cs.add_table_with_content(
-                TableType::SpecialCSRProperties,
-                LookupWrapper::Dimensional3(csr_table),
-            );
-            // TODO: the reduced-machine ROM-backed setup tables depend on the actual bytecode
-            // image. Keep the family generic for now instead of materializing them from the mock
-            // bytecode used for LLZK extraction.
-            reduced_machine_circuit_with_preprocessed_bytecode::<
-                _,
-                _,
-                { common_constants::ROM_SECOND_WORD_BITS },
-            >(cs);
-        },
-        dump_ssa_form,
-    )
+        let ctx = LlzkContext::new();
+        let module_location = format!("llzk://layout/module/{}", recipe.name);
+        let mut module = llzk_module(Location::new(&ctx, &module_location, 0, 0));
+        let env: ModuleEnv<'_, Mersenne31Field> =
+            ModuleEnv::new(&ctx, &module, self.debug_location_style);
+
+        let circuit_bundle = CircuitBundle::new(
+            recipe.name,
+            self.layout,
+            self.constraint_lowering_mode,
+            self.unused_variable_policy,
+            self.emit_suspicious_unused,
+            circuit_output,
+            compiled_artifact,
+            built.boundary_spec,
+            witness,
+        )?;
+        circuit_bundle.emit_llzk(&env)?;
+
+        verify_operation_with_diags(&module.as_operation())?;
+        run_optimizer_pipeline(&ctx, &mut module, self.format, self.opt_level)?;
+        verify_operation_with_diags(&module.as_operation())?;
+
+        let res = GenCircuitResult::new(self.format, self.emit_bytecode, &module)?;
+        write_result(
+            &res,
+            self.format,
+            self.emit_bytecode,
+            &self.output,
+            recipe.name,
+        )?;
+
+        Ok(())
+    }
+
+    /// Generate several circuits using the same generation configuration.
+    pub fn generate_recipes(&self, recipes: impl IntoIterator<Item = CircuitRecipe>) -> Result<()> {
+        for recipe in recipes {
+            self.generate_recipe(recipe)?;
+        }
+        Ok(())
+    }
 }
 
 /// A wrapper for the two circuit outputs, that being MLIR formats (LLZK and PCL IR)
 /// and PCL code.
 enum GenCircuitResult<'ctx> {
-    Mlir(&'ctx Module<'ctx>),
+    Mlir {
+        module: &'ctx Module<'ctx>,
+        emit_bytecode: bool,
+    },
     Pcl(String),
 }
 
 impl<'ctx> GenCircuitResult<'ctx> {
     /// Construct a new result from the given MLIR module based on the expected
     /// output format.
-    pub fn new(format: OutputFormat, module: &'ctx Module<'ctx>) -> Result<Self> {
+    pub fn new(
+        format: OutputFormat,
+        emit_bytecode: bool,
+        module: &'ctx Module<'ctx>,
+    ) -> Result<Self> {
         Ok(match format {
-            OutputFormat::Llzk | OutputFormat::PclMlir => Self::Mlir(module),
+            OutputFormat::Llzk | OutputFormat::PclMlir => Self::Mlir {
+                module,
+                emit_bytecode,
+            },
             OutputFormat::Pcl => Self::Pcl(translate_module(module)?),
         })
     }
@@ -339,14 +240,21 @@ impl<'ctx> GenCircuitResult<'ctx> {
     /// Write the result to the given file.
     pub fn dump<F: Write>(&self, file: &mut F) -> Result<()> {
         match self {
-            GenCircuitResult::Mlir(module) => {
-                // pretty_form is not parsable by llzk-opt
-                let flags = OperationPrintingFlags::new().enable_debug_info(true, false);
-                write!(
-                    file,
-                    "{}",
-                    module.as_operation().to_string_with_flags(flags)?
-                )?
+            GenCircuitResult::Mlir {
+                module,
+                emit_bytecode,
+            } => {
+                if *emit_bytecode {
+                    write_mlir_bytecode(module, file)?;
+                } else {
+                    // pretty_form is not parsable by llzk-opt
+                    let flags = OperationPrintingFlags::new().enable_debug_info(true, false);
+                    write!(
+                        file,
+                        "{}",
+                        module.as_operation().to_string_with_flags(flags)?
+                    )?;
+                }
             }
             GenCircuitResult::Pcl(picus_program) => write!(file, "{}", picus_program)?,
         }
@@ -354,91 +262,38 @@ impl<'ctx> GenCircuitResult<'ctx> {
     }
 }
 
-/// Build, lower, and serialize one LLZK circuit family from the given synthesis
-/// and witness SSA functions.
-#[allow(clippy::too_many_arguments)]
-fn generate_circuit_command(
-    name: &str,
-    output: &str,
-    format: OutputFormat,
-    opt_level: OptLevel,
-    layout: LlzkStructLayout,
-    debug_location_style: DebugLocationStyle,
-    bytecode_size: usize,
-    trace_len_log2: usize,
-    synthesis_fn: impl Fn(&mut BasicAssembly<Mersenne31Field>),
-    witness_ssa_fn: impl FnOnce(&[u32]) -> Vec<Vec<RawExpression<Mersenne31Field>>>,
-) -> Result<()> {
-    let mut cs = BasicAssembly::<Mersenne31Field>::new();
-    // Placeholder ROM image used during LLZK extraction.
-    //
-    // The LLZK backend currently emits circuit-family IR rather than program-specific IR, so it
-    // does not receive a concrete bytecode image from the CLI. The zero-filled slice here is only
-    // for APIs that require a ROM-sized input to finish circuit construction or SSA extraction.
-    let bytecode = vec![0u32; bytecode_size];
-
-    synthesis_fn(&mut cs);
-
-    let (circuit_output, _maybe_wit_placer) = cs.finalize();
-    let substitutions = merge_llzk_placeholder_aliases(&circuit_output);
-    let special_csr_properties = SpecialCsrPropertiesMetadata::new(&circuit_output);
-
-    // From this point we intentionally build two different artifacts from the same circuit:
-    // - `compiled_artifact` is the column-layout view with constraint expressions over logical
-    //   variables used to emit LLZK constraints (i.e., by `@constrain`).
-    // - `witness_ssa_fn(&bytecode)` is the witness-evaluation program used by `@compute`. It is a
-    //   sequence of typed [`RawExpression`] blocks that describes how to derive witness values and
-    //   write them back into logical variables.
-    //
-    // We also preserve the circuit's placeholder substitution map and augment it with additional
-    // aliases. Several shuffle-RAM witness placeholders are already represented by explicit LLZK
-    // inputs/outputs via `shuffle_ram_queries`, but the core circuit code does not record them
-    // in `substitutions`.
-    let compiler = OneRowCompiler::<Mersenne31Field>::default();
-    // The compilation process here also adds constraints.
-    let compiled_artifact = compiler.compile_executor_circuit_assuming_preprocessed_bytecode(
-        circuit_output.clone(),
-        bytecode_size,
-        trace_len_log2,
-    );
-    let witness = match layout {
-        LlzkStructLayout::ComputeConstrain
-        | LlzkStructLayout::Product
-        | LlzkStructLayout::ComputeOnly => Some(WitnessComputation::new(
-            compiled_artifact.clone(),
-            witness_ssa_fn(&bytecode),
-            substitutions,
-            special_csr_properties,
-        )),
-        LlzkStructLayout::ConstrainOnly => None,
+fn write_mlir_bytecode<'ctx, F: Write>(module: &Module<'ctx>, file: &mut F) -> Result<()> {
+    let mut buffer = Vec::<u8>::new();
+    let mut callback_data = (&mut buffer, Result::<()>::Ok(()));
+    let config = unsafe { mlirBytecodeWriterConfigCreate() };
+    let result = unsafe {
+        mlirOperationWriteBytecodeWithConfig(
+            module.as_operation().to_raw(),
+            config,
+            Some(write_bytecode_callback),
+            &mut callback_data as *mut _ as *mut c_void,
+        )
     };
-
-    // Generate an empty LLZK module
-    let ctx = LlzkContext::new();
-    let module_location = format!("llzk://layout/module/{name}");
-    let mut module = llzk_module(Location::new(&ctx, &module_location, 0, 0));
-    let env: ModuleEnv<'_, Mersenne31Field> = ModuleEnv::new(&ctx, &module, debug_location_style);
-
-    // Add the circuit output to it.
-    let circuit_bundle = CircuitBundle::new(name, layout, circuit_output, witness)?;
-    circuit_bundle.emit_llzk(&env)?;
-
-    // Verify the module
-    verify_operation_with_diags(&module.as_operation())?;
-
-    // Run optimizer
-    run_optimizer_pipeline(&ctx, &mut module, format, opt_level)?;
-
-    // Verify again
-    verify_operation_with_diags(&module.as_operation())?;
-
-    // Convert to the correct output format
-    let res = GenCircuitResult::new(format, &module)?;
-
-    // Write to file
-    write_result(&res, format, output, name)?;
-
+    unsafe { mlirBytecodeWriterConfigDestroy(config) };
+    callback_data.1?;
+    if result.value != 1 {
+        anyhow::bail!("failed to write MLIR bytecode with the default writer configuration");
+    }
+    file.write_all(&buffer)?;
     Ok(())
+}
+
+unsafe extern "C" fn write_bytecode_callback(
+    raw_string: mlir_sys::MlirStringRef,
+    data: *mut c_void,
+) {
+    let (buffer, result) = &mut *(data as *mut (&mut Vec<u8>, Result<()>));
+    if result.is_err() {
+        return;
+    }
+    let MlirStringRef { data, length } = raw_string;
+    let bytes = slice::from_raw_parts(data as *const u8, length);
+    buffer.extend_from_slice(bytes);
 }
 
 /// Merge the core circuit substitutions with the extra placeholder aliases that LLZK can derive
@@ -608,6 +463,7 @@ fn insert_scalar_alias(
 fn write_result<'ctx>(
     res: &GenCircuitResult<'ctx>,
     format: OutputFormat,
+    emit_bytecode: bool,
     output: &str,
     name: &str,
 ) -> Result<()> {
@@ -620,7 +476,7 @@ fn write_result<'ctx>(
         }
         // A file.
         output
-            if [".llzk", ".mlir", ".pcl"]
+            if [".llzk", ".llzk.bc", ".mlir", ".mlir.bc", ".pcl"]
                 .into_iter()
                 .any(|suffix| output.ends_with(suffix)) =>
         {
@@ -632,7 +488,7 @@ fn write_result<'ctx>(
         // A directory.
         output => {
             // Write to file
-            let file_name = format!("{}.{}", name, format.extension());
+            let file_name = format!("{}.{}", name, format.extension(emit_bytecode));
             let outpath = Path::new(output).join(file_name);
             // Ensure parent directories exist
             if let Some(parent) = outpath.parent() {
@@ -644,6 +500,64 @@ fn write_result<'ctx>(
         }
     }
     Ok(())
+}
+
+fn write_circuit_artifact(
+    artifact: &prover::cs::one_row_compiler::CompiledCircuitArtifact<Mersenne31Field>,
+    output: &str,
+    name: &str,
+) -> Result<()> {
+    if output == "-" {
+        anyhow::bail!("cannot use --dump-circuit-artifact when writing circuit output to stdout");
+    }
+
+    let outpath = artifact_output_path(output, name);
+    if let Some(parent) = outpath.parent() {
+        fs::create_dir_all(parent).map_err(anyhow::Error::from)?;
+    }
+    let file = File::create(&outpath).map_err(anyhow::Error::from)?;
+    serde_json::to_writer_pretty(file, artifact)?;
+    println!("Written successfully: {}", outpath.display());
+    Ok(())
+}
+
+fn write_circuit_output(
+    circuit_output: &CircuitOutput<Mersenne31Field>,
+    output: &str,
+    name: &str,
+) -> Result<()> {
+    if output == "-" {
+        anyhow::bail!("cannot use --dump-circuit-output when writing circuit output to stdout");
+    }
+
+    let outpath = sibling_output_path(output, name, "circuit_output.txt");
+    if let Some(parent) = outpath.parent() {
+        fs::create_dir_all(parent).map_err(anyhow::Error::from)?;
+    }
+    let mut file = File::create(&outpath).map_err(anyhow::Error::from)?;
+    write!(file, "{:#?}", circuit_output)?;
+    println!("Written successfully: {}", outpath.display());
+    Ok(())
+}
+
+fn artifact_output_path(output: &str, name: &str) -> PathBuf {
+    sibling_output_path(output, name, "compiled_circuit_artifact.json")
+}
+
+fn sibling_output_path(output: &str, name: &str, suffix: &str) -> PathBuf {
+    let file_name = format!("{name}.{suffix}");
+    match output {
+        output
+            if [".llzk", ".llzk.bc", ".mlir", ".mlir.bc", ".pcl"]
+                .into_iter()
+                .any(|suffix| output.ends_with(suffix)) =>
+        {
+            let outpath = Path::new(output);
+            let parent = outpath.parent().unwrap_or_else(|| Path::new("."));
+            parent.join(file_name)
+        }
+        output => Path::new(output).join(file_name),
+    }
 }
 
 fn run_optimizer_pipeline(
@@ -713,6 +627,38 @@ mod tests {
             read_value: [Variable(read_value[0]), Variable(read_value[1])],
             write_value: [Variable(write_value[0]), Variable(write_value[1])],
         }
+    }
+
+    #[test]
+    fn artifact_output_path_uses_directory_output() {
+        let path = artifact_output_path("llzk_backend/output", "optimized_decoder");
+        assert_eq!(
+            path,
+            Path::new("llzk_backend/output")
+                .join("optimized_decoder.compiled_circuit_artifact.json")
+        );
+    }
+
+    #[test]
+    fn artifact_output_path_uses_parent_of_explicit_output_file() {
+        let path = artifact_output_path("llzk_backend/output/add_op.llzk", "add_op");
+        assert_eq!(
+            path,
+            Path::new("llzk_backend/output").join("add_op.compiled_circuit_artifact.json")
+        );
+    }
+
+    #[test]
+    fn sibling_output_path_uses_directory_output() {
+        let path = sibling_output_path(
+            "llzk_backend/output",
+            "jump_branch_slt",
+            "circuit_output.txt",
+        );
+        assert_eq!(
+            path,
+            Path::new("llzk_backend/output").join("jump_branch_slt.circuit_output.txt")
+        );
     }
 
     #[test]
