@@ -7,7 +7,6 @@ use prover::cs::tables::TableDriver;
 use prover::field::Field as _;
 use prover::field::Mersenne31Field;
 use prover::field::Mersenne31Quartic;
-use prover::nd_source_std::set_iterator;
 use prover::nd_source_std::ThreadLocalBasedSource;
 use prover::prover_stages::unrolled_prover::UnrolledModeProof;
 use prover::risc_v_simulator::machine_mode_only_unrolled::NonMemoryOpcodeTracingDataWithTimestamp;
@@ -19,6 +18,7 @@ use verifier_common::proof_flattener::flatten_unrolled_circuits_proof_for_skelet
 use verifier_common::DefaultLeafInclusionVerifier;
 
 use crate::rv32im::prover::accumulators::Accumulators;
+use crate::rv32im::prover::circuits::helpers::run_verifier_in_thread;
 use crate::rv32im::prover::circuits::helpers::validator_outputs;
 use crate::rv32im::prover::circuits::CircuitProver;
 use crate::rv32im::prover::circuits::NonMemoryCircuitProver;
@@ -43,11 +43,7 @@ impl AddSubLuiAuipcMop {
             oracle_data.extend(flatten_query(query));
         }
 
-        std::thread::Builder::new()
-        .name("add-sub-lui-auipc-mop-verifier".to_string())
-        .stack_size(1 << 27)
-        .spawn(move || {
-            set_iterator(oracle_data.into_iter());
+        run_verifier_in_thread("add-sub-lui-auipc-mop-verifier", oracle_data, move || {
             let (mut proof_state_dst, mut proof_input_dst) = validator_outputs();
             unsafe {
                 verify_with_configuration::<ThreadLocalBasedSource, DefaultLeafInclusionVerifier>(
@@ -56,9 +52,6 @@ impl AddSubLuiAuipcMop {
                 )
             };
         })
-        .expect("must spawn verifier thread")
-        .join()
-        .map_err(|_| ())
     }
 }
 
@@ -96,6 +89,14 @@ impl NonMemoryCircuitProver<ADD_SUB_LUI_AUIPC_MOP_CIRCUIT_FAMILY_IDX> for AddSub
         accumulators
             .permutation_argument_mut()
             .mul_assign(&proof.permutation_grand_product_accumulator);
+    }
+
+    fn validate_proof(
+        &self,
+        inputs: &ProofInputs<NonMemoryOpcodeTracingDataWithTimestamp>,
+        proof: &UnrolledModeProof,
+    ) -> Result<(), ()> {
+        AddSubLuiAuipcMop::validate_proof(inputs, proof)
     }
 }
 

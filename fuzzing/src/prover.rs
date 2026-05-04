@@ -114,7 +114,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
 
     fuzzer.initialize()?;
     if !skip_validation {
-        fuzzer.validate_seeds()?;
+        fuzzer.validate_seeds();
     }
     fuzzer.run_loop()?;
 
@@ -215,54 +215,35 @@ impl Fuzzer {
     }
 
     /// Runs each seed e2e to check that they are valid.
-    fn validate_seeds(&mut self) -> anyhow::Result<()> {
-        let m = MutatorRegistry::empty();
-        let mut failed = false;
-        let seed_cases = self.state.seed_cases();
+    fn validate_seeds(&mut self) {
+        let registry = &self.registry;
+        let seed_cases = self.state.seed_cases_mut();
+        let seed_count = seed_cases.len();
         log::info!(
-            "Validating {} seed{}",
-            seed_cases.len(),
-            if seed_cases.len() == 1 { "" } else { "s" }
+            "Validating {seed_count} seed{}",
+            if seed_count == 1 { "" } else { "s" }
         );
-        for (n, seed) in seed_cases.iter().enumerate() {
-            let mutated = m.choose(&mut self.rng).mutate(seed, &mut self.rng);
-            let outcome = self.run_one_iteration(mutated);
-            match outcome {
-                // Prover failed to generate proof from seed.
-                ExecutionOutcome::DiscardedProverCrash => {
-                    log::error!(
-                        "[{}/{}] Seed {seed} failed during proof generation",
-                        n + 1,
-                        seed_cases.len()
-                    );
-                    failed = true;
-                }
-                ExecutionOutcome::Interesting(bug_report) => match &bug_report.bug_type {
-                    // Validator failed with the given proof.
-                    BugType::ProofGenerationBug => {
-                        log::error!(
-                            "[{}/{}] Seed {seed} failed during proof validation",
-                            n + 1,
-                            seed_cases.len()
-                        );
-                        failed = true;
-                    }
-                    // All good
-                    BugType::ValidationBug => {
-                        log::info!(
-                            "[{}/{}] Seed {seed} validated successfuly",
-                            n + 1,
-                            seed_cases.len()
-                        );
-                    }
-                },
-            }
-        }
+        let mut removed_count = 0;
+        let mut n = 0;
+        seed_cases.retain(|seed| {
+            n += 1;
+            let ProverAttempt::Success(proof) = registry.prove(&seed.base_input) else {
+                log::warn!("[{n}/{seed_count}] Seed {seed} failed during proof generation",);
+                removed_count += 1;
+                return false;
+            };
+            let BugType::ValidationBug = registry.validate(&seed.base_input, &proof) else {
+                log::warn!("[{n}/{seed_count}] Seed {seed} failed during proof validation",);
+                removed_count += 1;
+                return false;
+            };
+            log::info!("[{n}/{seed_count}] Seed {seed} validated successfuly",);
+            true
+        });
 
-        if failed {
-            anyhow::bail!("Seed validation failed");
+        if removed_count > 0 {
+            log::warn!("Removed {removed_count} seeds from the set");
         }
-        Ok(())
     }
 
     /// Runs one fuzz iteration: given a mutated seed, attempt proving, and classify the result.

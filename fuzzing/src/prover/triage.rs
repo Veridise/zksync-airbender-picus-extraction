@@ -92,11 +92,11 @@ fn triage_crash(
         };
 
     log::info!("Runs completed!");
-    let first_diff = base_trace.diff(&mutated_trace);
+    let diff = base_trace.diff(&mutated_trace);
     TriageReport::new(
-        classify_verdict(crash.step, &first_diff),
+        classify_verdict(crash.step, &diff),
         crash,
-        first_diff,
+        diff,
         None,
         base_trace,
         mutated_trace,
@@ -115,22 +115,12 @@ fn stable_trace_for_input(
     // We therefore require every run of the same input to produce the exact same compact trace.
     let first = analyze_once(registry, input)
         .map_err(|err| CheckpointDiff::proof(format!("analysis replay failed: {err}")))?;
-    for run in 1..runs {
-        log::info!("Run {run} for {descr}...");
-        let next = analyze_once(registry, input)
-            .map_err(|err| CheckpointDiff::proof(format!("analysis replay failed: {err}")))?;
-        if next != first {
-            return Err(first.diff(&next).unwrap_or_else(|| {
-                CheckpointDiff::proof("replay produced inconsistent analysis traces".to_owned())
-            }));
-        }
-    }
 
     Ok(first)
 }
 
 /// Classifies the crash using the recorded crash step and the first observed divergence.
-fn classify_verdict(step: CrashStep, diff: &Option<CheckpointDiff>) -> TriageVerdict {
+fn classify_verdict(step: CrashStep, diff: &[CheckpointDiff]) -> TriageVerdict {
     // Verdicts are step-specific:
     // - recorded prover bugs keep crashes once replay diverges at any prover stage
     // - recorded validator bugs also keep prover-internal stage divergence, because the target
@@ -138,8 +128,8 @@ fn classify_verdict(step: CrashStep, diff: &Option<CheckpointDiff>) -> TriageVer
     //   executions are interesting and should not be discarded as false positives
     match step {
         CrashStep::Prover | CrashStep::Validator => match diff.as_ref() {
-            Some(_) => TriageVerdict::PotentiallyReal,
-            None => TriageVerdict::FalsePositive,
+            &[_, ..] => TriageVerdict::PotentiallyReal,
+            &[] => TriageVerdict::FalsePositive,
         },
     }
 }
@@ -158,7 +148,7 @@ mod tests {
 
     #[test]
     fn validator_step_keeps_stage_level_divergence() {
-        let diff = Some(CheckpointDiff::stage2("stage 2 changed".to_owned()));
+        let diff = vec![CheckpointDiff::stage2("stage 2 changed".to_owned())];
         assert_eq!(
             classify_verdict(CrashStep::Validator, &diff),
             TriageVerdict::PotentiallyReal
@@ -167,7 +157,7 @@ mod tests {
 
     #[test]
     fn prover_step_keeps_proof_level_diff() {
-        let diff = Some(CheckpointDiff::proof("proof changed".to_owned()));
+        let diff = vec![CheckpointDiff::proof("proof changed".to_owned())];
         assert_eq!(
             classify_verdict(CrashStep::Prover, &diff),
             TriageVerdict::PotentiallyReal

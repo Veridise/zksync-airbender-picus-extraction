@@ -50,12 +50,16 @@ riscv_transpiler = { path = "../riscv_transpiler/" }
 # risc_v_simulator = { path = "../risc_v_simulator" }
 unicorn-engine = "2.1.5"
 
+[target.'cfg(unix)'.dependencies]
+libc = {version = "0.2", optional = true }
+
 [dev-dependencies]
 rstest = "0.26"
 simplelog = {version = "0.12", features = ["test"] }
 
 [features]
-default = ["prover"]
+default = ["prover", "mute"]
 # default = []
 prover = ["prover/test"]
 prover-messages = []
+mute = ["dep:libc"]

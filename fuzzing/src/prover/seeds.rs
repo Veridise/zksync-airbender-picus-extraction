@@ -17,7 +17,10 @@ use crate::prover::circuits::CircuitRegistry;
 use crate::rv32im::binary::Binary;
 use crate::rv32im::prover::circuits::ProofInputs;
 use crate::rv32im::prover::prepare_execution;
+use crate::rv32im::prover::DEFAULT_WORKERS;
 use crate::rv32im::VM;
+use crate::utils::env_conf;
+use crate::utils::mute;
 
 #[derive(Debug)]
 pub struct SeedProgram {
@@ -147,21 +150,38 @@ impl CacheEntry {
     }
 
     fn create(program: SeedProgram, registry: &CircuitRegistry) -> io::Result<Self> {
-        let binary = program.binary()?;
-        let mut vm = VM::new(&binary);
-        vm.run();
-        let worker = Worker::new_with_num_threads(1);
-        let snapshot = vm.snapshot();
-        let prepared = prepare_execution(snapshot, &worker);
+        let Ok(result) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            log::info!("Executing seed program {}", program.name);
+            let binary = program.binary()?;
+            let vm = mute(|| {
+                let mut vm = VM::new(&binary);
+                vm.run();
+                vm
+            });
+            log::debug!("VM finished execution");
+            let worker = Worker::new_with_num_threads(env_conf("PROVER_WORKERS", DEFAULT_WORKERS));
+            let snapshot = vm.snapshot();
+            log::debug!("Collecting common circuit data");
+            let prepared = mute(|| prepare_execution(snapshot, &worker));
+            Ok(Self {
+                seed: program.name.clone(),
+                inputs: registry
+                    .circuits()
+                    .iter()
+                    .map(|kind| {
+                        log::debug!("Generating inputs for circuit {kind}");
+                        mute(|| registry.generate_inputs(*kind, snapshot, &prepared))
+                    })
+                    .collect(),
+            })
+        })) else {
+            return Err(io::Error::other(format!(
+                "Preparations for seed program {} failed",
+                program.name
+            )));
+        };
 
-        Ok(Self {
-            seed: program.name,
-            inputs: registry
-                .circuits()
-                .iter()
-                .map(|kind| registry.generate_inputs(*kind, snapshot, &prepared))
-                .collect(),
-        })
+        result
     }
 
     pub(crate) fn load(path: &Path) -> io::Result<Self> {

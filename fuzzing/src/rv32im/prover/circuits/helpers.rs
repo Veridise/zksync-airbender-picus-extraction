@@ -6,6 +6,7 @@ use prover::definitions::MerkleTreeCap;
 use prover::field::Field as _;
 use prover::field::Mersenne31Field;
 use prover::field::Mersenne31Quartic;
+use prover::nd_source_std::set_iterator;
 use verifier_common::ProofOutput;
 use verifier_common::ProofPublicInputs;
 
@@ -77,4 +78,21 @@ pub const fn validator_outputs<
             output_state_variables: [Mersenne31Field::ZERO; _],
         },
     )
+}
+
+pub fn run_verifier_in_thread(
+    thread_name: &str,
+    oracle_data: Vec<u32>,
+    verify: impl FnOnce() + Send + 'static,
+) -> Result<(), ()> {
+    std::thread::Builder::new()
+        .name(thread_name.to_owned())
+        .stack_size(1 << 27)
+        .spawn(move || {
+            set_iterator(oracle_data.into_iter());
+            verify();
+        })
+        .expect("must spawn verifier thread")
+        .join()
+        .map_err(|_| ())
 }

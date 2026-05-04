@@ -180,3 +180,13 @@ fn test_airbender<const N: usize, const M: usize>(
         Ok(run_on_airbender::<false>(binary, Some(text)))
     })
 }
+
+#[test]
+fn test_airbender_udiv_only() {
+    run_compliance_test::<Infallible>("Airbender udiv", || {
+        Ok(run_on_airbender::<false>(
+            include_bin!(M!(divu)),
+            Some(include_text!(M!(divu))),
+        ))
+    })
+}

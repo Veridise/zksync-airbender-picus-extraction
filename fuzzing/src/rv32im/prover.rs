@@ -52,7 +52,7 @@ const NUM_DELEGATION_CYCLES: usize = (1 << 20) - 1;
 const LDE_FACTOR: usize = 2;
 const TREE_CAP_SIZE: usize = 32;
 const TRACE_LEN: usize = 1 << TRACE_LEN_LOG2;
-const DEFAULT_WORKERS: usize = 1;
+pub const DEFAULT_WORKERS: usize = 1;
 
 #[derive(Clone)]
 pub(crate) struct PreparedExecution {

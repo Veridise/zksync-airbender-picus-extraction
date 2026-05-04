@@ -259,6 +259,8 @@ pub(crate) trait CircuitProver<const CIRCUIT_FAMILY_IDX: u8> {
             write_sets,
             table_driver,
         );
+        self.validate_proof(&inputs, &proof)
+            .expect("generated proof must pass verifier");
         self.check_constraints(&proof, &oracle);
         self.accumulate(accumulators, &proof);
     }
@@ -328,6 +330,12 @@ pub(crate) trait CircuitProver<const CIRCUIT_FAMILY_IDX: u8> {
 
     fn accumulate(&self, accumulators: &mut Accumulators, proof: &UnrolledModeProof);
 
+    fn validate_proof(
+        &self,
+        inputs: &ProofInputs<Self::BufferElt>,
+        proof: &UnrolledModeProof,
+    ) -> Result<(), ()>;
+
     #[allow(unused_variables)]
     fn create_aux_data<'i, 'r>(
         &self,
@@ -344,6 +352,11 @@ trait NonMemoryCircuitProver<const N: u8> {
     fn witness_eval(w: &mut SimpleWitnessProxy<NonMemoryCircuitOracle<'_>>);
     fn check_constraints(&self, proof: &UnrolledModeProof, is_empty: bool);
     fn accumulate(&self, accumulators: &mut Accumulators, proof: &UnrolledModeProof);
+    fn validate_proof(
+        &self,
+        inputs: &ProofInputs<NonMemoryOpcodeTracingDataWithTimestamp>,
+        proof: &UnrolledModeProof,
+    ) -> Result<(), ()>;
 }
 
 impl<const N: u8, T: NonMemoryCircuitProver<N>> CircuitProver<N> for T {
@@ -397,5 +410,13 @@ impl<const N: u8, T: NonMemoryCircuitProver<N>> CircuitProver<N> for T {
 
     fn accumulate(&self, accumulators: &mut Accumulators, proof: &UnrolledModeProof) {
         self.accumulate(accumulators, proof);
+    }
+
+    fn validate_proof(
+        &self,
+        inputs: &ProofInputs<Self::BufferElt>,
+        proof: &UnrolledModeProof,
+    ) -> Result<(), ()> {
+        self.validate_proof(inputs, proof)
     }
 }

@@ -37,7 +37,7 @@ pub(super) struct TriageReport {
     circuit: CircuitKind,
     recorded_step: CrashStep,
     recorded_bug_type: BugType,
-    first_relevant_diff: Option<CheckpointDiff>,
+    diff: Vec<CheckpointDiff>,
     instability: Option<CheckpointDiff>,
     mutations: Vec<String>,
     base: AnalysisTrace,
@@ -48,7 +48,7 @@ impl TriageReport {
     pub(super) fn new(
         verdict: TriageVerdict,
         crash: &CrashArtifact,
-        first_relevant_diff: Option<CheckpointDiff>,
+        diff: Vec<CheckpointDiff>,
         instability: Option<CheckpointDiff>,
         base: AnalysisTrace,
         mutated: AnalysisTrace,
@@ -59,7 +59,7 @@ impl TriageReport {
             circuit: crash.circuit,
             recorded_step: crash.step,
             recorded_bug_type: crash.bug_type,
-            first_relevant_diff,
+            diff,
             instability,
             mutations: crash
                 .mutations
@@ -83,7 +83,7 @@ impl TriageReport {
         Self::new(
             TriageVerdict::Inconclusive,
             crash,
-            None,
+            vec![],
             Some(instability),
             AnalysisTrace::empty(OracleShapeSummary::from_input(&base.base_input)),
             AnalysisTrace::empty(OracleShapeSummary::from_input(&crash.mutated_input)),
@@ -102,15 +102,15 @@ impl fmt::Display for TriageReport {
             self.recorded_step.slug()
         )?;
         writeln!(f, "Recorded bug type: {}", self.recorded_bug_type)?;
-        match &self.first_relevant_diff {
-            Some(diff) => writeln!(
-                f,
-                "First relevant diff: {} ({})",
-                diff.checkpoint(),
-                diff.detail()
-            )?,
-            None => writeln!(f, "First relevant diff: none")?,
+        if self.diff.is_empty() {
+            writeln!(f, "Diff: none")?;
+        } else {
+            writeln!(f, "Diff:")?;
+            for diff in &self.diff {
+                writeln!(f, "  - {} ({})", diff.checkpoint(), diff.detail())?;
+            }
         }
+
         if !self.mutations.is_empty() {
             writeln!(f, "Mutations: {}", self.mutations.join(", "))?;
         }

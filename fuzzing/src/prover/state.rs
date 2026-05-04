@@ -72,6 +72,10 @@ impl FuzzerState {
     pub fn seed_cases(&self) -> &[SeedCase] {
         &self.seed_cases
     }
+
+    pub fn seed_cases_mut(&mut self) -> &mut Vec<SeedCase> {
+        &mut self.seed_cases
+    }
 }
 
 fn discover_next_crash_id(crash_dir: &Path) -> io::Result<u64> {

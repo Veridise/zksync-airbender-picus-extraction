@@ -1,5 +1,9 @@
 use std::str::FromStr;
 
+mod mute;
+
+pub use mute::mute;
+
 /// Tries to load an environment variable representing a value of T.
 ///
 /// If the variable couldn't be obtained for whatever reason the default value

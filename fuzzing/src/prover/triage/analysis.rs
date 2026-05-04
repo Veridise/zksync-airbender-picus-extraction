@@ -135,9 +135,9 @@ pub struct AnalysisTrace {
 }
 
 macro_rules! fingerprint_diff {
-    ($lhs:expr, $rhs:expr, $name:ident) => {
+    ($v:expr, $lhs:expr, $rhs:expr, $name:ident) => {
         if $lhs.$name != $rhs.$name {
-            return Some(CheckpointDiff::$name(format!(
+            $v.push(CheckpointDiff::$name(format!(
                 "{} fingerprint changed from {:?} to {:?}",
                 stringify!($name),
                 $lhs.$name,
@@ -178,23 +178,22 @@ impl AnalysisTrace {
     }
 
     /// Returns the earliest checkpoint where the replay traces differ.
-    pub fn diff(&self, other: &AnalysisTrace) -> Option<CheckpointDiff> {
+    pub fn diff(&self, other: &AnalysisTrace) -> Vec<CheckpointDiff> {
+        let mut diffs = vec![];
         // Checkpoints are ordered by prover progression so the first mismatch approximates the
         // earliest stage where the mutation had semantic effect on execution.
-        // The first mismatch is the only one we report because the goal is fast triage, not
-        // exhaustive tracing.
-        fingerprint_diff!(self, other, stage1);
-        fingerprint_diff!(self, other, stage2);
-        fingerprint_diff!(self, other, stage3);
-        fingerprint_diff!(self, other, proof);
+        fingerprint_diff!(diffs, self, other, stage1);
+        fingerprint_diff!(diffs, self, other, stage2);
+        fingerprint_diff!(diffs, self, other, stage3);
+        fingerprint_diff!(diffs, self, other, proof);
         if self.validator_outcome != other.validator_outcome {
-            return Some(CheckpointDiff::validator(format!(
+            diffs.push(CheckpointDiff::validator(format!(
                 "validator outcome changed from {:?} to {:?}",
                 self.validator_outcome, other.validator_outcome
             )));
         }
 
-        None
+        diffs
     }
 }
 
