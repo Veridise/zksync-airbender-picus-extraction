@@ -43,6 +43,8 @@ use sets::WriteSets;
 
 const TRACE_LEN_LOG2: usize = 24;
 const NUM_CYCLES_PER_CHUNK: usize = (1 << TRACE_LEN_LOG2) - 1;
+pub(crate) const MUL_DIV_TRACE_LEN_LOG2: usize = 23;
+pub(crate) const MUL_DIV_NUM_CYCLES_PER_CHUNK: usize = (1 << MUL_DIV_TRACE_LEN_LOG2) - 1;
 
 const SUPPORT_SIGNED: bool = false;
 const INITIAL_PC: u32 = 0;
@@ -88,14 +90,16 @@ where
         table_driver: &TableDriver<Mersenne31Field>,
         decoder_table_data: &[[Mersenne31Field; EXECUTOR_FAMILY_CIRCUIT_DECODER_TABLE_WIDTH]],
         aux_boundary_data: &'a [AuxArgumentsBoundaryValues],
+        trace_len: usize,
         worker: &Worker,
     ) -> Self {
-        let twiddles: Twiddles<_, A> = Twiddles::new(TRACE_LEN, worker);
-        let lde_precomputations = LdePrecomputations::new(TRACE_LEN, LDE_FACTOR, &[0, 1], worker);
+        let twiddles: Twiddles<_, A> = Twiddles::new(trace_len, worker);
+        let lde_precomputations =
+            LdePrecomputations::new(trace_len, LDE_FACTOR, &[0, 1], worker);
         let setup = SetupPrecomputations::from_tables_and_trace_len_with_decoder_table(
             table_driver,
             decoder_table_data,
-            TRACE_LEN,
+            trace_len,
             &compiled_circuit.setup_layout,
             &twiddles,
             &lde_precomputations,

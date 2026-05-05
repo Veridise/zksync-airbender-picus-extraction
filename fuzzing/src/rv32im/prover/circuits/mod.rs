@@ -34,6 +34,7 @@ use crate::rv32im::prover::circuits::traces::TracesFactory;
 use crate::rv32im::prover::factories::PreprocessingData;
 use crate::rv32im::prover::sets::ReadSets;
 use crate::rv32im::prover::sets::WriteSets;
+use crate::rv32im::prover::TRACE_LEN_LOG2;
 use crate::rv32im::prover::PreparedExecution;
 use crate::rv32im::prover::Prover;
 use crate::rv32im::prover::ProvingPayload;
@@ -129,6 +130,7 @@ pub(crate) trait CircuitProver<const CIRCUIT_FAMILY_IDX: u8> {
         (
             &'r Self::Oracle<'o>,
             fn(&mut SimpleWitnessProxy<'_, Self::Oracle<'o>>),
+            usize,
             &'r mut ReadSets,
             &'r mut WriteSets,
         ),
@@ -197,7 +199,13 @@ pub(crate) trait CircuitProver<const CIRCUIT_FAMILY_IDX: u8> {
         };
         let traces = Self::TracesFactory::new(
             &inputs.circuit,
-            (oracle, Self::witness_eval, read_sets, write_sets),
+            (
+                oracle,
+                Self::witness_eval,
+                self.num_cycles_per_chunk(),
+                read_sets,
+                write_sets,
+            ),
             table_driver,
             worker,
         );
@@ -209,6 +217,7 @@ pub(crate) trait CircuitProver<const CIRCUIT_FAMILY_IDX: u8> {
             table_driver,
             &inputs.decoder_table_data,
             &aux_data,
+            1 << self.trace_len_log2(),
             worker,
         ))
     }
@@ -343,6 +352,14 @@ pub(crate) trait CircuitProver<const CIRCUIT_FAMILY_IDX: u8> {
     ) -> Vec<AuxArgumentsBoundaryValues> {
         vec![]
     }
+
+    fn trace_len_log2(&self) -> usize {
+        TRACE_LEN_LOG2
+    }
+
+    fn num_cycles_per_chunk(&self) -> usize {
+        (1 << self.trace_len_log2()) - 1
+    }
 }
 
 trait NonMemoryCircuitProver<const N: u8> {
@@ -357,6 +374,14 @@ trait NonMemoryCircuitProver<const N: u8> {
         inputs: &ProofInputs<NonMemoryOpcodeTracingDataWithTimestamp>,
         proof: &UnrolledModeProof,
     ) -> Result<(), ()>;
+
+    fn default_pc_value_in_padding(&self) -> u32 {
+        4
+    }
+
+    fn trace_len_log2(&self) -> usize {
+        TRACE_LEN_LOG2
+    }
 }
 
 impl<const N: u8, T: NonMemoryCircuitProver<N>> CircuitProver<N> for T {
@@ -396,7 +421,8 @@ impl<const N: u8, T: NonMemoryCircuitProver<N>> CircuitProver<N> for T {
         NonMemoryCircuitOracle {
             inner,
             decoder_table,
-            default_pc_value_in_padding: 4,
+            default_pc_value_in_padding:
+                <Self as NonMemoryCircuitProver<N>>::default_pc_value_in_padding(self),
         }
     }
 
@@ -418,5 +444,9 @@ impl<const N: u8, T: NonMemoryCircuitProver<N>> CircuitProver<N> for T {
         proof: &UnrolledModeProof,
     ) -> Result<(), ()> {
         self.validate_proof(inputs, proof)
+    }
+
+    fn trace_len_log2(&self) -> usize {
+        <Self as NonMemoryCircuitProver<N>>::trace_len_log2(self)
     }
 }

@@ -19,8 +19,6 @@ use prover::DEFAULT_TRACE_PADDING_MULTIPLE;
 
 use crate::rv32im::prover::sets::ReadSets;
 use crate::rv32im::prover::sets::WriteSets;
-use crate::rv32im::prover::NUM_CYCLES_PER_CHUNK;
-
 pub trait TracesFactory<I> {
     type FullTrace;
     type MemoryTrace;
@@ -49,6 +47,7 @@ impl<O: Oracle<Mersenne31Field>>
     TracesFactory<(
         &O,
         fn(&mut SimpleWitnessProxy<'_, O>),
+        usize,
         &mut ReadSets,
         &mut WriteSets,
     )> for FullAndMemTraces<Global, DEFAULT_TRACE_PADDING_MULTIPLE>
@@ -60,9 +59,10 @@ impl<O: Oracle<Mersenne31Field>>
 
     fn new(
         circuit: &CompiledCircuitArtifact<Mersenne31Field>,
-        (oracle, witness_eval, read_sets, write_sets): (
+        (oracle, witness_eval, num_cycles_per_chunk, read_sets, write_sets): (
             &O,
             fn(&mut SimpleWitnessProxy<'_, O>),
+            usize,
             &mut ReadSets,
             &mut WriteSets,
         ),
@@ -71,7 +71,7 @@ impl<O: Oracle<Mersenne31Field>>
     ) -> Self {
         let memory_trace = evaluate_memory_witness_for_executor_family::<_, Global>(
             circuit,
-            NUM_CYCLES_PER_CHUNK,
+            num_cycles_per_chunk,
             oracle,
             worker,
             Global,
@@ -80,7 +80,7 @@ impl<O: Oracle<Mersenne31Field>>
         let full_trace = evaluate_witness_for_executor_family::<_, Global>(
             circuit,
             witness_eval,
-            NUM_CYCLES_PER_CHUNK,
+            num_cycles_per_chunk,
             oracle,
             table_driver,
             worker,

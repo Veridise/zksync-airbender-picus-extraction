@@ -100,6 +100,10 @@ impl NonMemoryCircuitProver<JUMP_BRANCH_SLT_CIRCUIT_FAMILY_IDX> for JumpBranchSl
     ) -> Result<(), ()> {
         JumpBranchSltCircuit::validate_proof(inputs, proof)
     }
+
+    fn default_pc_value_in_padding(&self) -> u32 {
+        0
+    }
 }
 
 impl Prover {

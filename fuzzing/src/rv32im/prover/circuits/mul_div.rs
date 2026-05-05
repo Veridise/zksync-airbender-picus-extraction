@@ -28,8 +28,8 @@ use crate::rv32im::prover::sets::ReadSets;
 use crate::rv32im::prover::sets::WriteSets;
 use crate::rv32im::prover::PreparedExecution;
 use crate::rv32im::prover::Prover;
+use crate::rv32im::prover::MUL_DIV_TRACE_LEN_LOG2;
 use crate::rv32im::prover::SUPPORT_SIGNED;
-use crate::rv32im::prover::TRACE_LEN_LOG2;
 use crate::rv32im::vm::VMSnapshot;
 
 pub struct MulDivCircuit;
@@ -65,7 +65,7 @@ impl NonMemoryCircuitProver<MUL_DIV_CIRCUIT_FAMILY_IDX> for MulDivCircuit {
             },
             &|cs| mul_div_circuit_with_preprocessed_bytecode::<_, _, SUPPORT_SIGNED>(cs),
             1 << 20,
-            TRACE_LEN_LOG2,
+            MUL_DIV_TRACE_LEN_LOG2,
         )
     }
 
@@ -108,6 +108,10 @@ impl NonMemoryCircuitProver<MUL_DIV_CIRCUIT_FAMILY_IDX> for MulDivCircuit {
     ) -> Result<(), ()> {
         MulDivCircuit::validate_proof(inputs, proof)
     }
+
+    fn trace_len_log2(&self) -> usize {
+        MUL_DIV_TRACE_LEN_LOG2
+    }
 }
 
 impl Prover {
@@ -129,5 +133,42 @@ impl Prover {
             self,
             self.worker(),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prover::cs::tables::TableDriver;
+
+    use crate::rv32im::binary::Binary;
+    use crate::rv32im::prover::prepare_execution;
+    use crate::rv32im::vm::VM;
+
+    #[test]
+    #[ignore = "slow reproducer for empty MUL/DIV proof verification"]
+    fn empty_mul_div_proof_fails_generated_verifier() {
+        let binary = include_bytes!("../../../../tests/compliance-tests-programs/I-add-00.bin");
+        let text = include_bytes!("../../../../tests/compliance-tests-programs/I-add-00.text");
+
+        let binary = Binary::new(binary, Some(text));
+        let mut vm = VM::new(&binary);
+        vm.run();
+
+        let prover = Prover::new();
+        let prepared = prepare_execution(vm.snapshot(), prover.worker());
+
+        let mut table_driver = TableDriver::new();
+        let inputs = MulDivCircuit.create_proof_input(vm.snapshot(), &prepared, &mut table_driver);
+        assert!(inputs.buffer.is_empty(), "I-add should not exercise MUL/DIV");
+
+        let proof = MulDivCircuit.prove_from_inputs(inputs.clone(), &prover, prover.worker());
+
+        assert_eq!(
+            proof.permutation_grand_product_accumulator,
+            Mersenne31Quartic::ONE
+        );
+        assert!(proof.delegation_argument_accumulator.is_none());
+        assert_eq!(MulDivCircuit::validate_proof(&inputs, &proof), Err(()));
     }
 }
