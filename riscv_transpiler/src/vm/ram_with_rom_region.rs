@@ -2,9 +2,7 @@ use std::alloc::Allocator;
 
 use common_constants::TimestampScalar;
 
-use crate::vm::RamPeek;
-use crate::vm::Register;
-use crate::vm::RAM;
+use crate::vm::{RamPeek, Register, RAM};
 
 pub struct RamWithRomRegion<const ROM_BOUND_SECOND_WORD_BITS: usize> {
     pub(crate) backing: Vec<Register>,
@@ -31,61 +29,12 @@ impl<const ROM_BOUND_SECOND_WORD_BITS: usize> RamWithRomRegion<ROM_BOUND_SECOND_
             dst.value = *src;
         }
 
-        let s = Self { backing };
-        eprintln!(
-            "backing ({}) is at {:?}",
-            s.backing.len(),
-            s.backing.as_ptr()
-        );
-        s
-    }
-
-    /// Prints to stderr a hexdump the last 20 bytes of RAM + the extra amount of words.
-    pub fn dump_beyond(&self, extra: usize) {
-        // let backing_end = unsafe { self.backing.as_ptr().add(self.backing.len()) };
-        // let last_5_ptr = self.backing[(self.backing.len() - 5)..].as_ptr();
-        // let raw = unsafe {
-        //    std::slice::from_raw_parts(
-        //        last_5_ptr as *const u8,
-        //        (5 + extra) * std::mem::size_of::<Register>(),
-        //    )
-        //};
-        // for chunk in raw.chunks(16) {
-        //    eprint!("{:?}: ", chunk.as_ptr());
-        //    for byte in &chunk[0..8] {
-        //        eprint!("{byte:02x}");
-        //        if std::ptr::from_ref(byte) < backing_end as *const u8 {
-        //            eprint!("* ");
-        //        } else {
-        //            eprint!("  ");
-        //        }
-        //    }
-        //    eprint!(" ");
-        //    for byte in &chunk[8..16] {
-        //        eprint!("{byte:02x}");
-        //        if std::ptr::from_ref(byte) < backing_end as *const u8 {
-        //            eprint!("* ");
-        //        } else {
-        //            eprint!("  ");
-        //        }
-        //    }
-        //    eprint!("|");
-        //    for byte in chunk {
-        //        let c = char::from(*byte);
-        //        if c.is_ascii() && !c.is_ascii_control() {
-        //            eprint!("{c}");
-        //        } else {
-        //            eprint!(".");
-        //        }
-        //    }
-        //    eprintln!("|");
-        //}
+        Self { backing }
     }
 }
 
-// NOTE: we will not branch and special-case here to model ROM reads as reads from address 0 of 0
-// value, and witness post-processing can track it. Instead we will only track last access for
-// snapshotting purposes
+// NOTE: we will not branch and special-case here to model ROM reads as reads from address 0 of 0 value,
+// and witness post-processing can track it. Instead we will only track last access for snapshotting purposes
 
 impl<const ROM_BOUND_SECOND_WORD_BITS: usize> RamPeek
     for RamWithRomRegion<ROM_BOUND_SECOND_WORD_BITS>
@@ -112,9 +61,8 @@ impl<const ROM_BOUND_SECOND_WORD_BITS: usize> RAM for RamWithRomRegion<ROM_BOUND
 
     #[inline(always)]
     fn read_word(&mut self, address: u32, timestamp: TimestampScalar) -> (TimestampScalar, u32) {
-        // NOTE: for simplicity of the JIT based simulator we will avoid masking address into 0 here
-        // for ROM access, and instead will give a timestamp of requested address. In
-        // replayer we will mask a value
+        // NOTE: for simplicity of the JIT based simulator we will avoid masking address into 0 here for ROM access,
+        // and instead will give a timestamp of requested address. In replayer we will mask a value
         debug_assert_eq!(address % 4, 0);
         unsafe {
             let word_idx = (address / 4) as usize;
@@ -126,8 +74,7 @@ impl<const ROM_BOUND_SECOND_WORD_BITS: usize> RAM for RamWithRomRegion<ROM_BOUND
 
             debug_assert!(read_timestamp < timestamp | 1);
 
-            // println!("Read at address 0x{:08x} at timestamp {} into value {} and read timestamp
-            // {}", address, timestamp, value, read_timestamp);
+            // println!("Read at address 0x{:08x} at timestamp {} into value {} and read timestamp {}", address, timestamp, value, read_timestamp);
 
             // NOTE: value here will allow us to replay based on log only,
             // but timestamp will allow us to use it later on for witness gen
@@ -149,8 +96,8 @@ impl<const ROM_BOUND_SECOND_WORD_BITS: usize> RAM for RamWithRomRegion<ROM_BOUND
     //         debug_assert!(word_idx < self.backing.len());
     //         let value;
     //         let read_timestamp;
-    //         if word_idx < (1 << (16 + ROM_BOUND_SECOND_WORD_BITS)) / core::mem::size_of::<u32>()
-    // {             // value is from real slot, but we mask the access
+    //         if word_idx < (1 << (16 + ROM_BOUND_SECOND_WORD_BITS)) / core::mem::size_of::<u32>() {
+    //             // value is from real slot, but we mask the access
     //             value = self.backing.get_unchecked(word_idx).value;
     //             // Track access as reading 0 slot
     //             let zero_slot = self.backing.get_unchecked_mut(0);
@@ -165,8 +112,7 @@ impl<const ROM_BOUND_SECOND_WORD_BITS: usize> RAM for RamWithRomRegion<ROM_BOUND
 
     //         debug_assert!(read_timestamp < timestamp | 1);
 
-    //         // println!("Read at address 0x{:08x} at timestamp {} into value {} and read
-    // timestamp {}", address, timestamp, value, read_timestamp);
+    //         // println!("Read at address 0x{:08x} at timestamp {} into value {} and read timestamp {}", address, timestamp, value, read_timestamp);
 
     //         // NOTE: value here will allow us to replay based on log only,
     //         // but timestamp will allow us to use it later on for witness gen
@@ -197,8 +143,7 @@ impl<const ROM_BOUND_SECOND_WORD_BITS: usize> RAM for RamWithRomRegion<ROM_BOUND
             slot.value = word;
             slot.timestamp = timestamp | 2;
 
-            // println!("Write at address 0x{:08x} at timestamp {} of value {} into value {} and
-            // read timestamp {}", address, timestamp, word, old_value, read_timestamp);
+            // println!("Write at address 0x{:08x} at timestamp {} of value {} into value {} and read timestamp {}", address, timestamp, word, old_value, read_timestamp);
 
             (read_timestamp, old_value)
         }
@@ -233,8 +178,8 @@ impl<const ROM_BOUND_SECOND_WORD_BITS: usize> RamWithRomRegion<ROM_BOUND_SECOND_
                         //     if address != 0 {
                         //         assert_eq!(
                         //             word.timestamp, 0,
-                        //             "non-zero access timestamp in ROM region at address
-                        // 0x{:08x}",             address
+                        //             "non-zero access timestamp in ROM region at address 0x{:08x}",
+                        //             address
                         //         );
                         //     }
                         // }

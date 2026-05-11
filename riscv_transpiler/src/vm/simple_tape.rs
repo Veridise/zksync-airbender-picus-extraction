@@ -1,5 +1,4 @@
-use crate::ir::Instruction;
-use crate::vm::InstructionTape;
+use crate::{ir::Instruction, vm::InstructionTape};
 
 pub struct SimpleTape {
     instructions: Box<[Instruction]>,
@@ -7,15 +6,9 @@ pub struct SimpleTape {
 
 impl SimpleTape {
     pub fn new(instructions: &[Instruction]) -> Self {
-        let t = Self {
+        Self {
             instructions: instructions.to_vec().into_boxed_slice(),
-        };
-        eprintln!(
-            "instructions ({}) is at {:?}",
-            t.instructions.len(),
-            t.instructions.as_ptr()
-        );
-        t
+        }
     }
 }
 

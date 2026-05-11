@@ -1,6 +1,5 @@
 use super::*;
-use crate::definitions::EXECUTOR_FAMILY_CIRCUIT_DECODER_TABLE_WIDTH;
-use crate::definitions::REGISTER_SIZE;
+use crate::definitions::{EXECUTOR_FAMILY_CIRCUIT_DECODER_TABLE_WIDTH, REGISTER_SIZE};
 use field::PrimeField;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
