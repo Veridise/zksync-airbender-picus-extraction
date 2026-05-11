@@ -182,9 +182,8 @@ pub fn preprocess_bytecode<OPT: DecodingOptions>(bytecode: &[u32]) -> Vec<Instru
                     }
                     _ => panic_or_illegal!(
                         illegal_instr,
-                        "Unknown opcode 0x{:08x} at PC = 0x{:08x}",
+                        "Unknown opcode 0x{:08x}",
                         opcode,
-                        i * 4
                     ),
                 };
 
@@ -384,9 +383,8 @@ pub fn preprocess_bytecode<OPT: DecodingOptions>(bytecode: &[u32]) -> Vec<Instru
                         ),
                         _ => panic_or_illegal!(
                             illegal_instr,
-                            "Unknown opcode 0x{:08x} at PC = 0x{:08x}",
+                            "Unknown opcode 0x{:08x}",
                             opcode,
-                            i * 4
                         ),
                     }
                 }
@@ -458,9 +456,8 @@ pub fn preprocess_bytecode<OPT: DecodingOptions>(bytecode: &[u32]) -> Vec<Instru
                     }
                     _ => panic_or_illegal!(
                         illegal_instr,
-                        "Unknown opcode 0x{:08x} at PC = 0x{:08x}",
+                        "Unknown opcode 0x{:08x}",
                         opcode,
-                        i * 4
                     ),
                 }
             }
@@ -515,9 +512,8 @@ pub fn preprocess_bytecode<OPT: DecodingOptions>(bytecode: &[u32]) -> Vec<Instru
                     }
                     _ => panic_or_illegal!(
                         illegal_instr,
-                        "Unknown opcode 0x{:08x} at PC = 0x{:08x}",
+                        "Unknown opcode 0x{:08x}",
                         opcode,
-                        i * 4
                     ),
                 }
             }
@@ -581,7 +577,6 @@ pub fn preprocess_bytecode<OPT: DecodingOptions>(bytecode: &[u32]) -> Vec<Instru
                     } else {
                         #[cfg(feature = "fuzzing-support")]
                         {
-                            eprintln!("ERROR: Around line 597 panic at PC = 0x{:08x}", i * 4);
                             illegal_instr
                         }
                         #[cfg(not(feature = "fuzzing-support"))]
@@ -711,9 +706,8 @@ pub fn preprocess_bytecode<OPT: DecodingOptions>(bytecode: &[u32]) -> Vec<Instru
                 } else {
                     panic_or_illegal!(
                         illegal_instr,
-                        "Unknown system funct3 enc 0x{:08x} at PC = 0x{:08x}",
+                        "Unknown system funct3 enc 0x{:08x}",
                         funct3,
-                        i * 4
                     )
                 };
 
@@ -721,7 +715,6 @@ pub fn preprocess_bytecode<OPT: DecodingOptions>(bytecode: &[u32]) -> Vec<Instru
             }
             _ => {
                 // just some opcode of unknown nature, may be padding or whatever. Just invalid
-                eprintln!("ERROR: Unrecognized instruction at PC = 0x{:08x}", i * 4);
                 illegal_instr
             }
         };
