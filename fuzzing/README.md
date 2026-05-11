@@ -132,6 +132,8 @@ bash fuzzing/tests/compliance-tests-programs/extract-bins.sh
 ```
 
 This performs the final preparation step by extracting the `.bin` and `.text` files consumed by the tests.
+The command above may have to be executed even if the `.elf` files are not regenerated since the `.bin` and `.text` files are
+ignored by git.
 
 ### Running the tests
 
