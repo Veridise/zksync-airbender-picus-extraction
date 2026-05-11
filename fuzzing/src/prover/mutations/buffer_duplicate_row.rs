@@ -6,7 +6,7 @@ use crate::prover::mutations::choose_distinct_indices;
 use crate::prover::mutations::Mutator;
 use crate::rv32im::prover::circuits::ProofInputs;
 
-fn duplicate_row<T: Copy>(v: &mut Vec<T>, rng: &mut StdRng) {
+fn duplicate_row<T: Copy>(v: &mut [T], rng: &mut StdRng) {
     if let Some((src, dst)) = choose_distinct_indices(v.len(), rng) {
         v[dst] = v[src];
     }

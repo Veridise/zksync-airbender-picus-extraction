@@ -8,7 +8,6 @@ use crate::prover::crashes::CrashArtifact;
 use crate::prover::crashes::CrashStep;
 use crate::prover::seeds::load_seed_case_from_cache;
 use crate::prover::seeds::SeedCase;
-use crate::prover::seeds::StoredProofInputs;
 use crate::prover::triage::analysis::analyze_once;
 use crate::prover::triage::analysis::AnalysisTrace;
 use crate::prover::triage::analysis::CheckpointDiff;
@@ -31,9 +30,6 @@ pub struct TriageCli {
     /// Emit the triage report as JSON after the human-readable summary.
     #[arg(long, default_value_t = false)]
     pub json: bool,
-    /// Number of replays to run for each input before trusting the comparison.
-    #[arg(long, default_value_t = 2)]
-    pub stability_runs: usize,
 }
 
 /// Runs offline crash triage against a persisted crash artifact and the cached base seed corpus.
@@ -58,9 +54,7 @@ pub fn run(cli: TriageCli) -> anyhow::Result<()> {
     log::info!("Found crash seed: {} / {}", base.seed_program, base.circuit);
 
     let registry = CircuitRegistry::new();
-    let stability_runs = cli.stability_runs.max(1);
-    log::info!("Number of runs per side: {stability_runs}");
-    let report = triage_crash(&registry, &crash, &base, stability_runs);
+    let report = triage_crash(&registry, &crash, &base);
 
     if cli.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -76,22 +70,29 @@ fn triage_crash(
     registry: &CircuitRegistry,
     crash: &CrashArtifact,
     base: &SeedCase,
-    stability_runs: usize,
 ) -> TriageReport {
-    // Replay both sides multiple times first. If either side is unstable under replay we do not
-    // trust any later diff and classify the crash as inconclusive instead.
-    let base_trace =
-        match stable_trace_for_input(registry, &base.base_input, stability_runs, "seed") {
-            Ok(trace) => trace,
-            Err(instability) => return TriageReport::inconclusive(base, crash, instability),
-        };
-    let mutated_trace =
-        match stable_trace_for_input(registry, &crash.mutated_input, stability_runs, "mutated") {
-            Ok(trace) => trace,
-            Err(instability) => return TriageReport::inconclusive(base, crash, instability),
-        };
+    let base_trace = match analyze_once(registry, &base.base_input) {
+        Ok(trace) => trace,
+        Err(err) => {
+            return TriageReport::inconclusive(
+                base,
+                crash,
+                CheckpointDiff::proof(format!("analysis replay failed for base input: {err}")),
+            )
+        }
+    };
+    let mutated_trace = match analyze_once(registry, &crash.mutated_input) {
+        Ok(trace) => trace,
+        Err(err) => {
+            return TriageReport::inconclusive(
+                base,
+                crash,
+                CheckpointDiff::proof(format!("analysis replay failed for mutated input: {err}")),
+            )
+        }
+    };
 
-    log::info!("Runs completed!");
+    log::info!("Run completed!");
     let diff = base_trace.diff(&mutated_trace);
     TriageReport::new(
         classify_verdict(crash.step, &diff),
@@ -103,22 +104,6 @@ fn triage_crash(
     )
 }
 
-/// Replays one fixed input multiple times and rejects it if the compact trace is not stable.
-fn stable_trace_for_input(
-    registry: &CircuitRegistry,
-    input: &StoredProofInputs,
-    runs: usize,
-    descr: &str,
-) -> Result<AnalysisTrace, CheckpointDiff> {
-    log::info!("Run 1 for {descr}...");
-    // The triage comparison is only useful if replay is deterministic for a fixed input.
-    // We therefore require every run of the same input to produce the exact same compact trace.
-    let first = analyze_once(registry, input)
-        .map_err(|err| CheckpointDiff::proof(format!("analysis replay failed: {err}")))?;
-
-    Ok(first)
-}
-
 /// Classifies the crash using the recorded crash step and the first observed divergence.
 fn classify_verdict(step: CrashStep, diff: &[CheckpointDiff]) -> TriageVerdict {
     // Verdicts are step-specific:
@@ -127,9 +112,9 @@ fn classify_verdict(step: CrashStep, diff: &[CheckpointDiff]) -> TriageVerdict {
     //   under test is still the prover: identical proofs from semantically different internal
     //   executions are interesting and should not be discarded as false positives
     match step {
-        CrashStep::Prover | CrashStep::Validator => match diff.as_ref() {
-            &[_, ..] => TriageVerdict::PotentiallyReal,
-            &[] => TriageVerdict::FalsePositive,
+        CrashStep::Prover | CrashStep::Validator => match diff {
+            [_, ..] => TriageVerdict::PotentiallyReal,
+            [] => TriageVerdict::FalsePositive,
         },
     }
 }
@@ -142,9 +127,8 @@ mod tests {
 
     use super::*;
     use crate::prover::circuits::CircuitKind;
-    use crate::prover::crashes::BugType;
     use crate::prover::seeds::CacheEntry;
-    use crate::prover::triage::analysis::oracle::OracleShapeSummary;
+    use crate::prover::seeds::StoredProofInputs;
 
     #[test]
     fn validator_step_keeps_stage_level_divergence() {

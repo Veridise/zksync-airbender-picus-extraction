@@ -6,7 +6,7 @@ use crate::prover::mutations::choose_distinct_indices;
 use crate::prover::mutations::Mutator;
 use crate::rv32im::prover::circuits::ProofInputs;
 
-fn swap_rows<T>(v: &mut Vec<T>, rng: &mut StdRng) {
+fn swap_rows<T>(v: &mut [T], rng: &mut StdRng) {
     if let Some((a, b)) = choose_distinct_indices(v.len(), rng) {
         v.swap(a, b);
     }

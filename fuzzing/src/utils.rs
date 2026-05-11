@@ -1,9 +1,9 @@
-use std::str::FromStr;
-
 mod mute;
 
+#[allow(unused)]
 pub use mute::mute;
 
+#[allow(unused)]
 /// Tries to load an environment variable representing a value of T.
 ///
 /// If the variable couldn't be obtained for whatever reason the default value
@@ -15,8 +15,8 @@ pub use mute::mute;
 /// If the [`FromStr`] conversion fails.
 pub fn env_conf<T>(var: &str, default_value: T) -> T
 where
-    T: FromStr,
-    <T as FromStr>::Err: std::fmt::Display,
+    T: std::str::FromStr,
+    <T as std::str::FromStr>::Err: std::fmt::Display,
 {
     std::env::var(var)
         .ok()

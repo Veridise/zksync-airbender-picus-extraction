@@ -68,17 +68,9 @@ macro_rules! M {
     };
 }
 
-macro_rules! Zicsr {
-    ($name:ident) => {
-        concat!("Zicsr-", stringify!($name), "-00")
-    };
-}
-
 #[rstest]
 #[case::I_add(include_bin!(I!(add)), include_text!(I!(add)))]
-//#[case::I_addi(include_bin!(I!(addi)), include_text!(I!(addi)))]
 #[case::I_addi(include_bin!(I!(addi_patched)), include_text!(I!(addi_patched)))]
-//#[case::I_and(include_bin!(I!(and)), include_text!(I!(and)))]
 #[case::I_and(include_bin!(I!(and_patched)), include_text!(I!(and_patched)))]
 #[case::I_andi(include_bin!(I!(andi)), include_text!(I!(andi)))]
 #[case::I_auipc(include_bin!(I!(auipc)), include_text!(I!(auipc)))]
@@ -104,7 +96,6 @@ macro_rules! Zicsr {
 #[case::I_sll(include_bin!(I!(sll)), include_text!(I!(sll)))]
 #[case::I_slli(include_bin!(I!(slli)), include_text!(I!(slli)))]
 #[case::I_slt(include_bin!(I!(slt)), include_text!(I!(slt)))]
-//#[case::I_slti(include_bin!(I!(slti)), include_text!(I!(slti)))]
 #[case::I_slti(include_bin!(I!(slti_patched)), include_text!(I!(slti_patched)))]
 #[case::I_sltiu(include_bin!(I!(sltiu)), include_text!(I!(sltiu)))]
 #[case::I_sltu(include_bin!(I!(sltu)), include_text!(I!(sltu)))]
@@ -128,9 +119,7 @@ fn test_unicorn<const N: usize, const M: usize>(#[case] binary: &[u8; N], #[case
 
 #[rstest]
 #[case::I_add(include_bin!(I!(add)), include_text!(I!(add)))] // Passes
-//#[case::I_addi(include_bin!(I!(addi)), include_text!(I!(addi)))]
 #[case::I_addi(include_bin!(I!(addi_patched)), include_text!(I!(addi_patched)))]
-//#[case::I_and(include_bin!(I!(and)), include_text!(I!(and)))]
 #[case::I_and(include_bin!(I!(and_patched)), include_text!(I!(and_patched)))]
 #[case::I_andi(include_bin!(I!(andi)), include_text!(I!(andi)))] // Passes
 #[case::I_auipc(include_bin!(I!(auipc)), include_text!(I!(auipc)))] // Passes
@@ -156,7 +145,6 @@ fn test_unicorn<const N: usize, const M: usize>(#[case] binary: &[u8; N], #[case
 #[case::I_sll(include_bin!(I!(sll)), include_text!(I!(sll)))] // Passes
 #[case::I_slli(include_bin!(I!(slli)), include_text!(I!(slli)))] // Passes
 #[case::I_slt(include_bin!(I!(slt)), include_text!(I!(slt)))] // Passes
-//#[case::I_slti(include_bin!(I!(slti)), include_text!(I!(slti)))]
 #[case::I_slti(include_bin!(I!(slti_patched)), include_text!(I!(slti_patched)))]
 #[case::I_sltiu(include_bin!(I!(sltiu)), include_text!(I!(sltiu)))] // Passes
 #[case::I_sltu(include_bin!(I!(sltu)), include_text!(I!(sltu)))] // Passes
@@ -178,15 +166,5 @@ fn test_airbender<const N: usize, const M: usize>(
 ) {
     run_compliance_test::<Infallible>("Airbender", || {
         Ok(run_on_airbender::<false>(binary, Some(text)))
-    })
-}
-
-#[test]
-fn test_airbender_udiv_only() {
-    run_compliance_test::<Infallible>("Airbender udiv", || {
-        Ok(run_on_airbender::<false>(
-            include_bin!(M!(divu)),
-            Some(include_text!(M!(divu))),
-        ))
     })
 }

@@ -58,8 +58,7 @@ rstest = "0.26"
 simplelog = {version = "0.12", features = ["test"] }
 
 [features]
-default = ["prover", "mute"]
-# default = []
+default = []
 prover = ["prover/test"]
 prover-messages = []
 mute = ["dep:libc"]

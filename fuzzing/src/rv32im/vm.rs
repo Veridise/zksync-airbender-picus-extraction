@@ -128,7 +128,9 @@ impl VM {
             ram: &self.ram,
             state: self.state,
             snapshotter: &self.snapshotter,
+            #[cfg(feature = "prover")]
             binary: &self.binary,
+            #[cfg(feature = "prover")]
             text: self.text.as_deref(),
             tape: &self.tape,
         }

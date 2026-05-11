@@ -1,7 +1,5 @@
 use prover::cs::cs::oracle::ExecutorFamilyDecoderData;
 use prover::cs::definitions::TimestampData;
-use prover::field::Mersenne31Field;
-use prover::field::PrimeField;
 use prover::risc_v_simulator::machine_mode_only_unrolled::MemoryOpcodeTracingDataWithTimestamp;
 use prover::risc_v_simulator::machine_mode_only_unrolled::NonMemoryOpcodeTracingDataWithTimestamp;
 use prover::risc_v_simulator::machine_mode_only_unrolled::MEM_LOAD_TRACE_DATA_MARKER;
@@ -19,7 +17,6 @@ use crate::prover::mutations::decoder_entry_mutator::DecoderEntryMutator;
 use crate::prover::mutations::decoder_row_swap_mutator::DecoderRowSwapMutator;
 use crate::prover::mutations::initial_pc_mutator::InitialPcMutator;
 use crate::prover::mutations::mem_discr_flip_mutator::MemDiscrFlipMutator;
-use crate::prover::mutations::nop::NoOpMutator;
 use crate::prover::mutations::read_timestamp_mutator::ReadTimestampMutator;
 use crate::prover::mutations::trace_value_mutator::TraceValueMutator;
 use crate::prover::seeds::SeedCase;
@@ -32,15 +29,11 @@ mod buffer_delete_row;
 mod buffer_duplicate_row;
 mod buffer_insert_clone_row;
 mod buffer_swap_rows;
-mod buffer_truncate_tail;
 mod cycle_timestamp_mutator;
 mod decoder_entry_mutator;
 mod decoder_row_swap_mutator;
 mod initial_pc_mutator;
 mod mem_discr_flip_mutator;
-mod nop;
-mod preprocessed_table_cell_mutator;
-mod preprocessed_table_row_swap_mutator;
 mod read_timestamp_mutator;
 mod trace_value_mutator;
 
@@ -132,16 +125,6 @@ pub struct MutatorRegistry {
 }
 
 impl MutatorRegistry {
-    /// Empty registry used for seed validation.
-    ///
-    /// It actually has one mutator, the [`NoOpMutator`].
-    pub fn empty() -> Self {
-        Self {
-            mutators: vec![Box::new(NoOpMutator)],
-            max_mutations: 0,
-        }
-    }
-
     pub fn new() -> Self {
         Self {
             mutators: vec![
@@ -149,7 +132,6 @@ impl MutatorRegistry {
                 Box::new(BufferDuplicateRowMutator),
                 Box::new(BufferDeleteRowMutator),
                 Box::new(BufferInsertCloneRowMutator),
-                // Box::new(BufferTruncateTailMutator),
                 Box::new(CycleTimestampMutator),
                 Box::new(ReadTimestampMutator),
                 Box::new(InitialPcMutator),
@@ -157,8 +139,6 @@ impl MutatorRegistry {
                 Box::new(MemDiscrFlipMutator),
                 Box::new(DecoderEntryMutator),
                 Box::new(DecoderRowSwapMutator),
-                // Box::new(PreprocessedTableCellMutator),
-                // Box::new(PreprocessedTableRowSwapMutator),
             ],
             max_mutations: env_conf("MAX_MUTATIONS", 1),
         }
@@ -173,8 +153,6 @@ impl MutatorRegistry {
     }
 
     /// Randomly applies one or more mutations to an input.
-    ///
-    /// Do NOT use this function with an empty registry!
     pub fn apply_mutations(&self, seed_case: &SeedCase, rng: &mut StdRng) -> MutatedInput {
         let range = 1..=self.max_mutations;
         assert!(!range.is_empty(), "max_mutations < 1");
@@ -344,21 +322,6 @@ pub(crate) fn mutate_decoder_row(input: &mut Vec<ExecutorFamilyDecoderData>, rng
     if let Some(entry) = choose_row_mut(input.as_mut_slice(), rng) {
         mutate_decoder_entry(entry, rng);
     }
-}
-
-pub(crate) fn mutate_preprocessed_table_cell(
-    table: &mut Vec<[Mersenne31Field; 10]>,
-    rng: &mut StdRng,
-) {
-    let Some(row) = choose_row_mut(table.as_mut_slice(), rng) else {
-        return;
-    };
-
-    let cell_idx = rng.random_range(0..row.len());
-    let value = &mut row[cell_idx];
-    let mut scalar = value.as_u64_reduced() as u32;
-    mutate_u32(&mut scalar, rng);
-    *value = Mersenne31Field::from_nonreduced_u32(scalar);
 }
 
 pub(crate) fn mutate_non_mem_trace_row(

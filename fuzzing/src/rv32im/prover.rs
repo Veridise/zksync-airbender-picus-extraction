@@ -44,7 +44,6 @@ use sets::WriteSets;
 const TRACE_LEN_LOG2: usize = 24;
 const NUM_CYCLES_PER_CHUNK: usize = (1 << TRACE_LEN_LOG2) - 1;
 pub(crate) const MUL_DIV_TRACE_LEN_LOG2: usize = 23;
-pub(crate) const MUL_DIV_NUM_CYCLES_PER_CHUNK: usize = (1 << MUL_DIV_TRACE_LEN_LOG2) - 1;
 
 const SUPPORT_SIGNED: bool = false;
 const INITIAL_PC: u32 = 0;
@@ -94,8 +93,7 @@ where
         worker: &Worker,
     ) -> Self {
         let twiddles: Twiddles<_, A> = Twiddles::new(trace_len, worker);
-        let lde_precomputations =
-            LdePrecomputations::new(trace_len, LDE_FACTOR, &[0, 1], worker);
+        let lde_precomputations = LdePrecomputations::new(trace_len, LDE_FACTOR, &[0, 1], worker);
         let setup = SetupPrecomputations::from_tables_and_trace_len_with_decoder_table(
             table_driver,
             decoder_table_data,
@@ -209,6 +207,8 @@ impl Prover {
 pub(crate) fn prepare_execution(snapshot: VMSnapshot, worker: &Worker) -> PreparedExecution {
     #[cfg(feature = "prover-messages")]
     {
+        use crate::rv32im::prover::common_constants::INITIAL_TIMESTAMP;
+        use crate::rv32im::prover::common_constants::TIMESTAMP_STEP;
         let exact_cycles_passed = (snapshot.state().timestamp - INITIAL_TIMESTAMP) / TIMESTAMP_STEP;
 
         println!("Passed exactly {} cycles", exact_cycles_passed);

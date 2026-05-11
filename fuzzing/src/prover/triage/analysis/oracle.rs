@@ -3,6 +3,7 @@ use prover::risc_v_simulator::machine_mode_only_unrolled::NonMemoryOpcodeTracing
 
 use crate::prover::circuits::CircuitKind;
 use crate::prover::seeds::StoredProofInputs;
+#[cfg(feature = "prover")]
 use crate::rv32im::prover::circuits::ProofInputs;
 
 /// Compact structural facts about the input seen before deep proving artifacts are produced.
@@ -44,6 +45,7 @@ impl OracleShapeSummary {
         }
     }
 
+    #[allow(dead_code)]
     #[cfg(test)]
     pub fn new(
         circuit: CircuitKind,

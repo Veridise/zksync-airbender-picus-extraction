@@ -1,4 +1,5 @@
 #[cfg(unix)]
+#[cfg(feature = "mute")]
 mod imp {
     use libc::c_int;
     use libc::STDERR_FILENO;

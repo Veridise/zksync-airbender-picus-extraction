@@ -236,7 +236,7 @@ pub fn analyze_once(
 enum AnalysisAttempt {
     Crash,
     Success {
-        semantics: ReplaySemantics,
+        semantics: Box<ReplaySemantics>,
         validator_outcome: BugType,
     },
 }
@@ -290,8 +290,11 @@ impl CircuitRegistry {
     {
         let prover = Prover::new();
         log::info!("Generating proof...");
-        let semantics =
-            cprover.prove_from_inputs_with_semantics(inputs.clone(), &prover, prover.worker());
+        let semantics = Box::new(cprover.prove_from_inputs_with_semantics(
+            inputs.clone(),
+            &prover,
+            prover.worker(),
+        ));
         log::info!("Validating proof...");
         let validator_outcome = BugType::classify(validate(inputs, semantics.proof()));
         AnalysisAttempt::Success {

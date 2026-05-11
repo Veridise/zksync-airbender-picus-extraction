@@ -3,6 +3,7 @@
 #![feature(generic_const_exprs)]
 
 mod afl;
+#[cfg(feature = "prover")]
 pub mod prover;
 pub mod rv32im;
 mod utils;
